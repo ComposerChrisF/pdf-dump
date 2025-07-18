@@ -34,10 +34,19 @@ fn main() {
         }
     };
 
-    let visited_for_print = BTreeSet::new();
-
     println!("Trailer:");
-    print_object(&Object::Dictionary(doc.trailer.clone()), &doc, &visited_for_print, 1, args.decode_streams, args.truncate_binary_streams, false);
+    let visited_for_print = BTreeSet::new();
+    let mut trailer_refs = BTreeSet::new();
+    print_object(
+        &Object::Dictionary(doc.trailer.clone()),
+        &doc,
+        &visited_for_print,
+        1,
+        args.decode_streams,
+        args.truncate_binary_streams,
+        false,
+        &mut trailer_refs,
+    );
     
     println!("\n\n================================\n");
 
@@ -64,10 +73,10 @@ fn dump_object_and_children(obj_id: ObjectId, doc: &Document, visited: &mut BTre
     match doc.get_object(obj_id) {
         Ok(object) => {
             let visited_for_print = BTreeSet::new(); // Use a fresh set for printing
-            print_object(object, doc, &visited_for_print, 1, decode_streams, truncate_binary_streams, is_contents);
+            let mut child_refs = BTreeSet::new();
+            print_object(object, doc, &visited_for_print, 1, decode_streams, truncate_binary_streams, is_contents, &mut child_refs);
             println!("\n");
 
-            let child_refs = collect_references(object, is_contents);
             for (is_contents, child_id) in child_refs {
                 if !visited.contains(&child_id) {
                     println!("--------------------------------\n");
@@ -162,7 +171,7 @@ fn print_content_data(content: &[u8], description: &str, indent_str: &str, trunc
     );
 }
 
-fn print_object(obj: &Object, doc: &Document, visited: &BTreeSet<ObjectId>, indent: usize, decode_streams: bool, truncate_binary_streams: bool, is_contents: bool) {
+fn print_object(obj: &Object, doc: &Document, visited: &BTreeSet<ObjectId>, indent: usize, decode_streams: bool, truncate_binary_streams: bool, is_contents: bool, child_refs: &mut BTreeSet<(bool, ObjectId)>) {
     let indent_str = "  ".repeat(indent);
 
     match obj {
@@ -176,7 +185,7 @@ fn print_object(obj: &Object, doc: &Document, visited: &BTreeSet<ObjectId>, inde
             println!("[");
             for item in array {
                 print!("{}", "  ".repeat(indent + 1));
-                print_object(item, doc, visited, indent + 1, decode_streams, truncate_binary_streams, is_contents);
+                print_object(item, doc, visited, indent + 1, decode_streams, truncate_binary_streams, is_contents, child_refs);
                 println!();
             }
             print!("{}]", indent_str);
@@ -185,7 +194,7 @@ fn print_object(obj: &Object, doc: &Document, visited: &BTreeSet<ObjectId>, inde
             println!("<<");
             for (key, value) in stream.dict.iter() {
                 print!("{}/{} ", "  ".repeat(indent + 1), String::from_utf8_lossy(key));
-                print_object(value, doc, visited, indent + 1, decode_streams, truncate_binary_streams, is_contents);
+                print_object(value, doc, visited, indent + 1, decode_streams, truncate_binary_streams, is_contents, child_refs);
                 println!();
             }
             print!("{}>> stream", indent_str);
@@ -199,12 +208,13 @@ fn print_object(obj: &Object, doc: &Document, visited: &BTreeSet<ObjectId>, inde
             for (key, value) in dict.iter() {
                 print!("{}/{} ", "  ".repeat(indent + 1), String::from_utf8_lossy(key));
                 let is_contents = key == b"Contents";
-                print_object(value, doc, visited, indent + 1, decode_streams, truncate_binary_streams, is_contents);
+                print_object(value, doc, visited, indent + 1, decode_streams, truncate_binary_streams, is_contents, child_refs);
                 println!();
             }
             print!("{}>>", indent_str);
         }
         Object::Reference(id) => {
+            child_refs.insert((is_contents, *id));
             print!("{} {} R", id.0, id.1);
             if visited.contains(id) {
                 print!(" (visited)");
@@ -213,22 +223,4 @@ fn print_object(obj: &Object, doc: &Document, visited: &BTreeSet<ObjectId>, inde
     }
 }
 
-fn collect_references(obj: &Object, is_contents: bool) -> Vec<(bool, ObjectId)> {
-    let mut refs = Vec::new();
-    match obj {
-        Object::Reference(id) => refs.push((is_contents, *id)),
-        Object::Array(arr) => {
-            for item in arr {
-                refs.extend(collect_references(item, is_contents));
-            }
-        }
-        Object::Dictionary(dict) | Object::Stream(lopdf::Stream { dict, .. }) => {
-            for (key, value) in dict.iter() {
-                let is_contents = is_contents || key == b"Contents";
-                refs.extend(collect_references(value, is_contents));
-            }
-        }
-        _ => {}
-    }
-    refs
-}
+
