@@ -1,0 +1,10 @@
+[package]
+name = "pdf_dump"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+lopdf = "0.36.0"
+clap = { version = "4.4", features = ["derive", "string"] }
+nom = "8.0"
+flate2 = "1.0"
