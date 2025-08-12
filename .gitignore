@@ -1,5 +1,7 @@
 /target
-in*.pdf
-out*.pdf
 in*.txt
 out*.txt
+out*.tx
+cover.txt
+*.pdf
+*.ttf

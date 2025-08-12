@@ -1,7 +1,9 @@
 use clap::Parser;
 use flate2::read::ZlibDecoder;
 use lopdf::{content::Content, Document, Object, ObjectId};
+use std::borrow::Cow;
 use std::collections::BTreeSet;
+use std::fs;
 use std::io::Read;
 use std::path::PathBuf;
 
@@ -20,6 +22,14 @@ struct Args {
     /// Truncate binary streams to the first 100 bytes
     #[arg(long)]
     truncate_binary_streams: bool,
+
+    /// Object number to extract
+    #[arg(long)]
+    extract_object: Option<u32>,
+
+    /// Output file for extracted object
+    #[arg(long, requires = "extract_object")]
+    output: Option<PathBuf>,
 }
 
 fn main() {
@@ -34,31 +44,53 @@ fn main() {
         }
     };
 
-    println!("Trailer:");
-    let visited_for_print = BTreeSet::new();
-    let mut trailer_refs = BTreeSet::new();
-    print_object(
-        &Object::Dictionary(doc.trailer.clone()),
-        &doc,
-        &visited_for_print,
-        1,
-        args.decode_streams,
-        args.truncate_binary_streams,
-        false,
-        &mut trailer_refs,
-    );
-    
-    println!("\n\n================================\n");
-
-    let mut visited_for_traverse = BTreeSet::new();
-    if let Ok(root_object) = doc.trailer.get(b"Root") {
-        if let Ok(root_id) = root_object.as_reference() {
-            dump_object_and_children(root_id, &doc, &mut visited_for_traverse, args.decode_streams, args.truncate_binary_streams, false);
-        } else {
-            eprintln!("Warning: /Root object in trailer is not a reference.");
+    if let (Some(object_id), Some(output_path)) = (args.extract_object, &args.output) {
+        let object_id = (object_id, 0);
+        match doc.get_object(object_id) {
+            Ok(Object::Stream(stream)) => {
+                let decoded_content = decode_stream(&stream);
+                if let Err(e) = fs::write(output_path, &*decoded_content) {
+                    eprintln!("Error writing to output file: {}", e);
+                    std::process::exit(1);
+                }
+                println!("Successfully extracted object {} to '{}'.", object_id.0, output_path.display());
+            }
+            Ok(_) => {
+                eprintln!("Error: Object {} is not a stream and cannot be extracted to a file.", object_id.0);
+                std::process::exit(1);
+            }
+            Err(_) => {
+                eprintln!("Error: Object {} not found in the document.", object_id.0);
+                std::process::exit(1);
+            }
         }
     } else {
-        eprintln!("Warning: /Root object not found in trailer. Cannot traverse document structure.");
+        println!("Trailer:");
+        let visited_for_print = BTreeSet::new();
+        let mut trailer_refs = BTreeSet::new();
+        print_object(
+            &Object::Dictionary(doc.trailer.clone()),
+            &doc,
+            &visited_for_print,
+            1,
+            args.decode_streams,
+            args.truncate_binary_streams,
+            false,
+            &mut trailer_refs,
+        );
+        
+        println!("\n\n================================\n");
+
+        let mut visited_for_traverse = BTreeSet::new();
+        if let Ok(root_object) = doc.trailer.get(b"Root") {
+            if let Ok(root_id) = root_object.as_reference() {
+                dump_object_and_children(root_id, &doc, &mut visited_for_traverse, args.decode_streams, args.truncate_binary_streams, false);
+            } else {
+                eprintln!("Warning: /Root object in trailer is not a reference.");
+            }
+        } else {
+            eprintln!("Warning: /Root object not found in trailer. Cannot traverse document structure.");
+        }
     }
 }
 
@@ -94,38 +126,42 @@ fn is_binary_stream(content: &[u8]) -> bool {
     content.iter().any(|&b| !b.is_ascii_alphanumeric() && !b.is_ascii_whitespace() && !b.is_ascii_punctuation())
 }
 
-fn print_stream_content(stream: &lopdf::Stream, indent_str: &str, truncate_binary_streams: bool, is_contents: bool) {
-    let mut decoded_content: Option<Vec<u8>> = None;
-    let mut applied_filter: Option<String> = None;
-
-    if let Ok(filter_obj) = stream.dict.get(b"Filter") {
-        let filters: Vec<String> = if let Ok(name_bytes) = filter_obj.as_name() {
-            vec![String::from_utf8_lossy(name_bytes).to_string()]
+fn decode_stream(stream: &lopdf::Stream) -> Cow<[u8]> {
+    let filters = stream.dict.get(b"Filter").ok().and_then(|filter_obj| {
+        if let Ok(name_bytes) = filter_obj.as_name() {
+            Some(vec![String::from_utf8_lossy(name_bytes).to_string()])
         } else if let Ok(arr) = filter_obj.as_array() {
-            arr.iter()
-                .filter_map(|obj| obj.as_name().ok())
-                .map(|bytes| String::from_utf8_lossy(bytes).to_string())
-                .collect()
+            Some(
+                arr.iter()
+                    .filter_map(|obj| obj.as_name().ok())
+                    .map(|bytes| String::from_utf8_lossy(bytes).to_string())
+                    .collect()
+            )
         } else {
-            vec![]
-        };
+            None
+        }
+    }).unwrap_or_default();
 
-        if filters.iter().any(|f| f == "FlateDecode") {
-            let mut decoder = ZlibDecoder::new(&stream.content[..]);
-            let mut decompressed = Vec::new();
-            if decoder.read_to_end(&mut decompressed).is_ok() {
-                decoded_content = Some(decompressed);
-                applied_filter = Some("FlateDecode".to_string());
-            }
+    if filters.iter().any(|f| f == "FlateDecode") {
+        let mut decoder = ZlibDecoder::new(&stream.content[..]);
+        let mut decompressed = Vec::new();
+        if decoder.read_to_end(&mut decompressed).is_ok() {
+            return Cow::Owned(decompressed);
         }
     }
 
-    if let Some(content) = decoded_content {
-        let description = format!("decoded with {}", applied_filter.unwrap_or_default());
-        print_content_data(&content, &description, indent_str, truncate_binary_streams, is_contents);
+    Cow::Borrowed(&stream.content)
+}
+
+fn print_stream_content(stream: &lopdf::Stream, indent_str: &str, truncate_binary_streams: bool, is_contents: bool) {
+    let decoded_content = decode_stream(stream);
+    let description = if let Cow::Owned(_) = &decoded_content {
+        "decoded"
     } else {
-        print_content_data(&stream.content, "raw", indent_str, truncate_binary_streams, is_contents);
-    }
+        "raw"
+    };
+
+    print_content_data(&decoded_content, description, indent_str, truncate_binary_streams, is_contents);
 }
 
 fn print_content_data(content: &[u8], description: &str, indent_str: &str, truncate_binary_streams: bool,  is_contents: bool) {
