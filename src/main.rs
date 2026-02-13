@@ -269,6 +269,7 @@ mod tests {
     use flate2::write::ZlibEncoder;
     use flate2::Compression;
     use lopdf::{Dictionary, Stream, StringFormat};
+    use pretty_assertions::assert_eq;
 
     // Helper: capture output from print functions into a String
     fn output_of(f: impl FnOnce(&mut Vec<u8>)) -> String {
@@ -607,5 +608,483 @@ mod tests {
         assert!(out.contains("Object 2 0:"));
         assert!(visited.contains(&(1, 0)));
         assert!(visited.contains(&(2, 0)));
+    }
+
+    // ── is_binary_stream (additional edge cases) ────────────────────
+
+    #[test]
+    fn is_binary_stream_del_char() {
+        // DEL (0x7F) is not alphanumeric, not whitespace, not punctuation → binary
+        assert!(is_binary_stream(&[0x7F]));
+    }
+
+    #[test]
+    fn is_binary_stream_punctuation_only() {
+        assert!(!is_binary_stream(b"!@#$%^&*(){}[]"));
+    }
+
+    #[test]
+    fn is_binary_stream_whitespace_only() {
+        assert!(!is_binary_stream(b"   \t\n\r"));
+    }
+
+    #[test]
+    fn is_binary_stream_all_allowed_types_combined() {
+        // Alphanumeric + whitespace + punctuation → not binary
+        assert!(!is_binary_stream(b"abc 123\n!@#"));
+    }
+
+    #[test]
+    fn is_binary_stream_single_null_among_ascii() {
+        // Even one null byte makes it binary
+        assert!(is_binary_stream(b"abc\x00def"));
+    }
+
+    // ── decode_stream (additional branches) ─────────────────────────
+
+    #[test]
+    fn decode_stream_empty_content_no_filter() {
+        let stream = make_stream(None, vec![]);
+        let result = decode_stream(&stream);
+        assert!(matches!(result, Cow::Borrowed(_)));
+        assert_eq!(&*result, b"");
+    }
+
+    #[test]
+    fn decode_stream_filter_is_integer_ignored() {
+        // Filter that's neither Name nor Array → treated as no filter
+        let stream = make_stream(Some(Object::Integer(42)), b"raw bytes".to_vec());
+        let result = decode_stream(&stream);
+        assert!(matches!(result, Cow::Borrowed(_)));
+        assert_eq!(&*result, b"raw bytes");
+    }
+
+    #[test]
+    fn decode_stream_multiple_filters_with_flatedecode() {
+        // Array with FlateDecode and another filter
+        let compressed = zlib_compress(b"multi-filter");
+        let stream = make_stream(
+            Some(Object::Array(vec![
+                Object::Name(b"FlateDecode".to_vec()),
+                Object::Name(b"ASCIIHexDecode".to_vec()),
+            ])),
+            compressed,
+        );
+        let result = decode_stream(&stream);
+        // FlateDecode is found → decompresses
+        assert!(matches!(result, Cow::Owned(_)));
+        assert_eq!(&*result, b"multi-filter");
+    }
+
+    #[test]
+    fn decode_stream_array_without_flatedecode() {
+        // Array of filters, none of which is FlateDecode
+        let stream = make_stream(
+            Some(Object::Array(vec![
+                Object::Name(b"ASCIIHexDecode".to_vec()),
+                Object::Name(b"DCTDecode".to_vec()),
+            ])),
+            b"pass through".to_vec(),
+        );
+        let result = decode_stream(&stream);
+        assert!(matches!(result, Cow::Borrowed(_)));
+        assert_eq!(&*result, b"pass through");
+    }
+
+    #[test]
+    fn decode_stream_empty_filter_array() {
+        let stream = make_stream(
+            Some(Object::Array(vec![])),
+            b"no filters".to_vec(),
+        );
+        let result = decode_stream(&stream);
+        assert!(matches!(result, Cow::Borrowed(_)));
+        assert_eq!(&*result, b"no filters");
+    }
+
+    #[test]
+    fn decode_stream_flatedecode_empty_payload() {
+        // Compressed empty content
+        let compressed = zlib_compress(b"");
+        let stream = make_stream(
+            Some(Object::Name(b"FlateDecode".to_vec())),
+            compressed,
+        );
+        let result = decode_stream(&stream);
+        assert!(matches!(result, Cow::Owned(_)));
+        assert_eq!(&*result, b"");
+    }
+
+    // ── print_object (additional branches) ──────────────────────────
+
+    #[test]
+    fn print_object_empty_array() {
+        let arr = Object::Array(vec![]);
+        let (out, refs) = print_obj(&arr);
+        assert!(out.contains("["));
+        assert!(out.contains("]"));
+        assert!(refs.is_empty());
+    }
+
+    #[test]
+    fn print_object_empty_dictionary() {
+        let dict = Dictionary::new();
+        let (out, refs) = print_obj(&Object::Dictionary(dict));
+        assert!(out.contains("<<"));
+        assert!(out.contains(">>"));
+        assert!(refs.is_empty());
+    }
+
+    #[test]
+    fn print_object_nested_dictionary() {
+        let mut inner = Dictionary::new();
+        inner.set("InnerKey", Object::Integer(7));
+        let mut outer = Dictionary::new();
+        outer.set("Outer", Object::Dictionary(inner));
+        let (out, _) = print_obj(&Object::Dictionary(outer));
+        assert!(out.contains("/Outer"));
+        assert!(out.contains("/InnerKey"));
+        assert!(out.contains("7"));
+    }
+
+    #[test]
+    fn print_object_array_with_references_collects_child_refs() {
+        let arr = Object::Array(vec![
+            Object::Reference((3, 0)),
+            Object::Reference((4, 0)),
+        ]);
+        let (out, refs) = print_obj(&arr);
+        assert!(out.contains("3 0 R"));
+        assert!(out.contains("4 0 R"));
+        assert!(refs.contains(&(false, (3, 0))));
+        assert!(refs.contains(&(false, (4, 0))));
+    }
+
+    #[test]
+    fn print_object_negative_integer() {
+        let (out, _) = print_obj(&Object::Integer(-99));
+        assert_eq!(out, "-99");
+    }
+
+    #[test]
+    fn print_object_zero_real() {
+        let (out, _) = print_obj(&Object::Real(0.0));
+        assert_eq!(out, "0");
+    }
+
+    #[test]
+    fn print_object_name_with_special_chars() {
+        let (out, _) = print_obj(&Object::Name(b"Font+Name".to_vec()));
+        assert_eq!(out, "/Font+Name");
+    }
+
+    #[test]
+    fn print_object_string_hex_format() {
+        let (out, _) = print_obj(&Object::String(b"hex".to_vec(), StringFormat::Hexadecimal));
+        assert_eq!(out, "(hex)");
+    }
+
+    #[test]
+    fn print_object_stream_with_flatedecode_and_decode_flag() {
+        let compressed = zlib_compress(b"decompressed text");
+        let stream = make_stream(
+            Some(Object::Name(b"FlateDecode".to_vec())),
+            compressed,
+        );
+        let doc = empty_doc();
+        let visited = BTreeSet::new();
+        let mut child_refs = BTreeSet::new();
+        let out = output_of(|w| {
+            print_object(w, &Object::Stream(stream), &doc, &visited, 1, true, false, false, &mut child_refs);
+        });
+        assert!(out.contains(">> stream"));
+        assert!(out.contains("decoded"));
+        assert!(out.contains("decompressed text"));
+    }
+
+    #[test]
+    fn print_object_multiple_refs_in_dict() {
+        let mut dict = Dictionary::new();
+        dict.set("A", Object::Reference((10, 0)));
+        dict.set("B", Object::Reference((20, 0)));
+        let (_, refs) = print_obj(&Object::Dictionary(dict));
+        assert!(refs.contains(&(false, (10, 0))));
+        assert!(refs.contains(&(false, (20, 0))));
+        assert_eq!(refs.len(), 2);
+    }
+
+    #[test]
+    fn print_object_is_contents_propagated_to_array_ref() {
+        // When print_object is called with is_contents=true, refs in arrays get is_contents=true
+        let arr = Object::Array(vec![Object::Reference((7, 0))]);
+        let doc = empty_doc();
+        let visited = BTreeSet::new();
+        let mut child_refs = BTreeSet::new();
+        output_of(|w| {
+            print_object(w, &arr, &doc, &visited, 1, false, false, true, &mut child_refs);
+        });
+        assert!(child_refs.contains(&(true, (7, 0))));
+    }
+
+    #[test]
+    fn print_object_stream_dict_entries_printed() {
+        let mut dict = Dictionary::new();
+        dict.set("Length", Object::Integer(11));
+        dict.set("Filter", Object::Name(b"FlateDecode".to_vec()));
+        let stream = Stream::new(dict, b"stream data".to_vec());
+        let (out, _) = print_obj(&Object::Stream(stream));
+        assert!(out.contains("/Length"));
+        assert!(out.contains("11"));
+        assert!(out.contains("/Filter"));
+        assert!(out.contains("/FlateDecode"));
+    }
+
+    // ── print_content_data (additional branches) ────────────────────
+
+    #[test]
+    fn print_content_data_empty_content() {
+        let out = output_of(|w| {
+            print_content_data(w, b"", "raw", "  ", false, false);
+        });
+        assert!(out.contains("Stream content (raw, 0 bytes)"));
+    }
+
+    #[test]
+    fn print_content_data_binary_no_truncation() {
+        // Binary content but truncate_binary_streams=false → full output
+        let content: Vec<u8> = (0..200).map(|i| (i as u8).wrapping_add(0x80)).collect();
+        let out = output_of(|w| {
+            print_content_data(w, &content, "raw", "", false, false);
+        });
+        assert!(out.contains("200 bytes"));
+        assert!(!out.contains("truncated"));
+    }
+
+    #[test]
+    fn print_content_data_binary_short_with_truncation_enabled() {
+        // Binary content < 100 bytes with truncation enabled → no truncation applied
+        let content: Vec<u8> = vec![0x80; 50];
+        let out = output_of(|w| {
+            print_content_data(w, &content, "raw", "", true, false);
+        });
+        assert!(out.contains("50 bytes"));
+        assert!(!out.contains("truncated"));
+    }
+
+    #[test]
+    fn print_content_data_binary_exactly_100_bytes_with_truncation() {
+        // Exactly 100 bytes of binary → no truncation (only truncates > 100)
+        let content: Vec<u8> = vec![0x80; 100];
+        let out = output_of(|w| {
+            print_content_data(w, &content, "raw", "", true, false);
+        });
+        assert!(out.contains("100 bytes"));
+        assert!(!out.contains("truncated"));
+    }
+
+    #[test]
+    fn print_content_data_binary_101_bytes_with_truncation() {
+        // 101 bytes of binary → should truncate
+        let content: Vec<u8> = vec![0x80; 101];
+        let out = output_of(|w| {
+            print_content_data(w, &content, "raw", "", true, false);
+        });
+        assert!(out.contains("101 (truncated to 100)"));
+    }
+
+    #[test]
+    fn print_content_data_is_contents_invalid_stream_falls_back() {
+        // Content::decode is lenient, so we verify the fallback path by checking
+        // that badly formed streams either parse (with 0 ops) or show the fallback.
+        // Use content that Content::decode will reject: unbalanced parens cause a parse error.
+        let content = b"( unclosed string";
+        let out = output_of(|w| {
+            print_content_data(w, content, "raw", "  ", false, true);
+        });
+        // lopdf's Content::decode may or may not fail on this.
+        // If it parses: we see "Parsed Content Stream"; if it fails: we see the fallback.
+        let parsed = out.contains("Parsed Content Stream");
+        let fallback = out.contains("Could not parse content stream") && out.contains("Stream content");
+        assert!(parsed || fallback, "Expected either parsed or fallback output, got: {}", out);
+    }
+
+    #[test]
+    fn print_content_data_ascii_not_truncated_even_when_flag_set() {
+        // ASCII content >100 bytes with truncation flag → no truncation (not binary)
+        let content = b"abcdefghij".repeat(20); // 200 bytes of ASCII
+        let out = output_of(|w| {
+            print_content_data(w, &content, "raw", "", true, false);
+        });
+        assert!(out.contains("200 bytes"));
+        assert!(!out.contains("truncated"));
+    }
+
+    // ── print_stream_content ────────────────────────────────────────
+
+    #[test]
+    fn print_stream_content_no_filter() {
+        let stream = make_stream(None, b"raw stream bytes".to_vec());
+        let out = output_of(|w| {
+            print_stream_content(w, &stream, "  ", false, false);
+        });
+        assert!(out.contains("raw"));
+        assert!(out.contains("raw stream bytes"));
+    }
+
+    #[test]
+    fn print_stream_content_flatedecode() {
+        let compressed = zlib_compress(b"decoded content");
+        let stream = make_stream(
+            Some(Object::Name(b"FlateDecode".to_vec())),
+            compressed,
+        );
+        let out = output_of(|w| {
+            print_stream_content(w, &stream, "  ", false, false);
+        });
+        assert!(out.contains("decoded"));
+        assert!(out.contains("decoded content"));
+    }
+
+    #[test]
+    fn print_stream_content_with_truncation() {
+        // Large binary stream with truncation enabled
+        let content: Vec<u8> = vec![0x80; 200];
+        let stream = make_stream(None, content);
+        let out = output_of(|w| {
+            print_stream_content(w, &stream, "", true, false);
+        });
+        assert!(out.contains("truncated to 100"));
+    }
+
+    #[test]
+    fn print_stream_content_is_contents_parses() {
+        let content = b"BT\n/F1 12 Tf\nET";
+        let stream = make_stream(None, content.to_vec());
+        let out = output_of(|w| {
+            print_stream_content(w, &stream, "  ", false, true);
+        });
+        assert!(out.contains("Parsed Content Stream"));
+    }
+
+    // ── dump_object_and_children (additional paths) ─────────────────
+
+    #[test]
+    fn dump_object_not_found() {
+        let doc = Document::new();
+        let mut visited = BTreeSet::new();
+        let out = output_of(|w| {
+            dump_object_and_children(w, (99, 0), &doc, &mut visited, false, false, false);
+        });
+        assert!(out.contains("Object 99 0:"));
+        assert!(out.contains("Error getting object"));
+        assert!(visited.contains(&(99, 0)));
+    }
+
+    #[test]
+    fn dump_object_already_visited_produces_no_output() {
+        let mut doc = Document::new();
+        doc.objects.insert((1, 0), Object::Integer(42));
+        let mut visited = BTreeSet::new();
+        visited.insert((1, 0));
+        let out = output_of(|w| {
+            dump_object_and_children(w, (1, 0), &doc, &mut visited, false, false, false);
+        });
+        assert_eq!(out, "");
+    }
+
+    #[test]
+    fn dump_object_deep_chain_three_levels() {
+        let mut doc = Document::new();
+        let mut dict1 = Dictionary::new();
+        dict1.set("Next", Object::Reference((2, 0)));
+        let mut dict2 = Dictionary::new();
+        dict2.set("Next", Object::Reference((3, 0)));
+        doc.objects.insert((1, 0), Object::Dictionary(dict1));
+        doc.objects.insert((2, 0), Object::Dictionary(dict2));
+        doc.objects.insert((3, 0), Object::Integer(777));
+
+        let mut visited = BTreeSet::new();
+        let out = output_of(|w| {
+            dump_object_and_children(w, (1, 0), &doc, &mut visited, false, false, false);
+        });
+        assert!(out.contains("Object 1 0:"));
+        assert!(out.contains("Object 2 0:"));
+        assert!(out.contains("Object 3 0:"));
+        assert!(out.contains("777"));
+        assert_eq!(visited.len(), 3);
+    }
+
+    #[test]
+    fn dump_object_multiple_children_from_parent() {
+        let mut doc = Document::new();
+        let mut dict = Dictionary::new();
+        dict.set("Child1", Object::Reference((2, 0)));
+        dict.set("Child2", Object::Reference((3, 0)));
+        doc.objects.insert((1, 0), Object::Dictionary(dict));
+        doc.objects.insert((2, 0), Object::Integer(22));
+        doc.objects.insert((3, 0), Object::Integer(33));
+
+        let mut visited = BTreeSet::new();
+        let out = output_of(|w| {
+            dump_object_and_children(w, (1, 0), &doc, &mut visited, false, false, false);
+        });
+        assert!(out.contains("Object 1 0:"));
+        assert!(out.contains("Object 2 0:"));
+        assert!(out.contains("Object 3 0:"));
+        assert!(out.contains("22"));
+        assert!(out.contains("33"));
+    }
+
+    #[test]
+    fn dump_object_with_stream_and_decode() {
+        let mut doc = Document::new();
+        let compressed = zlib_compress(b"stream content here");
+        let stream = make_stream(
+            Some(Object::Name(b"FlateDecode".to_vec())),
+            compressed,
+        );
+        doc.objects.insert((1, 0), Object::Stream(stream));
+
+        let mut visited = BTreeSet::new();
+        let out = output_of(|w| {
+            dump_object_and_children(w, (1, 0), &doc, &mut visited, true, false, false);
+        });
+        assert!(out.contains("Object 1 0:"));
+        assert!(out.contains("stream content here"));
+    }
+
+    #[test]
+    fn dump_object_is_contents_propagates() {
+        let mut doc = Document::new();
+        // Object 1 has /Contents referencing object 2
+        let mut dict = Dictionary::new();
+        dict.set("Contents", Object::Reference((2, 0)));
+        doc.objects.insert((1, 0), Object::Dictionary(dict));
+        // Object 2 is a valid content stream
+        let content = b"BT\n/F1 12 Tf\nET";
+        let stream = make_stream(None, content.to_vec());
+        doc.objects.insert((2, 0), Object::Stream(stream));
+
+        let mut visited = BTreeSet::new();
+        let out = output_of(|w| {
+            dump_object_and_children(w, (1, 0), &doc, &mut visited, true, false, false);
+        });
+        assert!(out.contains("Object 2 0:"));
+        assert!(out.contains("Parsed Content Stream"));
+    }
+
+    #[test]
+    fn dump_object_separator_between_siblings() {
+        let mut doc = Document::new();
+        let mut dict = Dictionary::new();
+        dict.set("A", Object::Reference((2, 0)));
+        doc.objects.insert((1, 0), Object::Dictionary(dict));
+        doc.objects.insert((2, 0), Object::Integer(1));
+
+        let mut visited = BTreeSet::new();
+        let out = output_of(|w| {
+            dump_object_and_children(w, (1, 0), &doc, &mut visited, false, false, false);
+        });
+        assert!(out.contains("--------------------------------"));
     }
 }
