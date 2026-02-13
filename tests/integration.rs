@@ -263,3 +263,235 @@ fn truncate_binary_streams_flag_accepted() {
 
     assert!(output.status.success(), "Should accept --truncate-binary-streams flag");
 }
+
+// ── CLI argument validation ─────────────────────────────────────────
+
+#[test]
+fn output_without_extract_object_fails() {
+    // --output requires --extract-object (clap `requires` constraint)
+    let pdf = create_minimal_pdf();
+    let output = Command::new(binary_path())
+        .arg(pdf.path())
+        .arg("--output")
+        .arg("/tmp/out.bin")
+        .output()
+        .expect("failed to execute binary");
+
+    assert!(!output.status.success());
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("extract") || stderr.contains("required"),
+        "Should indicate --output requires --extract-object: {}",
+        stderr
+    );
+}
+
+#[test]
+fn help_flag_prints_usage() {
+    let output = Command::new(binary_path())
+        .arg("--help")
+        .output()
+        .expect("failed to execute binary");
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        stdout.contains("Usage") || stdout.contains("usage"),
+        "Should print usage info: {}",
+        stdout
+    );
+    assert!(stdout.contains("--decode-streams"), "Should list --decode-streams flag");
+    assert!(stdout.contains("--extract-object"), "Should list --extract-object flag");
+}
+
+#[test]
+fn version_flag_prints_version() {
+    let output = Command::new(binary_path())
+        .arg("--version")
+        .output()
+        .expect("failed to execute binary");
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        stdout.contains("0.1.1") || stdout.contains("pdf_dump"),
+        "Should print version info: {}",
+        stdout
+    );
+}
+
+#[test]
+fn corrupt_pdf_file_fails_gracefully() {
+    // Write garbage data to a file and try to load it as PDF
+    let mut tmp = tempfile::NamedTempFile::new().unwrap();
+    tmp.write_all(b"this is not a pdf file at all").unwrap();
+    tmp.flush().unwrap();
+
+    let output = Command::new(binary_path())
+        .arg(tmp.path())
+        .output()
+        .expect("failed to execute binary");
+
+    assert!(!output.status.success());
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("Error") || stderr.contains("error"),
+        "Should show error for corrupt PDF: {}",
+        stderr
+    );
+}
+
+// ── Dump mode behavior ──────────────────────────────────────────────
+
+#[test]
+fn dump_shows_separator_between_objects() {
+    let pdf = create_minimal_pdf();
+    let output = Command::new(binary_path())
+        .arg(pdf.path())
+        .output()
+        .expect("failed to execute binary");
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(output.status.success());
+    assert!(
+        stdout.contains("================================"),
+        "Should have separator between trailer and objects"
+    );
+    assert!(
+        stdout.contains("--------------------------------"),
+        "Should have separators between individual objects"
+    );
+}
+
+#[test]
+fn dump_with_decode_streams_shows_parsed_content_stream() {
+    // Specifically verify that the /Contents stream is parsed into operations
+    let pdf = create_minimal_pdf();
+    let output = Command::new(binary_path())
+        .arg(pdf.path())
+        .arg("--decode-streams")
+        .output()
+        .expect("failed to execute binary");
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(output.status.success());
+    assert!(
+        stdout.contains("Parsed Content Stream"),
+        "Content stream should be parsed with --decode-streams: {}",
+        stdout
+    );
+    // The synthetic PDF has "BT /F1 12 Tf (Hello) Tj ET" content
+    assert!(
+        stdout.contains("BT") || stdout.contains("Tf"),
+        "Should show PDF operators from content stream"
+    );
+}
+
+#[test]
+fn dump_binary_stream_truncation_visible() {
+    // Create a PDF with a large binary stream and verify truncation in output
+    let mut doc = Document::new();
+
+    let binary_content: Vec<u8> = (0..500).map(|i| (i as u8).wrapping_add(0x80)).collect();
+    let stream = Stream::new(Dictionary::new(), binary_content);
+    let stream_id = doc.add_object(Object::Stream(stream));
+
+    let mut catalog = Dictionary::new();
+    catalog.set("Type", Object::Name(b"Catalog".to_vec()));
+    catalog.set("BinaryData", Object::Reference(stream_id));
+    let catalog_id = doc.add_object(Object::Dictionary(catalog));
+    doc.trailer.set("Root", Object::Reference(catalog_id));
+
+    let mut tmp = tempfile::NamedTempFile::new().unwrap();
+    doc.save_to(&mut tmp).unwrap();
+    tmp.flush().unwrap();
+
+    let output = Command::new(binary_path())
+        .arg(tmp.path())
+        .arg("--decode-streams")
+        .arg("--truncate-binary-streams")
+        .output()
+        .expect("failed to execute binary");
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(output.status.success());
+    assert!(
+        stdout.contains("truncated to 100"),
+        "Binary stream should show truncation: {}",
+        stdout
+    );
+}
+
+// ── Extract mode edge cases ─────────────────────────────────────────
+
+#[test]
+fn extract_uncompressed_stream() {
+    // Extract a stream with no FlateDecode filter
+    let mut doc = Document::new();
+    let raw_bytes = b"raw uncompressed stream data for extraction test";
+    let stream = Stream::new(Dictionary::new(), raw_bytes.to_vec());
+    let stream_id = doc.add_object(Object::Stream(stream));
+
+    let mut catalog = Dictionary::new();
+    catalog.set("Type", Object::Name(b"Catalog".to_vec()));
+    let catalog_id = doc.add_object(Object::Dictionary(catalog));
+    doc.trailer.set("Root", Object::Reference(catalog_id));
+
+    let mut tmp = tempfile::NamedTempFile::new().unwrap();
+    doc.save_to(&mut tmp).unwrap();
+    tmp.flush().unwrap();
+
+    let output_file = tempfile::NamedTempFile::new().unwrap();
+    let output_path = output_file.path().to_path_buf();
+
+    let output = Command::new(binary_path())
+        .arg(tmp.path())
+        .arg("--extract-object")
+        .arg(stream_id.0.to_string())
+        .arg("--output")
+        .arg(&output_path)
+        .output()
+        .expect("failed to execute binary");
+
+    assert!(output.status.success(), "Extract failed: {}", String::from_utf8_lossy(&output.stderr));
+    let extracted = fs::read(&output_path).unwrap();
+    assert_eq!(extracted, raw_bytes, "Uncompressed stream should be extracted as-is");
+}
+
+#[test]
+fn extract_object_prints_success_message() {
+    let (pdf, stream_obj_num) = create_pdf_with_flatedecode_stream();
+    let output_file = tempfile::NamedTempFile::new().unwrap();
+
+    let output = Command::new(binary_path())
+        .arg(pdf.path())
+        .arg("--extract-object")
+        .arg(stream_obj_num.to_string())
+        .arg("--output")
+        .arg(output_file.path())
+        .output()
+        .expect("failed to execute binary");
+
+    assert!(output.status.success());
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        stdout.contains("Successfully extracted"),
+        "Should print success message: {}",
+        stdout
+    );
+}
+
+#[test]
+fn dump_traverses_all_page_tree_objects() {
+    // Verify the dump traverses through Catalog → Pages → Page → Font
+    let pdf = create_minimal_pdf();
+    let output = Command::new(binary_path())
+        .arg(pdf.path())
+        .output()
+        .expect("failed to execute binary");
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(output.status.success());
+    assert!(stdout.contains("/Catalog"), "Should show Catalog type");
+    assert!(stdout.contains("/Pages"), "Should traverse to Pages");
+    assert!(stdout.contains("/Helvetica"), "Should traverse to Font and show BaseFont");
+    assert!(stdout.contains("MediaBox"), "Should show page's MediaBox");
+}

@@ -24,12 +24,17 @@ struct Args {
     truncate_binary_streams: bool,
 
     /// Object number to extract
-    #[arg(long)]
+    #[arg(long, requires = "output")]
     extract_object: Option<u32>,
 
     /// Output file for extracted object
     #[arg(long, requires = "extract_object")]
     output: Option<PathBuf>,
+}
+
+struct DumpConfig {
+    decode_streams: bool,
+    truncate_binary_streams: bool,
 }
 
 fn main() {
@@ -44,11 +49,12 @@ fn main() {
         }
     };
 
-    if let (Some(object_id), Some(output_path)) = (args.extract_object, &args.output) {
+    if let Some(object_id) = args.extract_object {
+        let output_path = args.output.as_ref().unwrap();
         let object_id = (object_id, 0);
         match doc.get_object(object_id) {
             Ok(Object::Stream(stream)) => {
-                let decoded_content = decode_stream(&stream);
+                let decoded_content = decode_stream(stream);
                 if let Err(e) = fs::write(output_path, &*decoded_content) {
                     eprintln!("Error writing to output file: {}", e);
                     std::process::exit(1);
@@ -65,6 +71,10 @@ fn main() {
             }
         }
     } else {
+        let config = DumpConfig {
+            decode_streams: args.decode_streams,
+            truncate_binary_streams: args.truncate_binary_streams,
+        };
         let mut out = io::stdout().lock();
         writeln!(out, "Trailer:").unwrap();
         let visited_for_print = BTreeSet::new();
@@ -75,8 +85,7 @@ fn main() {
             &doc,
             &visited_for_print,
             1,
-            args.decode_streams,
-            args.truncate_binary_streams,
+            &config,
             false,
             &mut trailer_refs,
         );
@@ -84,19 +93,17 @@ fn main() {
         writeln!(out, "\n\n================================\n").unwrap();
 
         let mut visited_for_traverse = BTreeSet::new();
-        if let Ok(root_object) = doc.trailer.get(b"Root") {
-            if let Ok(root_id) = root_object.as_reference() {
-                dump_object_and_children(&mut out, root_id, &doc, &mut visited_for_traverse, args.decode_streams, args.truncate_binary_streams, false);
-            } else {
-                eprintln!("Warning: /Root object in trailer is not a reference.");
-            }
+        if let Some(root_id) = doc.trailer.get(b"Root").ok()
+            .and_then(|o| o.as_reference().ok())
+        {
+            dump_object_and_children(&mut out, root_id, &doc, &mut visited_for_traverse, &config, false);
         } else {
-            eprintln!("Warning: /Root object not found in trailer. Cannot traverse document structure.");
+            eprintln!("Warning: /Root not found or not a reference in trailer.");
         }
     }
 }
 
-fn dump_object_and_children(writer: &mut impl Write, obj_id: ObjectId, doc: &Document, visited: &mut BTreeSet<ObjectId>, decode_streams: bool, truncate_binary_streams: bool, is_contents: bool) {
+fn dump_object_and_children(writer: &mut impl Write, obj_id: ObjectId, doc: &Document, visited: &mut BTreeSet<ObjectId>, config: &DumpConfig, is_contents: bool) {
     if visited.contains(&obj_id) {
         return;
     }
@@ -108,13 +115,13 @@ fn dump_object_and_children(writer: &mut impl Write, obj_id: ObjectId, doc: &Doc
         Ok(object) => {
             let visited_for_print = BTreeSet::new();
             let mut child_refs = BTreeSet::new();
-            print_object(writer, object, doc, &visited_for_print, 1, decode_streams, truncate_binary_streams, is_contents, &mut child_refs);
+            print_object(writer, object, doc, &visited_for_print, 1, config, is_contents, &mut child_refs);
             writeln!(writer, "\n").unwrap();
 
             for (is_contents, child_id) in child_refs {
                 if !visited.contains(&child_id) {
                     writeln!(writer, "--------------------------------\n").unwrap();
-                    dump_object_and_children(writer, child_id, doc, visited, decode_streams, truncate_binary_streams, is_contents);
+                    dump_object_and_children(writer, child_id, doc, visited, config, is_contents);
                 }
             }
         }
@@ -129,22 +136,17 @@ fn is_binary_stream(content: &[u8]) -> bool {
 }
 
 fn decode_stream(stream: &lopdf::Stream) -> Cow<'_, [u8]> {
-    let filters = stream.dict.get(b"Filter").ok().and_then(|filter_obj| {
-        if let Ok(name_bytes) = filter_obj.as_name() {
-            Some(vec![String::from_utf8_lossy(name_bytes).to_string()])
+    let has_flate = stream.dict.get(b"Filter").ok().is_some_and(|filter_obj| {
+        if let Ok(name) = filter_obj.as_name() {
+            name == b"FlateDecode"
         } else if let Ok(arr) = filter_obj.as_array() {
-            Some(
-                arr.iter()
-                    .filter_map(|obj| obj.as_name().ok())
-                    .map(|bytes| String::from_utf8_lossy(bytes).to_string())
-                    .collect()
-            )
+            arr.iter().any(|obj| obj.as_name().ok().is_some_and(|n| n == b"FlateDecode"))
         } else {
-            None
+            false
         }
-    }).unwrap_or_default();
+    });
 
-    if filters.iter().any(|f| f == "FlateDecode") {
+    if has_flate {
         let mut decoder = ZlibDecoder::new(&stream.content[..]);
         let mut decompressed = Vec::new();
         if decoder.read_to_end(&mut decompressed).is_ok() {
@@ -155,7 +157,7 @@ fn decode_stream(stream: &lopdf::Stream) -> Cow<'_, [u8]> {
     Cow::Borrowed(&stream.content)
 }
 
-fn print_stream_content(writer: &mut impl Write, stream: &lopdf::Stream, indent_str: &str, truncate_binary_streams: bool, is_contents: bool) {
+fn print_stream_content(writer: &mut impl Write, stream: &lopdf::Stream, indent_str: &str, config: &DumpConfig, is_contents: bool) {
     let decoded_content = decode_stream(stream);
     let description = if let Cow::Owned(_) = &decoded_content {
         "decoded"
@@ -163,10 +165,10 @@ fn print_stream_content(writer: &mut impl Write, stream: &lopdf::Stream, indent_
         "raw"
     };
 
-    print_content_data(writer, &decoded_content, description, indent_str, truncate_binary_streams, is_contents);
+    print_content_data(writer, &decoded_content, description, indent_str, config, is_contents);
 }
 
-fn print_content_data(writer: &mut impl Write, content: &[u8], description: &str, indent_str: &str, truncate_binary_streams: bool, is_contents: bool) {
+fn print_content_data(writer: &mut impl Write, content: &[u8], description: &str, indent_str: &str, config: &DumpConfig, is_contents: bool) {
     if is_contents {
         match Content::decode(content) {
             Ok(content) => {
@@ -189,13 +191,13 @@ fn print_content_data(writer: &mut impl Write, content: &[u8], description: &str
     }
 
     let full_len = content.len();
-    let content_to_display = if truncate_binary_streams && is_binary_stream(content) {
+    let content_to_display = if config.truncate_binary_streams && is_binary_stream(content) {
         &content[..full_len.min(100)]
     } else {
         content
     };
 
-    let len_str = if truncate_binary_streams && full_len > 100 && is_binary_stream(content) {
+    let len_str = if config.truncate_binary_streams && full_len > 100 && is_binary_stream(content) {
         format!("{} (truncated to 100)", full_len)
     } else {
         full_len.to_string()
@@ -211,8 +213,11 @@ fn print_content_data(writer: &mut impl Write, content: &[u8], description: &str
     ).unwrap();
 }
 
-fn print_object(writer: &mut impl Write, obj: &Object, doc: &Document, visited: &BTreeSet<ObjectId>, indent: usize, decode_streams: bool, truncate_binary_streams: bool, is_contents: bool, child_refs: &mut BTreeSet<(bool, ObjectId)>) {
+#[allow(clippy::too_many_arguments)]
+#[allow(clippy::only_used_in_recursion)]
+fn print_object(writer: &mut impl Write, obj: &Object, doc: &Document, visited: &BTreeSet<ObjectId>, indent: usize, config: &DumpConfig, is_contents: bool, child_refs: &mut BTreeSet<(bool, ObjectId)>) {
     let indent_str = "  ".repeat(indent);
+    let child_indent = "  ".repeat(indent + 1);
 
     match obj {
         Object::Null => write!(writer, "null").unwrap(),
@@ -224,8 +229,8 @@ fn print_object(writer: &mut impl Write, obj: &Object, doc: &Document, visited: 
         Object::Array(array) => {
             writeln!(writer, "[").unwrap();
             for item in array {
-                write!(writer, "{}", "  ".repeat(indent + 1)).unwrap();
-                print_object(writer, item, doc, visited, indent + 1, decode_streams, truncate_binary_streams, is_contents, child_refs);
+                write!(writer, "{}", child_indent).unwrap();
+                print_object(writer, item, doc, visited, indent + 1, config, is_contents, child_refs);
                 writeln!(writer).unwrap();
             }
             write!(writer, "{}]", indent_str).unwrap();
@@ -233,22 +238,22 @@ fn print_object(writer: &mut impl Write, obj: &Object, doc: &Document, visited: 
         Object::Stream(stream) => {
             writeln!(writer, "<<").unwrap();
             for (key, value) in stream.dict.iter() {
-                write!(writer, "{}/{} ", "  ".repeat(indent + 1), String::from_utf8_lossy(key)).unwrap();
-                print_object(writer, value, doc, visited, indent + 1, decode_streams, truncate_binary_streams, is_contents, child_refs);
+                write!(writer, "{}/{} ", child_indent, String::from_utf8_lossy(key)).unwrap();
+                print_object(writer, value, doc, visited, indent + 1, config, is_contents, child_refs);
                 writeln!(writer).unwrap();
             }
             write!(writer, "{}>> stream", indent_str).unwrap();
 
-            if decode_streams {
-                print_stream_content(writer, stream, &indent_str, truncate_binary_streams, is_contents);
+            if config.decode_streams {
+                print_stream_content(writer, stream, &indent_str, config, is_contents);
             }
         }
         Object::Dictionary(dict) => {
             writeln!(writer, "<<").unwrap();
             for (key, value) in dict.iter() {
-                write!(writer, "{}/{} ", "  ".repeat(indent + 1), String::from_utf8_lossy(key)).unwrap();
+                write!(writer, "{}/{} ", child_indent, String::from_utf8_lossy(key)).unwrap();
                 let is_contents = key == b"Contents";
-                print_object(writer, value, doc, visited, indent + 1, decode_streams, truncate_binary_streams, is_contents, child_refs);
+                print_object(writer, value, doc, visited, indent + 1, config, is_contents, child_refs);
                 writeln!(writer).unwrap();
             }
             write!(writer, "{}>>", indent_str).unwrap();
@@ -281,6 +286,14 @@ mod tests {
     // Helper: create a minimal Document (needed by print_object / dump_object_and_children)
     fn empty_doc() -> Document {
         Document::new()
+    }
+
+    // Helper: default config with no decoding/truncation
+    fn default_config() -> DumpConfig {
+        DumpConfig {
+            decode_streams: false,
+            truncate_binary_streams: false,
+        }
     }
 
     // ── is_binary_stream ──────────────────────────────────────────────
@@ -397,8 +410,9 @@ mod tests {
         let doc = empty_doc();
         let visited = BTreeSet::new();
         let mut child_refs = BTreeSet::new();
+        let config = default_config();
         let out = output_of(|w| {
-            print_object(w, obj, &doc, &visited, 1, false, false, false, &mut child_refs);
+            print_object(w, obj, &doc, &visited, 1, &config, false, &mut child_refs);
         });
         (out, child_refs)
     }
@@ -478,8 +492,9 @@ mod tests {
         let doc = empty_doc();
         let visited = BTreeSet::new();
         let mut child_refs = BTreeSet::new();
+        let config = DumpConfig { decode_streams: true, truncate_binary_streams: false };
         let out = output_of(|w| {
-            print_object(w, &Object::Stream(stream), &doc, &visited, 1, true, false, false, &mut child_refs);
+            print_object(w, &Object::Stream(stream), &doc, &visited, 1, &config, false, &mut child_refs);
         });
         assert!(out.contains(">> stream"));
         assert!(out.contains("Stream content"));
@@ -500,8 +515,9 @@ mod tests {
         let mut visited = BTreeSet::new();
         visited.insert((5, 0));
         let mut child_refs = BTreeSet::new();
+        let config = default_config();
         let out = output_of(|w| {
-            print_object(w, &Object::Reference((5, 0)), &doc, &visited, 1, false, false, false, &mut child_refs);
+            print_object(w, &Object::Reference((5, 0)), &doc, &visited, 1, &config, false, &mut child_refs);
         });
         assert!(out.contains("5 0 R (visited)"));
     }
@@ -513,8 +529,9 @@ mod tests {
         let doc = empty_doc();
         let visited = BTreeSet::new();
         let mut child_refs = BTreeSet::new();
+        let config = default_config();
         output_of(|w| {
-            print_object(w, &Object::Dictionary(dict), &doc, &visited, 1, false, false, false, &mut child_refs);
+            print_object(w, &Object::Dictionary(dict), &doc, &visited, 1, &config, false, &mut child_refs);
         });
         // The reference under /Contents should have is_contents=true
         assert!(child_refs.contains(&(true, (10, 0))));
@@ -525,8 +542,9 @@ mod tests {
     #[test]
     fn print_content_data_ascii_no_truncation() {
         let content = b"Hello PDF stream";
+        let config = default_config();
         let out = output_of(|w| {
-            print_content_data(w, content, "raw", "  ", false, false);
+            print_content_data(w, content, "raw", "  ", &config, false);
         });
         assert!(out.contains("Stream content (raw, 16 bytes)"));
         assert!(out.contains("Hello PDF stream"));
@@ -536,8 +554,9 @@ mod tests {
     fn print_content_data_binary_truncated() {
         // 200 bytes of binary data (contains 0x80 so is_binary_stream = true)
         let content: Vec<u8> = (0..200).map(|i| (i as u8).wrapping_add(0x80)).collect();
+        let config = DumpConfig { decode_streams: false, truncate_binary_streams: true };
         let out = output_of(|w| {
-            print_content_data(w, &content, "raw", "", true, false);
+            print_content_data(w, &content, "raw", "", &config, false);
         });
         assert!(out.contains("200 (truncated to 100)"));
     }
@@ -546,8 +565,9 @@ mod tests {
     fn print_content_data_is_contents_parses_operations() {
         // A simple PDF content stream: "BT /F1 12 Tf ET"
         let content = b"BT\n/F1 12 Tf\nET";
+        let config = default_config();
         let out = output_of(|w| {
-            print_content_data(w, content, "decoded", "  ", false, true);
+            print_content_data(w, content, "decoded", "  ", &config, true);
         });
         assert!(out.contains("Parsed Content Stream"));
         assert!(out.contains("operations"));
@@ -560,8 +580,9 @@ mod tests {
         let mut doc = Document::new();
         doc.objects.insert((1, 0), Object::Integer(42));
         let mut visited = BTreeSet::new();
+        let config = default_config();
         let out = output_of(|w| {
-            dump_object_and_children(w, (1, 0), &doc, &mut visited, false, false, false);
+            dump_object_and_children(w, (1, 0), &doc, &mut visited, &config, false);
         });
         assert!(out.contains("Object 1 0:"));
         assert!(out.contains("42"));
@@ -578,8 +599,9 @@ mod tests {
         doc.objects.insert((2, 0), Object::Integer(99));
 
         let mut visited = BTreeSet::new();
+        let config = default_config();
         let out = output_of(|w| {
-            dump_object_and_children(w, (1, 0), &doc, &mut visited, false, false, false);
+            dump_object_and_children(w, (1, 0), &doc, &mut visited, &config, false);
         });
         assert!(out.contains("Object 1 0:"));
         assert!(out.contains("Object 2 0:"));
@@ -600,9 +622,10 @@ mod tests {
         doc.objects.insert((2, 0), Object::Dictionary(dict2));
 
         let mut visited = BTreeSet::new();
+        let config = default_config();
         // This should terminate (not infinite-loop) thanks to the visited set
         let out = output_of(|w| {
-            dump_object_and_children(w, (1, 0), &doc, &mut visited, false, false, false);
+            dump_object_and_children(w, (1, 0), &doc, &mut visited, &config, false);
         });
         assert!(out.contains("Object 1 0:"));
         assert!(out.contains("Object 2 0:"));
@@ -794,8 +817,9 @@ mod tests {
         let doc = empty_doc();
         let visited = BTreeSet::new();
         let mut child_refs = BTreeSet::new();
+        let config = DumpConfig { decode_streams: true, truncate_binary_streams: false };
         let out = output_of(|w| {
-            print_object(w, &Object::Stream(stream), &doc, &visited, 1, true, false, false, &mut child_refs);
+            print_object(w, &Object::Stream(stream), &doc, &visited, 1, &config, false, &mut child_refs);
         });
         assert!(out.contains(">> stream"));
         assert!(out.contains("decoded"));
@@ -820,8 +844,9 @@ mod tests {
         let doc = empty_doc();
         let visited = BTreeSet::new();
         let mut child_refs = BTreeSet::new();
+        let config = default_config();
         output_of(|w| {
-            print_object(w, &arr, &doc, &visited, 1, false, false, true, &mut child_refs);
+            print_object(w, &arr, &doc, &visited, 1, &config, true, &mut child_refs);
         });
         assert!(child_refs.contains(&(true, (7, 0))));
     }
@@ -843,8 +868,9 @@ mod tests {
 
     #[test]
     fn print_content_data_empty_content() {
+        let config = default_config();
         let out = output_of(|w| {
-            print_content_data(w, b"", "raw", "  ", false, false);
+            print_content_data(w, b"", "raw", "  ", &config, false);
         });
         assert!(out.contains("Stream content (raw, 0 bytes)"));
     }
@@ -853,8 +879,9 @@ mod tests {
     fn print_content_data_binary_no_truncation() {
         // Binary content but truncate_binary_streams=false → full output
         let content: Vec<u8> = (0..200).map(|i| (i as u8).wrapping_add(0x80)).collect();
+        let config = default_config();
         let out = output_of(|w| {
-            print_content_data(w, &content, "raw", "", false, false);
+            print_content_data(w, &content, "raw", "", &config, false);
         });
         assert!(out.contains("200 bytes"));
         assert!(!out.contains("truncated"));
@@ -864,8 +891,9 @@ mod tests {
     fn print_content_data_binary_short_with_truncation_enabled() {
         // Binary content < 100 bytes with truncation enabled → no truncation applied
         let content: Vec<u8> = vec![0x80; 50];
+        let config = DumpConfig { decode_streams: false, truncate_binary_streams: true };
         let out = output_of(|w| {
-            print_content_data(w, &content, "raw", "", true, false);
+            print_content_data(w, &content, "raw", "", &config, false);
         });
         assert!(out.contains("50 bytes"));
         assert!(!out.contains("truncated"));
@@ -875,8 +903,9 @@ mod tests {
     fn print_content_data_binary_exactly_100_bytes_with_truncation() {
         // Exactly 100 bytes of binary → no truncation (only truncates > 100)
         let content: Vec<u8> = vec![0x80; 100];
+        let config = DumpConfig { decode_streams: false, truncate_binary_streams: true };
         let out = output_of(|w| {
-            print_content_data(w, &content, "raw", "", true, false);
+            print_content_data(w, &content, "raw", "", &config, false);
         });
         assert!(out.contains("100 bytes"));
         assert!(!out.contains("truncated"));
@@ -886,8 +915,9 @@ mod tests {
     fn print_content_data_binary_101_bytes_with_truncation() {
         // 101 bytes of binary → should truncate
         let content: Vec<u8> = vec![0x80; 101];
+        let config = DumpConfig { decode_streams: false, truncate_binary_streams: true };
         let out = output_of(|w| {
-            print_content_data(w, &content, "raw", "", true, false);
+            print_content_data(w, &content, "raw", "", &config, false);
         });
         assert!(out.contains("101 (truncated to 100)"));
     }
@@ -898,8 +928,9 @@ mod tests {
         // that badly formed streams either parse (with 0 ops) or show the fallback.
         // Use content that Content::decode will reject: unbalanced parens cause a parse error.
         let content = b"( unclosed string";
+        let config = default_config();
         let out = output_of(|w| {
-            print_content_data(w, content, "raw", "  ", false, true);
+            print_content_data(w, content, "raw", "  ", &config, true);
         });
         // lopdf's Content::decode may or may not fail on this.
         // If it parses: we see "Parsed Content Stream"; if it fails: we see the fallback.
@@ -912,8 +943,9 @@ mod tests {
     fn print_content_data_ascii_not_truncated_even_when_flag_set() {
         // ASCII content >100 bytes with truncation flag → no truncation (not binary)
         let content = b"abcdefghij".repeat(20); // 200 bytes of ASCII
+        let config = DumpConfig { decode_streams: false, truncate_binary_streams: true };
         let out = output_of(|w| {
-            print_content_data(w, &content, "raw", "", true, false);
+            print_content_data(w, &content, "raw", "", &config, false);
         });
         assert!(out.contains("200 bytes"));
         assert!(!out.contains("truncated"));
@@ -924,8 +956,9 @@ mod tests {
     #[test]
     fn print_stream_content_no_filter() {
         let stream = make_stream(None, b"raw stream bytes".to_vec());
+        let config = default_config();
         let out = output_of(|w| {
-            print_stream_content(w, &stream, "  ", false, false);
+            print_stream_content(w, &stream, "  ", &config, false);
         });
         assert!(out.contains("raw"));
         assert!(out.contains("raw stream bytes"));
@@ -938,8 +971,9 @@ mod tests {
             Some(Object::Name(b"FlateDecode".to_vec())),
             compressed,
         );
+        let config = default_config();
         let out = output_of(|w| {
-            print_stream_content(w, &stream, "  ", false, false);
+            print_stream_content(w, &stream, "  ", &config, false);
         });
         assert!(out.contains("decoded"));
         assert!(out.contains("decoded content"));
@@ -950,8 +984,9 @@ mod tests {
         // Large binary stream with truncation enabled
         let content: Vec<u8> = vec![0x80; 200];
         let stream = make_stream(None, content);
+        let config = DumpConfig { decode_streams: false, truncate_binary_streams: true };
         let out = output_of(|w| {
-            print_stream_content(w, &stream, "", true, false);
+            print_stream_content(w, &stream, "", &config, false);
         });
         assert!(out.contains("truncated to 100"));
     }
@@ -960,8 +995,9 @@ mod tests {
     fn print_stream_content_is_contents_parses() {
         let content = b"BT\n/F1 12 Tf\nET";
         let stream = make_stream(None, content.to_vec());
+        let config = default_config();
         let out = output_of(|w| {
-            print_stream_content(w, &stream, "  ", false, true);
+            print_stream_content(w, &stream, "  ", &config, true);
         });
         assert!(out.contains("Parsed Content Stream"));
     }
@@ -972,8 +1008,9 @@ mod tests {
     fn dump_object_not_found() {
         let doc = Document::new();
         let mut visited = BTreeSet::new();
+        let config = default_config();
         let out = output_of(|w| {
-            dump_object_and_children(w, (99, 0), &doc, &mut visited, false, false, false);
+            dump_object_and_children(w, (99, 0), &doc, &mut visited, &config, false);
         });
         assert!(out.contains("Object 99 0:"));
         assert!(out.contains("Error getting object"));
@@ -986,8 +1023,9 @@ mod tests {
         doc.objects.insert((1, 0), Object::Integer(42));
         let mut visited = BTreeSet::new();
         visited.insert((1, 0));
+        let config = default_config();
         let out = output_of(|w| {
-            dump_object_and_children(w, (1, 0), &doc, &mut visited, false, false, false);
+            dump_object_and_children(w, (1, 0), &doc, &mut visited, &config, false);
         });
         assert_eq!(out, "");
     }
@@ -1004,8 +1042,9 @@ mod tests {
         doc.objects.insert((3, 0), Object::Integer(777));
 
         let mut visited = BTreeSet::new();
+        let config = default_config();
         let out = output_of(|w| {
-            dump_object_and_children(w, (1, 0), &doc, &mut visited, false, false, false);
+            dump_object_and_children(w, (1, 0), &doc, &mut visited, &config, false);
         });
         assert!(out.contains("Object 1 0:"));
         assert!(out.contains("Object 2 0:"));
@@ -1025,8 +1064,9 @@ mod tests {
         doc.objects.insert((3, 0), Object::Integer(33));
 
         let mut visited = BTreeSet::new();
+        let config = default_config();
         let out = output_of(|w| {
-            dump_object_and_children(w, (1, 0), &doc, &mut visited, false, false, false);
+            dump_object_and_children(w, (1, 0), &doc, &mut visited, &config, false);
         });
         assert!(out.contains("Object 1 0:"));
         assert!(out.contains("Object 2 0:"));
@@ -1046,8 +1086,9 @@ mod tests {
         doc.objects.insert((1, 0), Object::Stream(stream));
 
         let mut visited = BTreeSet::new();
+        let config = DumpConfig { decode_streams: true, truncate_binary_streams: false };
         let out = output_of(|w| {
-            dump_object_and_children(w, (1, 0), &doc, &mut visited, true, false, false);
+            dump_object_and_children(w, (1, 0), &doc, &mut visited, &config, false);
         });
         assert!(out.contains("Object 1 0:"));
         assert!(out.contains("stream content here"));
@@ -1066,8 +1107,9 @@ mod tests {
         doc.objects.insert((2, 0), Object::Stream(stream));
 
         let mut visited = BTreeSet::new();
+        let config = DumpConfig { decode_streams: true, truncate_binary_streams: false };
         let out = output_of(|w| {
-            dump_object_and_children(w, (1, 0), &doc, &mut visited, true, false, false);
+            dump_object_and_children(w, (1, 0), &doc, &mut visited, &config, false);
         });
         assert!(out.contains("Object 2 0:"));
         assert!(out.contains("Parsed Content Stream"));
@@ -1082,9 +1124,414 @@ mod tests {
         doc.objects.insert((2, 0), Object::Integer(1));
 
         let mut visited = BTreeSet::new();
+        let config = default_config();
         let out = output_of(|w| {
-            dump_object_and_children(w, (1, 0), &doc, &mut visited, false, false, false);
+            dump_object_and_children(w, (1, 0), &doc, &mut visited, &config, false);
         });
         assert!(out.contains("--------------------------------"));
+    }
+
+    // ── print_object: edge-case Object variants ─────────────────────
+
+    #[test]
+    fn print_object_integer_zero() {
+        let (out, _) = print_obj(&Object::Integer(0));
+        assert_eq!(out, "0");
+    }
+
+    #[test]
+    fn print_object_real_negative() {
+        let (out, _) = print_obj(&Object::Real(-2.75));
+        assert_eq!(out, "-2.75");
+    }
+
+    #[test]
+    fn print_object_real_large() {
+        let (out, _) = print_obj(&Object::Real(99999.5));
+        assert_eq!(out, "99999.5");
+    }
+
+    #[test]
+    fn print_object_empty_string() {
+        let (out, _) = print_obj(&Object::String(b"".to_vec(), StringFormat::Literal));
+        assert_eq!(out, "()");
+    }
+
+    #[test]
+    fn print_object_empty_name() {
+        let (out, _) = print_obj(&Object::Name(b"".to_vec()));
+        assert_eq!(out, "/");
+    }
+
+    #[test]
+    fn print_object_string_non_utf8() {
+        // Non-UTF8 bytes should be handled by from_utf8_lossy with replacement char
+        let (out, _) = print_obj(&Object::String(vec![0xFF, 0xFE], StringFormat::Literal));
+        assert!(out.starts_with('('));
+        assert!(out.ends_with(')'));
+        assert!(out.contains('\u{FFFD}'), "Non-UTF8 bytes should produce replacement chars");
+    }
+
+    #[test]
+    fn print_object_name_non_utf8() {
+        let (out, _) = print_obj(&Object::Name(vec![0x80, 0x81]));
+        assert!(out.starts_with('/'));
+        assert!(out.contains('\u{FFFD}'), "Non-UTF8 name bytes should produce replacement chars");
+    }
+
+    #[test]
+    fn print_object_reference_nonzero_generation() {
+        let obj = Object::Reference((5, 2));
+        let (out, refs) = print_obj(&obj);
+        assert_eq!(out, "5 2 R");
+        assert!(refs.contains(&(false, (5, 2))));
+    }
+
+    #[test]
+    fn print_object_array_mixed_types() {
+        let arr = Object::Array(vec![
+            Object::Integer(1),
+            Object::Name(b"Foo".to_vec()),
+            Object::Boolean(true),
+            Object::Null,
+            Object::Real(1.5),
+        ]);
+        let (out, _) = print_obj(&arr);
+        assert!(out.contains("1"));
+        assert!(out.contains("/Foo"));
+        assert!(out.contains("true"));
+        assert!(out.contains("null"));
+        assert!(out.contains("1.5"));
+    }
+
+    #[test]
+    fn print_object_array_of_arrays() {
+        let inner = Object::Array(vec![Object::Integer(10)]);
+        let outer = Object::Array(vec![inner]);
+        let (out, _) = print_obj(&outer);
+        // Should have nested brackets
+        let open_count = out.matches('[').count();
+        let close_count = out.matches(']').count();
+        assert_eq!(open_count, 2, "Expected 2 opening brackets for nested arrays");
+        assert_eq!(close_count, 2, "Expected 2 closing brackets for nested arrays");
+        assert!(out.contains("10"));
+    }
+
+    #[test]
+    fn print_object_dict_in_array() {
+        let mut dict = Dictionary::new();
+        dict.set("K", Object::Integer(5));
+        let arr = Object::Array(vec![Object::Dictionary(dict)]);
+        let (out, _) = print_obj(&arr);
+        assert!(out.contains("<<"));
+        assert!(out.contains("/K"));
+        assert!(out.contains("5"));
+        assert!(out.contains(">>"));
+    }
+
+    #[test]
+    fn print_object_stream_dict_with_reference_collects_child_ref() {
+        // Stream dict entries that are references should be collected
+        let mut dict = Dictionary::new();
+        dict.set("Font", Object::Reference((20, 0)));
+        let stream = Stream::new(dict, b"data".to_vec());
+        let doc = empty_doc();
+        let visited = BTreeSet::new();
+        let mut child_refs = BTreeSet::new();
+        let config = default_config();
+        output_of(|w| {
+            print_object(w, &Object::Stream(stream), &doc, &visited, 1, &config, false, &mut child_refs);
+        });
+        assert!(child_refs.contains(&(false, (20, 0))), "Reference in stream dict should be collected");
+    }
+
+    #[test]
+    fn print_object_contents_key_with_non_reference_value() {
+        // /Contents with a non-reference value (e.g., an integer) should not crash
+        let mut dict = Dictionary::new();
+        dict.set("Contents", Object::Integer(42));
+        let (out, refs) = print_obj(&Object::Dictionary(dict));
+        assert!(out.contains("/Contents"));
+        assert!(out.contains("42"));
+        assert!(refs.is_empty(), "Non-reference Contents value should not add child refs");
+    }
+
+    #[test]
+    fn print_object_contents_key_with_array_of_refs() {
+        // /Contents pointing to an array of references: each ref should get is_contents=true
+        let mut dict = Dictionary::new();
+        dict.set("Contents", Object::Array(vec![
+            Object::Reference((10, 0)),
+            Object::Reference((11, 0)),
+        ]));
+        let doc = empty_doc();
+        let visited = BTreeSet::new();
+        let mut child_refs = BTreeSet::new();
+        let config = default_config();
+        output_of(|w| {
+            print_object(w, &Object::Dictionary(dict), &doc, &visited, 1, &config, false, &mut child_refs);
+        });
+        assert!(child_refs.contains(&(true, (10, 0))), "Array ref under /Contents should have is_contents=true");
+        assert!(child_refs.contains(&(true, (11, 0))), "Array ref under /Contents should have is_contents=true");
+    }
+
+    // ── decode_stream: filter array with mixed types ────────────────
+
+    #[test]
+    fn decode_stream_filter_array_with_non_name_elements() {
+        // Array with a non-Name object (e.g., Integer) mixed in → filter_map skips it
+        let compressed = zlib_compress(b"mixed types");
+        let stream = make_stream(
+            Some(Object::Array(vec![
+                Object::Integer(42),  // not a Name, should be skipped
+                Object::Name(b"FlateDecode".to_vec()),
+            ])),
+            compressed,
+        );
+        let result = decode_stream(&stream);
+        assert!(matches!(result, Cow::Owned(_)));
+        assert_eq!(&*result, b"mixed types");
+    }
+
+    #[test]
+    fn decode_stream_filter_array_all_non_name() {
+        // Array where no elements are Names → empty filter list → no decode
+        let stream = make_stream(
+            Some(Object::Array(vec![
+                Object::Integer(1),
+                Object::Boolean(true),
+            ])),
+            b"raw data".to_vec(),
+        );
+        let result = decode_stream(&stream);
+        assert!(matches!(result, Cow::Borrowed(_)));
+        assert_eq!(&*result, b"raw data");
+    }
+
+    #[test]
+    fn decode_stream_large_content() {
+        // Verify decompression works for larger payloads
+        let large: Vec<u8> = (0..10000).map(|i| (i % 256) as u8).collect();
+        let compressed = zlib_compress(&large);
+        let stream = make_stream(
+            Some(Object::Name(b"FlateDecode".to_vec())),
+            compressed,
+        );
+        let result = decode_stream(&stream);
+        assert!(matches!(result, Cow::Owned(_)));
+        assert_eq!(&*result, &large[..]);
+    }
+
+    // ── print_content_data: formatting details ──────────────────────
+
+    #[test]
+    fn print_content_data_description_propagated() {
+        let config = default_config();
+        let out = output_of(|w| {
+            print_content_data(w, b"x", "custom-desc", "  ", &config, false);
+        });
+        assert!(out.contains("custom-desc"), "Description should appear in output");
+    }
+
+    #[test]
+    fn print_content_data_indent_str_used() {
+        let config = default_config();
+        let out = output_of(|w| {
+            print_content_data(w, b"data", "raw", "    ", &config, false);
+        });
+        assert!(out.contains("    Stream content"), "Indent string should prefix stream content line");
+    }
+
+    #[test]
+    fn print_content_data_is_contents_indent_str_used() {
+        let content = b"BT\n/F1 12 Tf\nET";
+        let config = default_config();
+        let out = output_of(|w| {
+            print_content_data(w, content, "raw", ">>> ", &config, true);
+        });
+        assert!(out.contains(">>> Parsed Content Stream"), "Indent string should prefix parsed content header");
+    }
+
+    // ── print_stream_content: combined paths ────────────────────────
+
+    #[test]
+    fn print_stream_content_flatedecode_is_contents() {
+        // Combined path: FlateDecode decompression + content stream parsing
+        let content = b"BT\n/F1 12 Tf\n(Hello) Tj\nET";
+        let compressed = zlib_compress(content);
+        let stream = make_stream(
+            Some(Object::Name(b"FlateDecode".to_vec())),
+            compressed,
+        );
+        let config = default_config();
+        let out = output_of(|w| {
+            print_stream_content(w, &stream, "  ", &config, true);
+        });
+        assert!(out.contains("Parsed Content Stream"), "Decoded content stream should be parsed");
+    }
+
+    #[test]
+    fn print_stream_content_corrupt_flatedecode_not_contents() {
+        // Corrupt FlateDecode with is_contents=false → falls back to raw borrowed content
+        let stream = make_stream(
+            Some(Object::Name(b"FlateDecode".to_vec())),
+            b"not valid zlib data at all".to_vec(),
+        );
+        let config = default_config();
+        let out = output_of(|w| {
+            print_stream_content(w, &stream, "", &config, false);
+        });
+        assert!(out.contains("raw"), "Corrupt FlateDecode should fall back to 'raw'");
+        assert!(out.contains("not valid zlib data"));
+    }
+
+    #[test]
+    fn print_stream_content_description_shows_decoded_for_flatedecode() {
+        let compressed = zlib_compress(b"text");
+        let stream = make_stream(
+            Some(Object::Name(b"FlateDecode".to_vec())),
+            compressed,
+        );
+        let config = default_config();
+        let out = output_of(|w| {
+            print_stream_content(w, &stream, "", &config, false);
+        });
+        assert!(out.contains("decoded"), "Successfully decompressed should show 'decoded'");
+    }
+
+    #[test]
+    fn print_stream_content_description_shows_raw_for_no_filter() {
+        let stream = make_stream(None, b"plain".to_vec());
+        let config = default_config();
+        let out = output_of(|w| {
+            print_stream_content(w, &stream, "", &config, false);
+        });
+        assert!(out.contains("raw"), "No filter should show 'raw'");
+    }
+
+    // ── dump_object_and_children: additional paths ──────────────────
+
+    #[test]
+    fn dump_object_stream_dict_refs_traversed() {
+        // Stream dict contains references → those children should be traversed
+        let mut doc = Document::new();
+        let mut dict = Dictionary::new();
+        dict.set("Font", Object::Reference((2, 0)));
+        let stream = Stream::new(dict, b"data".to_vec());
+        doc.objects.insert((1, 0), Object::Stream(stream));
+        doc.objects.insert((2, 0), Object::Integer(42));
+
+        let mut visited = BTreeSet::new();
+        let config = default_config();
+        let out = output_of(|w| {
+            dump_object_and_children(w, (1, 0), &doc, &mut visited, &config, false);
+        });
+        assert!(out.contains("Object 1 0:"), "Parent stream should be printed");
+        assert!(out.contains("Object 2 0:"), "Referenced object in stream dict should be traversed");
+        assert!(out.contains("42"));
+    }
+
+    #[test]
+    fn dump_object_is_contents_direct_param() {
+        // Passing is_contents=true directly to dump_object_and_children
+        let mut doc = Document::new();
+        let content = b"BT\n/F1 12 Tf\nET";
+        let stream = make_stream(None, content.to_vec());
+        doc.objects.insert((1, 0), Object::Stream(stream));
+
+        let mut visited = BTreeSet::new();
+        let config = DumpConfig { decode_streams: true, truncate_binary_streams: false };
+        let out = output_of(|w| {
+            dump_object_and_children(w, (1, 0), &doc, &mut visited, &config, true);
+        });
+        assert!(out.contains("Parsed Content Stream"), "Direct is_contents=true should trigger content parsing");
+    }
+
+    #[test]
+    fn dump_object_with_decode_and_truncate() {
+        // Both decode_streams=true and truncate_binary_streams=true with binary stream
+        let mut doc = Document::new();
+        let binary_content: Vec<u8> = vec![0x80; 200];
+        let stream = make_stream(None, binary_content);
+        doc.objects.insert((1, 0), Object::Stream(stream));
+
+        let mut visited = BTreeSet::new();
+        let config = DumpConfig { decode_streams: true, truncate_binary_streams: true };
+        let out = output_of(|w| {
+            dump_object_and_children(w, (1, 0), &doc, &mut visited, &config, false);
+        });
+        assert!(out.contains("truncated to 100"), "Binary stream should be truncated");
+    }
+
+    #[test]
+    fn dump_object_diamond_dependency() {
+        // A → B, A → C, B → D, C → D  (diamond: D visited once)
+        let mut doc = Document::new();
+        let mut dict_a = Dictionary::new();
+        dict_a.set("B", Object::Reference((2, 0)));
+        dict_a.set("C", Object::Reference((3, 0)));
+        let mut dict_b = Dictionary::new();
+        dict_b.set("D", Object::Reference((4, 0)));
+        let mut dict_c = Dictionary::new();
+        dict_c.set("D", Object::Reference((4, 0)));
+
+        doc.objects.insert((1, 0), Object::Dictionary(dict_a));
+        doc.objects.insert((2, 0), Object::Dictionary(dict_b));
+        doc.objects.insert((3, 0), Object::Dictionary(dict_c));
+        doc.objects.insert((4, 0), Object::Integer(999));
+
+        let mut visited = BTreeSet::new();
+        let config = default_config();
+        let out = output_of(|w| {
+            dump_object_and_children(w, (1, 0), &doc, &mut visited, &config, false);
+        });
+        assert_eq!(visited.len(), 4, "All 4 objects should be visited exactly once");
+        // Object 4 should appear exactly once (not duplicated)
+        let count = out.matches("Object 4 0:").count();
+        assert_eq!(count, 1, "Diamond dependency: object 4 should be dumped only once");
+    }
+
+    #[test]
+    fn dump_object_self_referencing() {
+        // An object that references itself
+        let mut doc = Document::new();
+        let mut dict = Dictionary::new();
+        dict.set("Self", Object::Reference((1, 0)));
+        doc.objects.insert((1, 0), Object::Dictionary(dict));
+
+        let mut visited = BTreeSet::new();
+        let config = default_config();
+        let out = output_of(|w| {
+            dump_object_and_children(w, (1, 0), &doc, &mut visited, &config, false);
+        });
+        // Should terminate and print the object once
+        let count = out.matches("Object 1 0:").count();
+        assert_eq!(count, 1, "Self-referencing object should be printed once");
+    }
+
+    // ── is_binary_stream: specific byte boundaries ──────────────────
+
+    #[test]
+    fn is_binary_stream_unit_separator() {
+        // 0x1F is a control char, not alphanumeric/whitespace/punctuation → binary
+        assert!(is_binary_stream(&[0x1F]));
+    }
+
+    #[test]
+    fn is_binary_stream_tilde_is_punctuation() {
+        // 0x7E (~) is ASCII punctuation → not binary
+        assert!(!is_binary_stream(b"~"));
+    }
+
+    #[test]
+    fn is_binary_stream_tab_only() {
+        // Tab (0x09) is ASCII whitespace
+        assert!(!is_binary_stream(b"\t"));
+    }
+
+    #[test]
+    fn is_binary_stream_escape_char() {
+        // 0x1B (ESC) is a control char → binary
+        assert!(is_binary_stream(&[0x1B]));
     }
 }
