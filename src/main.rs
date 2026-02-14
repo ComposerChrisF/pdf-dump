@@ -1557,29 +1557,11 @@ fn compare_page(doc1: &Document, doc2: &Document, page_id1: ObjectId, page_id2: 
     }
 }
 
-fn format_operand(obj: &Object) -> String {
-    match obj {
-        Object::Name(n) => format!("/{}", String::from_utf8_lossy(n)),
-        Object::Integer(i) => i.to_string(),
-        Object::Real(r) => r.to_string(),
-        Object::Boolean(b) => b.to_string(),
-        Object::String(bytes, _) => format!("({})", String::from_utf8_lossy(bytes)),
-        Object::Array(arr) => {
-            let items: Vec<String> = arr.iter().map(format_operand).collect();
-            format!("[{}]", items.join(" "))
-        }
-        Object::Reference(id) => format!("{} {} R", id.0, id.1),
-        Object::Null => "null".to_string(),
-        Object::Dictionary(_) => "<<...>>".to_string(),
-        Object::Stream(_) => "<<stream>>".to_string(),
-    }
-}
-
 fn format_operation(op: &lopdf::content::Operation) -> String {
     if op.operands.is_empty() {
         return op.operator.clone();
     }
-    let operands: Vec<String> = op.operands.iter().map(format_operand).collect();
+    let operands: Vec<String> = op.operands.iter().map(format_dict_value).collect();
     format!("{} {}", operands.join(" "), op.operator)
 }
 
@@ -4565,7 +4547,7 @@ mod tests {
 
     #[test]
     fn object_to_json_real() {
-        let val = object_to_json(&Object::Real(3.14), &empty_doc(), &json_config());
+        let val = object_to_json(&Object::Real(2.72), &empty_doc(), &json_config());
         assert_eq!(val["type"], "real");
     }
 
@@ -5351,7 +5333,7 @@ mod tests {
 
     #[test]
     fn format_dict_value_real() {
-        assert_eq!(format_dict_value(&Object::Real(3.14)), "3.14");
+        assert_eq!(format_dict_value(&Object::Real(2.72)), "2.72");
     }
 
     #[test]
@@ -6967,7 +6949,7 @@ mod tests {
         assert!(collect_references_in_object(&Object::Null, target, "").is_empty());
         assert!(collect_references_in_object(&Object::Boolean(true), target, "").is_empty());
         assert!(collect_references_in_object(&Object::Integer(42), target, "").is_empty());
-        assert!(collect_references_in_object(&Object::Real(3.14), target, "").is_empty());
+        assert!(collect_references_in_object(&Object::Real(2.72), target, "").is_empty());
         assert!(collect_references_in_object(&Object::Name(b"Test".to_vec()), target, "").is_empty());
         assert!(collect_references_in_object(
             &Object::String(b"test".to_vec(), StringFormat::Literal), target, ""
@@ -8351,7 +8333,7 @@ mod tests {
 
     #[test]
     fn tree_node_label_real() {
-        assert_eq!(tree_node_label(&Object::Real(3.14)), "Real(3.14)");
+        assert_eq!(tree_node_label(&Object::Real(2.72)), "Real(2.72)");
     }
 
     #[test]
