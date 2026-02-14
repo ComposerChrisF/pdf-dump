@@ -6107,4 +6107,1211 @@ mod tests {
         assert_eq!(issues.len(), 1);
         assert!(issues[0].message.contains("/Pages /Count is 5"));
     }
+
+    // ════════════════════════════════════════════════════════════════
+    // Additional P1 coverage: --refs-to
+    // ════════════════════════════════════════════════════════════════
+
+    #[test]
+    fn collect_refs_multiple_paths_same_object() {
+        // Object references target from two different dict keys
+        let target = (5, 0);
+        let mut dict = Dictionary::new();
+        dict.set(b"Font", Object::Reference(target));
+        dict.set(b"ExtGState", Object::Reference(target));
+        let obj = Object::Dictionary(dict);
+
+        let paths = collect_references_in_object(&obj, target, "");
+        assert_eq!(paths.len(), 2);
+        assert!(paths.contains(&"/ExtGState".to_string()));
+        assert!(paths.contains(&"/Font".to_string()));
+    }
+
+    #[test]
+    fn collect_refs_mixed_containers_dict_array_ref() {
+        // Dict → Array → Reference
+        let target = (7, 0);
+        let inner_array = Object::Array(vec![
+            Object::Integer(42),
+            Object::Reference(target),
+        ]);
+        let mut dict = Dictionary::new();
+        dict.set(b"Kids", inner_array);
+        let obj = Object::Dictionary(dict);
+
+        let paths = collect_references_in_object(&obj, target, "");
+        assert_eq!(paths.len(), 1);
+        assert_eq!(paths[0], "/Kids[1]");
+    }
+
+    #[test]
+    fn collect_refs_deeply_nested() {
+        // Dict → Dict → Array → Dict → Reference
+        let target = (10, 0);
+        let mut innermost = Dictionary::new();
+        innermost.set(b"Ref", Object::Reference(target));
+        let arr = Object::Array(vec![Object::Dictionary(innermost)]);
+        let mut mid = Dictionary::new();
+        mid.set(b"Items", arr);
+        let mut outer = Dictionary::new();
+        outer.set(b"Resources", Object::Dictionary(mid));
+        let obj = Object::Dictionary(outer);
+
+        let paths = collect_references_in_object(&obj, target, "");
+        assert_eq!(paths.len(), 1);
+        assert_eq!(paths[0], "/Resources/Items[0]/Ref");
+    }
+
+    #[test]
+    fn collect_refs_non_matching_reference_ignored() {
+        let target = (5, 0);
+        let obj = Object::Array(vec![
+            Object::Reference((1, 0)),
+            Object::Reference((2, 0)),
+            Object::Integer(99),
+        ]);
+        let paths = collect_references_in_object(&obj, target, "");
+        assert!(paths.is_empty());
+    }
+
+    #[test]
+    fn collect_refs_primitive_types_return_empty() {
+        let target = (5, 0);
+        assert!(collect_references_in_object(&Object::Null, target, "").is_empty());
+        assert!(collect_references_in_object(&Object::Boolean(true), target, "").is_empty());
+        assert!(collect_references_in_object(&Object::Integer(42), target, "").is_empty());
+        assert!(collect_references_in_object(&Object::Real(3.14), target, "").is_empty());
+        assert!(collect_references_in_object(&Object::Name(b"Test".to_vec()), target, "").is_empty());
+        assert!(collect_references_in_object(
+            &Object::String(b"test".to_vec(), StringFormat::Literal), target, ""
+        ).is_empty());
+    }
+
+    #[test]
+    fn print_refs_to_multiple_referencing_objects() {
+        let mut doc = Document::new();
+        let target_id: ObjectId = (5, 0);
+        doc.objects.insert(target_id, Object::Integer(42));
+
+        // Two different objects reference the target
+        let mut dict1 = Dictionary::new();
+        dict1.set(b"Font", Object::Reference(target_id));
+        doc.objects.insert((1, 0), Object::Dictionary(dict1));
+
+        let mut dict2 = Dictionary::new();
+        dict2.set(b"XObject", Object::Reference(target_id));
+        doc.objects.insert((2, 0), Object::Dictionary(dict2));
+
+        let out = output_of(|w| print_refs_to(w, &doc, 5));
+        assert!(out.contains("Found 2 objects referencing 5 0 R."));
+        assert!(out.contains("/Font"));
+        assert!(out.contains("/XObject"));
+    }
+
+    #[test]
+    fn print_refs_to_nonexistent_target() {
+        // Target object doesn't exist — should still work, just find 0 refs
+        let mut doc = Document::new();
+        doc.objects.insert((1, 0), Object::Integer(10));
+
+        let out = output_of(|w| print_refs_to(w, &doc, 999));
+        assert!(out.contains("Found 0 objects referencing 999 0 R."));
+    }
+
+    #[test]
+    fn print_refs_to_json_multiple_via_keys() {
+        // Single object has two paths to the target
+        let mut doc = Document::new();
+        let target_id: ObjectId = (5, 0);
+        doc.objects.insert(target_id, Object::Integer(42));
+
+        let mut dict = Dictionary::new();
+        dict.set(b"A", Object::Reference(target_id));
+        dict.set(b"B", Object::Reference(target_id));
+        doc.objects.insert((1, 0), Object::Dictionary(dict));
+
+        let out = output_of(|w| print_refs_to_json(w, &doc, 5));
+        let parsed: Value = serde_json::from_str(&out).unwrap();
+        assert_eq!(parsed["reference_count"], 1);
+        let via_keys = parsed["references"][0]["via_keys"].as_array().unwrap();
+        assert_eq!(via_keys.len(), 2);
+    }
+
+    #[test]
+    fn print_refs_to_json_no_references() {
+        let mut doc = Document::new();
+        doc.objects.insert((1, 0), Object::Integer(42));
+
+        let out = output_of(|w| print_refs_to_json(w, &doc, 99));
+        let parsed: Value = serde_json::from_str(&out).unwrap();
+        assert_eq!(parsed["target_object"], 99);
+        assert_eq!(parsed["reference_count"], 0);
+        assert!(parsed["references"].as_array().unwrap().is_empty());
+    }
+
+    #[test]
+    fn print_refs_to_shows_object_type_label() {
+        let mut doc = Document::new();
+        let target_id: ObjectId = (5, 0);
+        doc.objects.insert(target_id, Object::Integer(42));
+
+        // Dict with /Type = Page
+        let mut dict = Dictionary::new();
+        dict.set(b"Type", Object::Name(b"Page".to_vec()));
+        dict.set(b"Contents", Object::Reference(target_id));
+        doc.objects.insert((1, 0), Object::Dictionary(dict));
+
+        let out = output_of(|w| print_refs_to(w, &doc, 5));
+        assert!(out.contains("Page"));
+        assert!(out.contains("Dictionary"));
+    }
+
+    // ════════════════════════════════════════════════════════════════
+    // Additional P1 coverage: --fonts
+    // ════════════════════════════════════════════════════════════════
+
+    #[test]
+    fn collect_fonts_type0_composite() {
+        let mut doc = Document::new();
+        let mut dict = Dictionary::new();
+        dict.set(b"Type", Object::Name(b"Font".to_vec()));
+        dict.set(b"Subtype", Object::Name(b"Type0".to_vec()));
+        dict.set(b"BaseFont", Object::Name(b"KozMinPro-Regular".to_vec()));
+        doc.objects.insert((1, 0), Object::Dictionary(dict));
+
+        let fonts = collect_fonts(&doc);
+        assert_eq!(fonts.len(), 1);
+        assert_eq!(fonts[0].subtype, "Type0");
+        assert_eq!(fonts[0].base_font, "KozMinPro-Regular");
+    }
+
+    #[test]
+    fn collect_fonts_cid_font_subtypes() {
+        let mut doc = Document::new();
+
+        // CIDFontType0
+        let mut dict1 = Dictionary::new();
+        dict1.set(b"Subtype", Object::Name(b"CIDFontType0".to_vec()));
+        dict1.set(b"BaseFont", Object::Name(b"CIDFont0".to_vec()));
+        doc.objects.insert((1, 0), Object::Dictionary(dict1));
+
+        // CIDFontType2
+        let mut dict2 = Dictionary::new();
+        dict2.set(b"Subtype", Object::Name(b"CIDFontType2".to_vec()));
+        dict2.set(b"BaseFont", Object::Name(b"CIDFont2".to_vec()));
+        doc.objects.insert((2, 0), Object::Dictionary(dict2));
+
+        let fonts = collect_fonts(&doc);
+        assert_eq!(fonts.len(), 2);
+        assert_eq!(fonts[0].subtype, "CIDFontType0");
+        assert_eq!(fonts[1].subtype, "CIDFontType2");
+    }
+
+    #[test]
+    fn collect_fonts_mmtype1() {
+        let mut doc = Document::new();
+        let mut dict = Dictionary::new();
+        dict.set(b"Subtype", Object::Name(b"MMType1".to_vec()));
+        dict.set(b"BaseFont", Object::Name(b"MultipleMaster".to_vec()));
+        doc.objects.insert((1, 0), Object::Dictionary(dict));
+
+        let fonts = collect_fonts(&doc);
+        assert_eq!(fonts.len(), 1);
+        assert_eq!(fonts[0].subtype, "MMType1");
+    }
+
+    #[test]
+    fn collect_fonts_embedded_fontfile_type1() {
+        let mut doc = Document::new();
+        // FontFile stream (Type1)
+        let ff_stream = Stream::new(Dictionary::new(), vec![0; 10]);
+        doc.objects.insert((3, 0), Object::Stream(ff_stream));
+
+        let mut fd_dict = Dictionary::new();
+        fd_dict.set(b"FontFile", Object::Reference((3, 0)));
+        doc.objects.insert((2, 0), Object::Dictionary(fd_dict));
+
+        let mut font = Dictionary::new();
+        font.set(b"Type", Object::Name(b"Font".to_vec()));
+        font.set(b"Subtype", Object::Name(b"Type1".to_vec()));
+        font.set(b"BaseFont", Object::Name(b"TimesRoman".to_vec()));
+        font.set(b"FontDescriptor", Object::Reference((2, 0)));
+        doc.objects.insert((1, 0), Object::Dictionary(font));
+
+        let fonts = collect_fonts(&doc);
+        assert_eq!(fonts.len(), 1);
+        assert_eq!(fonts[0].embedded, Some((3, 0)));
+    }
+
+    #[test]
+    fn collect_fonts_embedded_fontfile3_opentype() {
+        let mut doc = Document::new();
+        let ff_stream = Stream::new(Dictionary::new(), vec![0; 10]);
+        doc.objects.insert((3, 0), Object::Stream(ff_stream));
+
+        let mut fd_dict = Dictionary::new();
+        fd_dict.set(b"FontFile3", Object::Reference((3, 0)));
+        doc.objects.insert((2, 0), Object::Dictionary(fd_dict));
+
+        let mut font = Dictionary::new();
+        font.set(b"Type", Object::Name(b"Font".to_vec()));
+        font.set(b"Subtype", Object::Name(b"Type1".to_vec()));
+        font.set(b"BaseFont", Object::Name(b"OpenTypeFont".to_vec()));
+        font.set(b"FontDescriptor", Object::Reference((2, 0)));
+        doc.objects.insert((1, 0), Object::Dictionary(font));
+
+        let fonts = collect_fonts(&doc);
+        assert_eq!(fonts.len(), 1);
+        assert_eq!(fonts[0].embedded, Some((3, 0)));
+    }
+
+    #[test]
+    fn collect_fonts_encoding_as_reference() {
+        let mut doc = Document::new();
+        let mut dict = Dictionary::new();
+        dict.set(b"Type", Object::Name(b"Font".to_vec()));
+        dict.set(b"Subtype", Object::Name(b"Type1".to_vec()));
+        dict.set(b"BaseFont", Object::Name(b"Symbol".to_vec()));
+        dict.set(b"Encoding", Object::Reference((10, 0)));
+        doc.objects.insert((1, 0), Object::Dictionary(dict));
+
+        let fonts = collect_fonts(&doc);
+        assert_eq!(fonts.len(), 1);
+        assert_eq!(fonts[0].encoding, "10 0 R");
+    }
+
+    #[test]
+    fn collect_fonts_encoding_as_dict_shows_dash() {
+        let mut doc = Document::new();
+        let mut dict = Dictionary::new();
+        dict.set(b"Type", Object::Name(b"Font".to_vec()));
+        dict.set(b"Subtype", Object::Name(b"Type1".to_vec()));
+        dict.set(b"BaseFont", Object::Name(b"Custom".to_vec()));
+        dict.set(b"Encoding", Object::Dictionary(Dictionary::new()));
+        doc.objects.insert((1, 0), Object::Dictionary(dict));
+
+        let fonts = collect_fonts(&doc);
+        assert_eq!(fonts.len(), 1);
+        assert_eq!(fonts[0].encoding, "-");
+    }
+
+    #[test]
+    fn collect_fonts_font_in_stream_object() {
+        let mut doc = Document::new();
+        let mut dict = Dictionary::new();
+        dict.set(b"Type", Object::Name(b"Font".to_vec()));
+        dict.set(b"Subtype", Object::Name(b"Type1".to_vec()));
+        dict.set(b"BaseFont", Object::Name(b"StreamFont".to_vec()));
+        let stream = Stream::new(dict, vec![]);
+        doc.objects.insert((1, 0), Object::Stream(stream));
+
+        let fonts = collect_fonts(&doc);
+        assert_eq!(fonts.len(), 1);
+        assert_eq!(fonts[0].base_font, "StreamFont");
+    }
+
+    #[test]
+    fn collect_fonts_sorted_by_object_id() {
+        let mut doc = Document::new();
+
+        let mut dict3 = Dictionary::new();
+        dict3.set(b"Type", Object::Name(b"Font".to_vec()));
+        dict3.set(b"Subtype", Object::Name(b"Type1".to_vec()));
+        dict3.set(b"BaseFont", Object::Name(b"Third".to_vec()));
+        doc.objects.insert((30, 0), Object::Dictionary(dict3));
+
+        let mut dict1 = Dictionary::new();
+        dict1.set(b"Type", Object::Name(b"Font".to_vec()));
+        dict1.set(b"Subtype", Object::Name(b"Type1".to_vec()));
+        dict1.set(b"BaseFont", Object::Name(b"First".to_vec()));
+        doc.objects.insert((10, 0), Object::Dictionary(dict1));
+
+        let mut dict2 = Dictionary::new();
+        dict2.set(b"Type", Object::Name(b"Font".to_vec()));
+        dict2.set(b"Subtype", Object::Name(b"Type1".to_vec()));
+        dict2.set(b"BaseFont", Object::Name(b"Second".to_vec()));
+        doc.objects.insert((20, 0), Object::Dictionary(dict2));
+
+        let fonts = collect_fonts(&doc);
+        assert_eq!(fonts.len(), 3);
+        assert_eq!(fonts[0].base_font, "First");
+        assert_eq!(fonts[1].base_font, "Second");
+        assert_eq!(fonts[2].base_font, "Third");
+    }
+
+    #[test]
+    fn collect_fonts_no_fontdescriptor_means_not_embedded() {
+        let mut doc = Document::new();
+        let mut dict = Dictionary::new();
+        dict.set(b"Type", Object::Name(b"Font".to_vec()));
+        dict.set(b"Subtype", Object::Name(b"Type1".to_vec()));
+        dict.set(b"BaseFont", Object::Name(b"Helvetica".to_vec()));
+        // No FontDescriptor key at all
+        doc.objects.insert((1, 0), Object::Dictionary(dict));
+
+        let fonts = collect_fonts(&doc);
+        assert_eq!(fonts.len(), 1);
+        assert!(fonts[0].embedded.is_none());
+    }
+
+    #[test]
+    fn collect_fonts_fontdescriptor_without_fontfile() {
+        let mut doc = Document::new();
+        // FontDescriptor exists but has no FontFile/FontFile2/FontFile3
+        let fd_dict = Dictionary::new();
+        doc.objects.insert((2, 0), Object::Dictionary(fd_dict));
+
+        let mut font = Dictionary::new();
+        font.set(b"Type", Object::Name(b"Font".to_vec()));
+        font.set(b"Subtype", Object::Name(b"Type1".to_vec()));
+        font.set(b"BaseFont", Object::Name(b"NoEmbed".to_vec()));
+        font.set(b"FontDescriptor", Object::Reference((2, 0)));
+        doc.objects.insert((1, 0), Object::Dictionary(font));
+
+        let fonts = collect_fonts(&doc);
+        assert_eq!(fonts.len(), 1);
+        assert!(fonts[0].embedded.is_none());
+    }
+
+    #[test]
+    fn collect_fonts_missing_subtype_defaults_to_dash() {
+        let mut doc = Document::new();
+        let mut dict = Dictionary::new();
+        dict.set(b"Type", Object::Name(b"Font".to_vec()));
+        // No Subtype key
+        dict.set(b"BaseFont", Object::Name(b"NoSubtype".to_vec()));
+        doc.objects.insert((1, 0), Object::Dictionary(dict));
+
+        let fonts = collect_fonts(&doc);
+        assert_eq!(fonts.len(), 1);
+        assert_eq!(fonts[0].subtype, "-");
+    }
+
+    #[test]
+    fn collect_fonts_non_font_subtype_ignored() {
+        let mut doc = Document::new();
+        let mut dict = Dictionary::new();
+        // Subtype=Image is not a font subtype
+        dict.set(b"Subtype", Object::Name(b"Image".to_vec()));
+        doc.objects.insert((1, 0), Object::Dictionary(dict));
+
+        let fonts = collect_fonts(&doc);
+        assert!(fonts.is_empty());
+    }
+
+    #[test]
+    fn print_fonts_json_embedded_null_when_not_embedded() {
+        let mut doc = Document::new();
+        let mut dict = Dictionary::new();
+        dict.set(b"Type", Object::Name(b"Font".to_vec()));
+        dict.set(b"Subtype", Object::Name(b"Type1".to_vec()));
+        dict.set(b"BaseFont", Object::Name(b"Helvetica".to_vec()));
+        doc.objects.insert((1, 0), Object::Dictionary(dict));
+
+        let out = output_of(|w| print_fonts_json(w, &doc));
+        let parsed: Value = serde_json::from_str(&out).unwrap();
+        assert!(parsed["fonts"][0]["embedded"].is_null());
+    }
+
+    #[test]
+    fn print_fonts_json_embedded_object_when_embedded() {
+        let mut doc = Document::new();
+        let ff_stream = Stream::new(Dictionary::new(), vec![0; 10]);
+        doc.objects.insert((3, 0), Object::Stream(ff_stream));
+        let mut fd_dict = Dictionary::new();
+        fd_dict.set(b"FontFile2", Object::Reference((3, 0)));
+        doc.objects.insert((2, 0), Object::Dictionary(fd_dict));
+        let mut font = Dictionary::new();
+        font.set(b"Type", Object::Name(b"Font".to_vec()));
+        font.set(b"Subtype", Object::Name(b"TrueType".to_vec()));
+        font.set(b"BaseFont", Object::Name(b"Embedded".to_vec()));
+        font.set(b"FontDescriptor", Object::Reference((2, 0)));
+        doc.objects.insert((1, 0), Object::Dictionary(font));
+
+        let out = output_of(|w| print_fonts_json(w, &doc));
+        let parsed: Value = serde_json::from_str(&out).unwrap();
+        let embedded = &parsed["fonts"][0]["embedded"];
+        assert_eq!(embedded["object_number"], 3);
+        assert_eq!(embedded["generation"], 0);
+    }
+
+    // ════════════════════════════════════════════════════════════════
+    // Additional P1 coverage: --images
+    // ════════════════════════════════════════════════════════════════
+
+    #[test]
+    fn collect_images_missing_width_height_bpc_defaults_to_zero() {
+        let mut doc = Document::new();
+        let mut dict = Dictionary::new();
+        dict.set(b"Subtype", Object::Name(b"Image".to_vec()));
+        // No Width, Height, or BitsPerComponent
+        let stream = Stream::new(dict, vec![0; 10]);
+        doc.objects.insert((1, 0), Object::Stream(stream));
+
+        let images = collect_images(&doc);
+        assert_eq!(images.len(), 1);
+        assert_eq!(images[0].width, 0);
+        assert_eq!(images[0].height, 0);
+        assert_eq!(images[0].bits_per_component, 0);
+    }
+
+    #[test]
+    fn collect_images_no_filter_defaults_to_dash() {
+        let mut doc = Document::new();
+        let mut dict = Dictionary::new();
+        dict.set(b"Subtype", Object::Name(b"Image".to_vec()));
+        dict.set(b"Width", Object::Integer(10));
+        dict.set(b"Height", Object::Integer(10));
+        // No Filter key
+        let stream = Stream::new(dict, vec![0; 10]);
+        doc.objects.insert((1, 0), Object::Stream(stream));
+
+        let images = collect_images(&doc);
+        assert_eq!(images.len(), 1);
+        assert_eq!(images[0].filter, "-");
+    }
+
+    #[test]
+    fn collect_images_no_colorspace_defaults_to_dash() {
+        let mut doc = Document::new();
+        let mut dict = Dictionary::new();
+        dict.set(b"Subtype", Object::Name(b"Image".to_vec()));
+        dict.set(b"Width", Object::Integer(10));
+        dict.set(b"Height", Object::Integer(10));
+        // No ColorSpace key
+        let stream = Stream::new(dict, vec![0; 10]);
+        doc.objects.insert((1, 0), Object::Stream(stream));
+
+        let images = collect_images(&doc);
+        assert_eq!(images.len(), 1);
+        assert_eq!(images[0].color_space, "-");
+    }
+
+    #[test]
+    fn collect_images_device_cmyk_color_space() {
+        let mut doc = Document::new();
+        let mut dict = Dictionary::new();
+        dict.set(b"Subtype", Object::Name(b"Image".to_vec()));
+        dict.set(b"Width", Object::Integer(50));
+        dict.set(b"Height", Object::Integer(50));
+        dict.set(b"ColorSpace", Object::Name(b"DeviceCMYK".to_vec()));
+        dict.set(b"BitsPerComponent", Object::Integer(8));
+        let stream = Stream::new(dict, vec![0; 100]);
+        doc.objects.insert((1, 0), Object::Stream(stream));
+
+        let images = collect_images(&doc);
+        assert_eq!(images.len(), 1);
+        assert_eq!(images[0].color_space, "DeviceCMYK");
+    }
+
+    #[test]
+    fn collect_images_dctdecode_filter() {
+        let mut doc = Document::new();
+        let mut dict = Dictionary::new();
+        dict.set(b"Subtype", Object::Name(b"Image".to_vec()));
+        dict.set(b"Width", Object::Integer(100));
+        dict.set(b"Height", Object::Integer(100));
+        dict.set(b"Filter", Object::Name(b"DCTDecode".to_vec()));
+        let stream = Stream::new(dict, vec![0xFF, 0xD8, 0xFF]); // JPEG magic bytes
+        doc.objects.insert((1, 0), Object::Stream(stream));
+
+        let images = collect_images(&doc);
+        assert_eq!(images.len(), 1);
+        assert_eq!(images[0].filter, "DCTDecode");
+    }
+
+    #[test]
+    fn collect_images_colorspace_as_reference_resolved() {
+        let mut doc = Document::new();
+        // Color space object that resolves to a name
+        doc.objects.insert((2, 0), Object::Name(b"DeviceGray".to_vec()));
+
+        let mut dict = Dictionary::new();
+        dict.set(b"Subtype", Object::Name(b"Image".to_vec()));
+        dict.set(b"Width", Object::Integer(10));
+        dict.set(b"Height", Object::Integer(10));
+        dict.set(b"ColorSpace", Object::Reference((2, 0)));
+        let stream = Stream::new(dict, vec![0; 10]);
+        doc.objects.insert((1, 0), Object::Stream(stream));
+
+        let images = collect_images(&doc);
+        assert_eq!(images.len(), 1);
+        assert_eq!(images[0].color_space, "DeviceGray");
+    }
+
+    #[test]
+    fn collect_images_colorspace_as_broken_reference() {
+        let mut doc = Document::new();
+        let mut dict = Dictionary::new();
+        dict.set(b"Subtype", Object::Name(b"Image".to_vec()));
+        dict.set(b"Width", Object::Integer(10));
+        dict.set(b"Height", Object::Integer(10));
+        // Reference to non-existent object
+        dict.set(b"ColorSpace", Object::Reference((99, 0)));
+        let stream = Stream::new(dict, vec![0; 10]);
+        doc.objects.insert((1, 0), Object::Stream(stream));
+
+        let images = collect_images(&doc);
+        assert_eq!(images.len(), 1);
+        // Falls back to showing the reference
+        assert_eq!(images[0].color_space, "99 0 R");
+    }
+
+    #[test]
+    fn collect_images_sorted_by_object_id() {
+        let mut doc = Document::new();
+
+        for (id, name) in [(30u32, "DeviceRGB"), (10, "DeviceGray"), (20, "DeviceCMYK")] {
+            let mut dict = Dictionary::new();
+            dict.set(b"Subtype", Object::Name(b"Image".to_vec()));
+            dict.set(b"Width", Object::Integer(10));
+            dict.set(b"Height", Object::Integer(10));
+            dict.set(b"ColorSpace", Object::Name(name.as_bytes().to_vec()));
+            let stream = Stream::new(dict, vec![0; 10]);
+            doc.objects.insert((id, 0), Object::Stream(stream));
+        }
+
+        let images = collect_images(&doc);
+        assert_eq!(images.len(), 3);
+        assert_eq!(images[0].object_id.0, 10);
+        assert_eq!(images[1].object_id.0, 20);
+        assert_eq!(images[2].object_id.0, 30);
+    }
+
+    #[test]
+    fn collect_images_multiple_images() {
+        let mut doc = Document::new();
+        for id in 1..=5 {
+            let mut dict = Dictionary::new();
+            dict.set(b"Subtype", Object::Name(b"Image".to_vec()));
+            dict.set(b"Width", Object::Integer(id as i64 * 10));
+            dict.set(b"Height", Object::Integer(id as i64 * 20));
+            let stream = Stream::new(dict, vec![0; id as usize * 100]);
+            doc.objects.insert((id, 0), Object::Stream(stream));
+        }
+
+        let images = collect_images(&doc);
+        assert_eq!(images.len(), 5);
+        assert_eq!(images[0].width, 10);
+        assert_eq!(images[4].width, 50);
+    }
+
+    #[test]
+    fn format_color_space_reference_in_array() {
+        let doc = Document::new();
+        let obj = Object::Array(vec![
+            Object::Name(b"ICCBased".to_vec()),
+            Object::Reference((7, 0)),
+        ]);
+        assert_eq!(format_color_space(&obj, &doc), "[ICCBased 7 0 R]");
+    }
+
+    #[test]
+    fn format_color_space_unknown_type_shows_dash() {
+        let doc = Document::new();
+        let obj = Object::Integer(42);
+        assert_eq!(format_color_space(&obj, &doc), "-");
+    }
+
+    #[test]
+    fn format_color_space_array_with_unknown_item() {
+        let doc = Document::new();
+        let obj = Object::Array(vec![
+            Object::Name(b"Indexed".to_vec()),
+            Object::Boolean(true), // unusual
+        ]);
+        assert_eq!(format_color_space(&obj, &doc), "[Indexed ?]");
+    }
+
+    #[test]
+    fn format_filter_unknown_type_shows_dash() {
+        let obj = Object::Integer(42);
+        assert_eq!(format_filter(&obj), "-");
+    }
+
+    #[test]
+    fn format_filter_array_with_unknown_item() {
+        let obj = Object::Array(vec![
+            Object::Name(b"FlateDecode".to_vec()),
+            Object::Integer(99), // unusual
+        ]);
+        assert_eq!(format_filter(&obj), "FlateDecode, ?");
+    }
+
+    #[test]
+    fn print_images_json_all_fields_present() {
+        let mut doc = Document::new();
+        let mut dict = Dictionary::new();
+        dict.set(b"Subtype", Object::Name(b"Image".to_vec()));
+        dict.set(b"Width", Object::Integer(640));
+        dict.set(b"Height", Object::Integer(480));
+        dict.set(b"ColorSpace", Object::Name(b"DeviceRGB".to_vec()));
+        dict.set(b"BitsPerComponent", Object::Integer(8));
+        dict.set(b"Filter", Object::Name(b"DCTDecode".to_vec()));
+        let stream = Stream::new(dict, vec![0; 5000]);
+        doc.objects.insert((1, 0), Object::Stream(stream));
+
+        let out = output_of(|w| print_images_json(w, &doc));
+        let parsed: Value = serde_json::from_str(&out).unwrap();
+        let img = &parsed["images"][0];
+        assert_eq!(img["width"], 640);
+        assert_eq!(img["height"], 480);
+        assert_eq!(img["color_space"], "DeviceRGB");
+        assert_eq!(img["bits_per_component"], 8);
+        assert_eq!(img["filter"], "DCTDecode");
+        assert_eq!(img["size"], 5000);
+        assert_eq!(img["object_number"], 1);
+        assert_eq!(img["generation"], 0);
+    }
+
+    // ════════════════════════════════════════════════════════════════
+    // Additional P1 coverage: --validate
+    // ════════════════════════════════════════════════════════════════
+
+    #[test]
+    fn collect_broken_refs_nested_dict() {
+        let doc = Document::new();
+        let mut inner = Dictionary::new();
+        inner.set(b"Ref", Object::Reference((99, 0)));
+        let mut outer = Dictionary::new();
+        outer.set(b"Inner", Object::Dictionary(inner));
+        let obj = Object::Dictionary(outer);
+
+        let broken = collect_broken_refs(&obj, &doc);
+        assert_eq!(broken.len(), 1);
+        assert_eq!(broken[0], (99, 0));
+    }
+
+    #[test]
+    fn collect_broken_refs_nested_array() {
+        let doc = Document::new();
+        let obj = Object::Array(vec![
+            Object::Array(vec![Object::Reference((88, 0))]),
+        ]);
+
+        let broken = collect_broken_refs(&obj, &doc);
+        assert_eq!(broken.len(), 1);
+        assert_eq!(broken[0], (88, 0));
+    }
+
+    #[test]
+    fn collect_broken_refs_multiple_in_one_object() {
+        let doc = Document::new();
+        let mut dict = Dictionary::new();
+        dict.set(b"A", Object::Reference((91, 0)));
+        dict.set(b"B", Object::Reference((92, 0)));
+        dict.set(b"C", Object::Reference((93, 0)));
+        let obj = Object::Dictionary(dict);
+
+        let broken = collect_broken_refs(&obj, &doc);
+        assert_eq!(broken.len(), 3);
+    }
+
+    #[test]
+    fn collect_broken_refs_valid_ref_not_reported() {
+        let mut doc = Document::new();
+        doc.objects.insert((5, 0), Object::Integer(42));
+        let obj = Object::Reference((5, 0));
+
+        let broken = collect_broken_refs(&obj, &doc);
+        assert!(broken.is_empty());
+    }
+
+    #[test]
+    fn collect_broken_refs_primitives_return_empty() {
+        let doc = Document::new();
+        assert!(collect_broken_refs(&Object::Null, &doc).is_empty());
+        assert!(collect_broken_refs(&Object::Boolean(false), &doc).is_empty());
+        assert!(collect_broken_refs(&Object::Integer(0), &doc).is_empty());
+        assert!(collect_broken_refs(&Object::Real(1.0), &doc).is_empty());
+        assert!(collect_broken_refs(&Object::Name(b"X".to_vec()), &doc).is_empty());
+    }
+
+    #[test]
+    fn check_required_keys_catalog_missing_pages() {
+        let mut doc = Document::new();
+        let mut catalog = Dictionary::new();
+        catalog.set(b"Type", Object::Name(b"Catalog".to_vec()));
+        // No /Pages key
+        doc.objects.insert((1, 0), Object::Dictionary(catalog));
+        doc.trailer.set(b"Root", Object::Reference((1, 0)));
+
+        let mut issues = Vec::new();
+        check_required_keys(&doc, &mut issues);
+        assert!(issues.iter().any(|i|
+            i.level == ValidationLevel::Error && i.message.contains("Catalog missing required /Pages")));
+    }
+
+    #[test]
+    fn check_required_keys_valid_catalog() {
+        let mut doc = Document::new();
+        let mut pages = Dictionary::new();
+        pages.set(b"Type", Object::Name(b"Pages".to_vec()));
+        pages.set(b"Count", Object::Integer(0));
+        pages.set(b"Kids", Object::Array(vec![]));
+        doc.objects.insert((2, 0), Object::Dictionary(pages));
+        let mut catalog = Dictionary::new();
+        catalog.set(b"Type", Object::Name(b"Catalog".to_vec()));
+        catalog.set(b"Pages", Object::Reference((2, 0)));
+        doc.objects.insert((1, 0), Object::Dictionary(catalog));
+        doc.trailer.set(b"Root", Object::Reference((1, 0)));
+
+        let mut issues = Vec::new();
+        check_required_keys(&doc, &mut issues);
+        // No "Catalog missing" errors — may still have MediaBox issues
+        assert!(!issues.iter().any(|i| i.message.contains("Catalog missing")));
+    }
+
+    #[test]
+    fn page_has_media_box_inherited_three_levels() {
+        let mut doc = Document::new();
+
+        // Grandparent has MediaBox
+        let mut grandparent = Dictionary::new();
+        grandparent.set(b"Type", Object::Name(b"Pages".to_vec()));
+        grandparent.set(b"MediaBox", Object::Array(vec![
+            Object::Integer(0), Object::Integer(0),
+            Object::Integer(612), Object::Integer(792),
+        ]));
+        doc.objects.insert((3, 0), Object::Dictionary(grandparent));
+
+        // Parent without MediaBox, points up
+        let mut parent = Dictionary::new();
+        parent.set(b"Type", Object::Name(b"Pages".to_vec()));
+        parent.set(b"Parent", Object::Reference((3, 0)));
+        doc.objects.insert((2, 0), Object::Dictionary(parent));
+
+        // Page without MediaBox
+        let mut page = Dictionary::new();
+        page.set(b"Type", Object::Name(b"Page".to_vec()));
+        page.set(b"Parent", Object::Reference((2, 0)));
+        doc.objects.insert((1, 0), Object::Dictionary(page));
+
+        assert!(page_has_media_box(&doc, (1, 0)));
+    }
+
+    #[test]
+    fn page_has_media_box_cycle_guard() {
+        let mut doc = Document::new();
+        // Page A points to B, B points to A — cycle, no MediaBox
+        let mut page_a = Dictionary::new();
+        page_a.set(b"Type", Object::Name(b"Page".to_vec()));
+        page_a.set(b"Parent", Object::Reference((2, 0)));
+        doc.objects.insert((1, 0), Object::Dictionary(page_a));
+
+        let mut page_b = Dictionary::new();
+        page_b.set(b"Type", Object::Name(b"Pages".to_vec()));
+        page_b.set(b"Parent", Object::Reference((1, 0)));
+        doc.objects.insert((2, 0), Object::Dictionary(page_b));
+
+        // Should not infinite loop, should return false
+        assert!(!page_has_media_box(&doc, (1, 0)));
+    }
+
+    #[test]
+    fn page_has_media_box_nonexistent_parent() {
+        let mut doc = Document::new();
+        let mut page = Dictionary::new();
+        page.set(b"Type", Object::Name(b"Page".to_vec()));
+        page.set(b"Parent", Object::Reference((99, 0))); // doesn't exist
+        doc.objects.insert((1, 0), Object::Dictionary(page));
+
+        assert!(!page_has_media_box(&doc, (1, 0)));
+    }
+
+    #[test]
+    fn page_has_media_box_non_dict_object() {
+        let mut doc = Document::new();
+        // Object is an Integer, not a Dictionary
+        doc.objects.insert((1, 0), Object::Integer(42));
+
+        assert!(!page_has_media_box(&doc, (1, 0)));
+    }
+
+    #[test]
+    fn collect_reachable_ids_multi_hop() {
+        let mut doc = Document::new();
+        // Chain: trailer → 1 (dict with ref to 2) → 2 (dict with ref to 3) → 3
+        let mut dict1 = Dictionary::new();
+        dict1.set(b"Next", Object::Reference((2, 0)));
+        doc.objects.insert((1, 0), Object::Dictionary(dict1));
+
+        let mut dict2 = Dictionary::new();
+        dict2.set(b"Next", Object::Reference((3, 0)));
+        doc.objects.insert((2, 0), Object::Dictionary(dict2));
+
+        doc.objects.insert((3, 0), Object::Integer(99));
+        doc.trailer.set(b"Root", Object::Reference((1, 0)));
+
+        let reachable = collect_reachable_ids(&doc);
+        assert!(reachable.contains(&(1, 0)));
+        assert!(reachable.contains(&(2, 0)));
+        assert!(reachable.contains(&(3, 0)));
+    }
+
+    #[test]
+    fn collect_reachable_ids_cycle_safe() {
+        let mut doc = Document::new();
+        // 1 → 2 → 1 (cycle)
+        let mut dict1 = Dictionary::new();
+        dict1.set(b"Next", Object::Reference((2, 0)));
+        doc.objects.insert((1, 0), Object::Dictionary(dict1));
+
+        let mut dict2 = Dictionary::new();
+        dict2.set(b"Prev", Object::Reference((1, 0)));
+        doc.objects.insert((2, 0), Object::Dictionary(dict2));
+
+        doc.trailer.set(b"Root", Object::Reference((1, 0)));
+
+        // Should not infinite-loop
+        let reachable = collect_reachable_ids(&doc);
+        assert!(reachable.contains(&(1, 0)));
+        assert!(reachable.contains(&(2, 0)));
+    }
+
+    #[test]
+    fn collect_reachable_ids_via_array() {
+        let mut doc = Document::new();
+        let arr = Object::Array(vec![
+            Object::Reference((2, 0)),
+            Object::Reference((3, 0)),
+        ]);
+        doc.objects.insert((1, 0), arr);
+        doc.objects.insert((2, 0), Object::Integer(1));
+        doc.objects.insert((3, 0), Object::Integer(2));
+        doc.trailer.set(b"Root", Object::Reference((1, 0)));
+
+        let reachable = collect_reachable_ids(&doc);
+        assert!(reachable.contains(&(2, 0)));
+        assert!(reachable.contains(&(3, 0)));
+    }
+
+    #[test]
+    fn collect_reachable_ids_via_stream_dict() {
+        let mut doc = Document::new();
+        let mut dict = Dictionary::new();
+        dict.set(b"Font", Object::Reference((2, 0)));
+        let stream = Stream::new(dict, vec![]);
+        doc.objects.insert((1, 0), Object::Stream(stream));
+        doc.objects.insert((2, 0), Object::Integer(42));
+        doc.trailer.set(b"Root", Object::Reference((1, 0)));
+
+        let reachable = collect_reachable_ids(&doc);
+        assert!(reachable.contains(&(2, 0)));
+    }
+
+    #[test]
+    fn check_stream_lengths_no_length_key_no_issue() {
+        let mut doc = Document::new();
+        // Stream without /Length key — not checked
+        let stream = Stream::new(Dictionary::new(), vec![0; 10]);
+        doc.objects.insert((1, 0), Object::Stream(stream));
+
+        let mut issues = Vec::new();
+        check_stream_lengths(&doc, &mut issues);
+        assert!(issues.is_empty());
+    }
+
+    #[test]
+    fn check_stream_lengths_zero_length_correct() {
+        let mut doc = Document::new();
+        let mut dict = Dictionary::new();
+        dict.set(b"Length", Object::Integer(0));
+        let stream = Stream::new(dict, vec![]);
+        doc.objects.insert((1, 0), Object::Stream(stream));
+
+        let mut issues = Vec::new();
+        check_stream_lengths(&doc, &mut issues);
+        assert!(issues.is_empty());
+    }
+
+    #[test]
+    fn check_page_tree_correct_count() {
+        let mut doc = Document::new();
+
+        // One page
+        let mut page = Dictionary::new();
+        page.set(b"Type", Object::Name(b"Page".to_vec()));
+        page.set(b"Parent", Object::Reference((2, 0)));
+        page.set(b"MediaBox", Object::Array(vec![
+            Object::Integer(0), Object::Integer(0),
+            Object::Integer(612), Object::Integer(792),
+        ]));
+        doc.objects.insert((3, 0), Object::Dictionary(page));
+
+        let mut pages_dict = Dictionary::new();
+        pages_dict.set(b"Type", Object::Name(b"Pages".to_vec()));
+        pages_dict.set(b"Count", Object::Integer(1));
+        pages_dict.set(b"Kids", Object::Array(vec![Object::Reference((3, 0))]));
+        doc.objects.insert((2, 0), Object::Dictionary(pages_dict));
+
+        let mut catalog = Dictionary::new();
+        catalog.set(b"Type", Object::Name(b"Catalog".to_vec()));
+        catalog.set(b"Pages", Object::Reference((2, 0)));
+        doc.objects.insert((1, 0), Object::Dictionary(catalog));
+        doc.trailer.set(b"Root", Object::Reference((1, 0)));
+
+        let mut issues = Vec::new();
+        check_page_tree(&doc, &mut issues);
+        assert!(issues.is_empty());
+    }
+
+    #[test]
+    fn validate_pdf_mixed_issues() {
+        let mut doc = Document::new();
+        // Broken reference
+        let mut dict = Dictionary::new();
+        dict.set(b"Ref", Object::Reference((99, 0)));
+        doc.objects.insert((1, 0), Object::Dictionary(dict));
+        // Missing root → error
+        // Object 1 unreachable → warn
+
+        let report = validate_pdf(&doc);
+        assert!(report.error_count > 0); // missing root + broken ref
+        assert!(report.warn_count > 0);  // unreachable
+        assert_eq!(report.error_count + report.warn_count + report.info_count,
+                   report.issues.len());
+    }
+
+    #[test]
+    fn print_validation_json_structure() {
+        let mut doc = Document::new();
+        let mut dict = Dictionary::new();
+        dict.set(b"Ref", Object::Reference((99, 0)));
+        doc.objects.insert((1, 0), Object::Dictionary(dict));
+
+        let out = output_of(|w| print_validation_json(w, &doc));
+        let parsed: Value = serde_json::from_str(&out).unwrap();
+
+        // Check structure
+        assert!(parsed["error_count"].is_number());
+        assert!(parsed["warning_count"].is_number());
+        assert!(parsed["info_count"].is_number());
+        assert!(parsed["issues"].is_array());
+
+        // Each issue has level and message
+        for issue in parsed["issues"].as_array().unwrap() {
+            assert!(issue["level"].is_string());
+            assert!(issue["message"].is_string());
+            let level = issue["level"].as_str().unwrap();
+            assert!(level == "error" || level == "warning" || level == "info");
+        }
+    }
+
+    #[test]
+    fn check_unreachable_all_reachable() {
+        let mut doc = Document::new();
+        doc.objects.insert((1, 0), Object::Integer(42));
+        doc.trailer.set(b"Root", Object::Reference((1, 0)));
+
+        let mut issues = Vec::new();
+        check_unreachable_objects(&doc, &mut issues);
+        assert!(issues.is_empty());
+    }
+
+    #[test]
+    fn check_unreachable_multiple_orphans() {
+        let mut doc = Document::new();
+        doc.objects.insert((1, 0), Object::Integer(1));
+        doc.objects.insert((2, 0), Object::Integer(2));
+        doc.objects.insert((3, 0), Object::Integer(3));
+        // No trailer refs → all unreachable
+
+        let mut issues = Vec::new();
+        check_unreachable_objects(&doc, &mut issues);
+        assert_eq!(issues.len(), 3);
+        assert!(issues.iter().all(|i| i.level == ValidationLevel::Warn));
+    }
+
+    // ════════════════════════════════════════════════════════════════
+    // Additional P1 coverage: --hex
+    // ════════════════════════════════════════════════════════════════
+
+    #[test]
+    fn format_hex_dump_exactly_8_bytes() {
+        let data: Vec<u8> = (0..8).collect();
+        let result = format_hex_dump(&data);
+        // After the 8th byte (index 7), there's an extra space before padding
+        assert!(result.contains("00 01 02 03 04 05 06 07 "));
+        assert!(result.contains("|........|"));
+    }
+
+    #[test]
+    fn format_hex_dump_exactly_9_bytes() {
+        let data: Vec<u8> = (0..9).collect();
+        let result = format_hex_dump(&data);
+        // The 9th byte (08) should be after the extra space
+        assert!(result.contains("00 01 02 03 04 05 06 07  08"));
+    }
+
+    #[test]
+    fn format_hex_dump_17_bytes_two_lines() {
+        let data: Vec<u8> = (0..17).collect();
+        let result = format_hex_dump(&data);
+        let lines: Vec<&str> = result.lines().collect();
+        assert_eq!(lines.len(), 2);
+        // First line is full 16 bytes
+        assert!(lines[0].starts_with("00000000  "));
+        // Second line has just 1 byte
+        assert!(lines[1].starts_with("00000010  "));
+        assert!(lines[1].contains("10 "));
+    }
+
+    #[test]
+    fn format_hex_dump_exactly_32_bytes_two_full_lines() {
+        let data: Vec<u8> = (0..32).collect();
+        let result = format_hex_dump(&data);
+        let lines: Vec<&str> = result.lines().collect();
+        assert_eq!(lines.len(), 2);
+        assert!(lines[0].starts_with("00000000  "));
+        assert!(lines[1].starts_with("00000010  "));
+    }
+
+    #[test]
+    fn format_hex_dump_space_is_printable() {
+        let data = b"A B";
+        let result = format_hex_dump(data);
+        // Space (0x20) should show as space in ASCII column
+        assert!(result.contains("|A B|"));
+    }
+
+    #[test]
+    fn format_hex_dump_all_non_printable() {
+        let data: Vec<u8> = vec![0x00, 0x01, 0x02, 0x7F, 0x80, 0xFF];
+        let result = format_hex_dump(&data);
+        // All non-printable/non-space bytes → dots
+        assert!(result.contains("|......|"));
+    }
+
+    #[test]
+    fn format_hex_dump_large_offset() {
+        // 256+ bytes to verify offset goes beyond 0x0ff
+        let data: Vec<u8> = (0..=255).cycle().take(272).collect();
+        let result = format_hex_dump(&data);
+        let lines: Vec<&str> = result.lines().collect();
+        assert_eq!(lines.len(), 17); // 272 / 16 = 17
+        assert!(lines[16].starts_with("00000100  ")); // offset 256
+    }
+
+    #[test]
+    fn hex_mode_with_truncate() {
+        let mut doc = Document::new();
+        // 200 bytes of binary content
+        let binary_content: Vec<u8> = (0..200).map(|i| (i % 256) as u8).collect();
+        let stream = Stream::new(Dictionary::new(), binary_content);
+        doc.objects.insert((1, 0), Object::Stream(stream));
+
+        let config = DumpConfig {
+            decode_streams: true,
+            truncate_binary_streams: true,
+            json: false,
+            hex: true,
+        };
+        let out = output_of(|w| print_single_object(w, &doc, 1, &config));
+        // Should show hex dump but truncated to 100 bytes
+        assert!(out.contains("00000000  "));
+        assert!(out.contains("truncated to 100"));
+        // 100 bytes = 6 full lines + 4 bytes = 7 lines
+        let hex_lines: Vec<&str> = out.lines().filter(|l| l.starts_with("0000")).collect();
+        assert_eq!(hex_lines.len(), 7);
+    }
+
+    #[test]
+    fn hex_mode_without_decode_streams_no_hex() {
+        let mut doc = Document::new();
+        let binary_content: Vec<u8> = (0..32).collect();
+        let stream = Stream::new(Dictionary::new(), binary_content);
+        doc.objects.insert((1, 0), Object::Stream(stream));
+
+        // hex=true but decode_streams=false → no stream content shown at all
+        let config = DumpConfig {
+            decode_streams: false,
+            truncate_binary_streams: false,
+            json: false,
+            hex: true,
+        };
+        let out = output_of(|w| print_single_object(w, &doc, 1, &config));
+        assert!(!out.contains("00000000  "));
+    }
+
+    #[test]
+    fn hex_mode_json_with_truncate() {
+        let mut doc = Document::new();
+        let binary_content: Vec<u8> = (0..200).map(|i| (i % 256) as u8).collect();
+        let stream = Stream::new(Dictionary::new(), binary_content);
+        doc.objects.insert((1, 0), Object::Stream(stream));
+
+        let config = DumpConfig {
+            decode_streams: true,
+            truncate_binary_streams: true,
+            json: true,
+            hex: true,
+        };
+        let out = output_of(|w| print_single_object_json(w, &doc, 1, &config));
+        let parsed: Value = serde_json::from_str(&out).unwrap();
+        // Should have content_hex (truncated)
+        assert!(parsed["object"]["content_hex"].is_string());
+        let hex_str = parsed["object"]["content_hex"].as_str().unwrap();
+        // Truncated to 100 bytes → 7 lines of hex dump
+        let hex_lines: Vec<&str> = hex_str.lines().filter(|l| l.starts_with("0000")).collect();
+        assert_eq!(hex_lines.len(), 7);
+    }
+
+    #[test]
+    fn hex_mode_json_text_stream_uses_content_not_hex() {
+        let mut doc = Document::new();
+        let text_content = b"Hello world, this is text".to_vec();
+        let stream = Stream::new(Dictionary::new(), text_content);
+        doc.objects.insert((1, 0), Object::Stream(stream));
+
+        let config = DumpConfig {
+            decode_streams: true,
+            truncate_binary_streams: false,
+            json: true,
+            hex: true,
+        };
+        let out = output_of(|w| print_single_object_json(w, &doc, 1, &config));
+        let parsed: Value = serde_json::from_str(&out).unwrap();
+        // Text stream should use "content", not "content_hex"
+        assert!(parsed["object"]["content"].is_string());
+        assert!(parsed["object"]["content_hex"].is_null());
+    }
+
+    #[test]
+    fn json_binary_stream_no_hex_shows_content_binary() {
+        let mut doc = Document::new();
+        let binary_content: Vec<u8> = (0..32).collect();
+        let stream = Stream::new(Dictionary::new(), binary_content);
+        doc.objects.insert((1, 0), Object::Stream(stream));
+
+        let config = DumpConfig {
+            decode_streams: true,
+            truncate_binary_streams: false,
+            json: true,
+            hex: false,
+        };
+        let out = output_of(|w| print_single_object_json(w, &doc, 1, &config));
+        let parsed: Value = serde_json::from_str(&out).unwrap();
+        // No hex → content_binary
+        assert!(parsed["object"]["content_binary"].is_string());
+        assert!(parsed["object"]["content_hex"].is_null());
+    }
+
+    #[test]
+    fn json_binary_stream_truncate_no_hex_shows_content_truncated() {
+        let mut doc = Document::new();
+        let binary_content: Vec<u8> = (0..200).map(|i| (i % 256) as u8).collect();
+        let stream = Stream::new(Dictionary::new(), binary_content);
+        doc.objects.insert((1, 0), Object::Stream(stream));
+
+        let config = DumpConfig {
+            decode_streams: true,
+            truncate_binary_streams: true,
+            json: true,
+            hex: false,
+        };
+        let out = output_of(|w| print_single_object_json(w, &doc, 1, &config));
+        let parsed: Value = serde_json::from_str(&out).unwrap();
+        assert!(parsed["object"]["content_truncated"].is_string());
+    }
 }
