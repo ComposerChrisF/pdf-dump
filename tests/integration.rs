@@ -2035,3 +2035,400 @@ fn tree_mutually_exclusive() {
         .expect("failed to execute binary");
     assert!(!output.status.success(), "tree + summary should fail");
 }
+
+// ── P2 gap: filter pipeline integration tests ───────────────────────
+
+fn create_pdf_with_asciihex_flate_pipeline() -> (tempfile::NamedTempFile, u32) {
+    use flate2::write::ZlibEncoder;
+    use flate2::Compression;
+    use std::io::Write;
+
+    let mut doc = Document::new();
+
+    // Original content, compressed with FlateDecode, then ASCIIHex-encoded
+    let original = b"Pipeline integration test content";
+    let mut encoder = ZlibEncoder::new(Vec::new(), Compression::default());
+    encoder.write_all(original).unwrap();
+    let compressed = encoder.finish().unwrap();
+    let hex_encoded: String = compressed.iter().map(|b| format!("{:02x}", b)).collect();
+    let hex_bytes = format!("{}>", hex_encoded).into_bytes();
+
+    let mut stream_dict = Dictionary::new();
+    stream_dict.set("Filter", Object::Array(vec![
+        Object::Name(b"ASCIIHexDecode".to_vec()),
+        Object::Name(b"FlateDecode".to_vec()),
+    ]));
+    let stream = Stream::new(stream_dict, hex_bytes);
+    let stream_id = doc.add_object(Object::Stream(stream));
+
+    let mut catalog = Dictionary::new();
+    catalog.set("Type", Object::Name(b"Catalog".to_vec()));
+    catalog.set("Data", Object::Reference(stream_id));
+    let catalog_id = doc.add_object(Object::Dictionary(catalog));
+    doc.trailer.set("Root", Object::Reference(catalog_id));
+
+    let mut tmp = tempfile::NamedTempFile::new().unwrap();
+    doc.save_to(&mut tmp).unwrap();
+    tmp.flush().unwrap();
+    (tmp, stream_id.0)
+}
+
+#[test]
+fn pipeline_asciihex_flate_decode_integration() {
+    let (pdf, obj_num) = create_pdf_with_asciihex_flate_pipeline();
+    let output = Command::new(binary_path())
+        .arg(pdf.path())
+        .arg("--object").arg(obj_num.to_string())
+        .arg("--decode-streams")
+        .output()
+        .expect("failed to execute binary");
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(output.status.success());
+    assert!(stdout.contains("decoded"), "Should show decoded description: {}", stdout);
+    assert!(stdout.contains("Pipeline integration test content"), "Should decode pipeline: {}", stdout);
+    assert!(!stdout.contains("WARNING"), "Successful pipeline should have no warning");
+}
+
+#[test]
+fn pipeline_asciihex_flate_json() {
+    let (pdf, obj_num) = create_pdf_with_asciihex_flate_pipeline();
+    let output = Command::new(binary_path())
+        .arg(pdf.path())
+        .arg("--object").arg(obj_num.to_string())
+        .arg("--decode-streams")
+        .arg("--json")
+        .output()
+        .expect("failed to execute binary");
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(output.status.success());
+    let parsed: serde_json::Value = serde_json::from_str(&stdout).unwrap();
+    assert!(parsed["object"]["content"].is_string(), "JSON should have decoded content");
+    assert!(parsed["object"].get("decode_warning").is_none(), "No warning expected for valid pipeline");
+}
+
+#[test]
+fn pipeline_unsupported_filter_shows_warning() {
+    let mut doc = Document::new();
+
+    let mut stream_dict = Dictionary::new();
+    stream_dict.set("Filter", Object::Array(vec![
+        Object::Name(b"JBIG2Decode".to_vec()),
+        Object::Name(b"FlateDecode".to_vec()),
+    ]));
+    let stream = Stream::new(stream_dict, b"raw jbig2 data".to_vec());
+    let stream_id = doc.add_object(Object::Stream(stream));
+
+    let mut catalog = Dictionary::new();
+    catalog.set("Type", Object::Name(b"Catalog".to_vec()));
+    catalog.set("Data", Object::Reference(stream_id));
+    let catalog_id = doc.add_object(Object::Dictionary(catalog));
+    doc.trailer.set("Root", Object::Reference(catalog_id));
+
+    let mut tmp = tempfile::NamedTempFile::new().unwrap();
+    doc.save_to(&mut tmp).unwrap();
+    tmp.flush().unwrap();
+
+    let output = Command::new(binary_path())
+        .arg(tmp.path())
+        .arg("--decode-streams")
+        .output()
+        .expect("failed to execute binary");
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(output.status.success());
+    assert!(stdout.contains("WARNING"), "Unsupported filter should show warning: {}", stdout);
+    assert!(stdout.contains("JBIG2Decode"), "Warning should mention filter name: {}", stdout);
+}
+
+// ── P2 gap: decode warning with --hex ───────────────────────────────
+
+#[test]
+fn corrupt_stream_warning_with_hex_flag() {
+    let mut doc = Document::new();
+    let mut stream_dict = Dictionary::new();
+    stream_dict.set("Filter", Object::Name(b"FlateDecode".to_vec()));
+    // Binary content that's not valid zlib
+    let stream = Stream::new(stream_dict, vec![0x80, 0x90, 0xA0, 0xB0, 0xC0, 0xD0, 0xE0, 0xF0]);
+    let stream_id = doc.add_object(Object::Stream(stream));
+
+    let mut catalog = Dictionary::new();
+    catalog.set("Type", Object::Name(b"Catalog".to_vec()));
+    catalog.set("Data", Object::Reference(stream_id));
+    let catalog_id = doc.add_object(Object::Dictionary(catalog));
+    doc.trailer.set("Root", Object::Reference(catalog_id));
+
+    let mut tmp = tempfile::NamedTempFile::new().unwrap();
+    doc.save_to(&mut tmp).unwrap();
+    tmp.flush().unwrap();
+
+    let output = Command::new(binary_path())
+        .arg(tmp.path())
+        .arg("--decode-streams")
+        .arg("--hex")
+        .output()
+        .expect("failed to execute binary");
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(output.status.success());
+    assert!(stdout.contains("WARNING"), "Should show warning with --hex: {}", stdout);
+    assert!(stdout.contains("FlateDecode"), "Warning should mention filter: {}", stdout);
+    // Binary content with hex flag should show hex dump
+    assert!(stdout.contains("00000000"), "Should show hex dump: {}", stdout);
+}
+
+// ── P2 gap: truncate with --hex ─────────────────────────────────────
+
+#[test]
+fn truncate_with_hex_flag() {
+    let (pdf, obj_num) = create_pdf_with_binary_stream();
+    let output = Command::new(binary_path())
+        .arg(pdf.path())
+        .arg("--object").arg(obj_num.to_string())
+        .arg("--decode-streams")
+        .arg("--hex")
+        .arg("--truncate").arg("16")
+        .output()
+        .expect("failed to execute binary");
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(output.status.success());
+    assert!(stdout.contains("truncated to 16"), "Should show truncation: {}", stdout);
+    assert!(stdout.contains("00000000"), "Should show hex dump");
+    // With 16 bytes truncation, should have exactly 1 hex line (no second offset)
+    assert!(!stdout.contains("00000010"), "Should not have second hex line with 16-byte truncation: {}", stdout);
+}
+
+// ── P2 gap: tree with missing objects (integration) ─────────────────
+
+#[test]
+fn tree_with_broken_reference() {
+    let mut doc = Document::new();
+    // Catalog references a nonexistent object
+    let mut catalog = Dictionary::new();
+    catalog.set("Type", Object::Name(b"Catalog".to_vec()));
+    catalog.set("Pages", Object::Reference((999, 0)));
+    let catalog_id = doc.add_object(Object::Dictionary(catalog));
+    doc.trailer.set("Root", Object::Reference(catalog_id));
+
+    let mut tmp = tempfile::NamedTempFile::new().unwrap();
+    doc.save_to(&mut tmp).unwrap();
+    tmp.flush().unwrap();
+
+    let output = Command::new(binary_path())
+        .arg(tmp.path())
+        .arg("--tree")
+        .output()
+        .expect("failed to execute binary");
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(output.status.success());
+    assert!(stdout.contains("(missing)"), "Missing object should show (missing) in tree: {}", stdout);
+}
+
+#[test]
+fn tree_json_with_broken_reference() {
+    let mut doc = Document::new();
+    let mut catalog = Dictionary::new();
+    catalog.set("Type", Object::Name(b"Catalog".to_vec()));
+    catalog.set("Pages", Object::Reference((999, 0)));
+    let catalog_id = doc.add_object(Object::Dictionary(catalog));
+    doc.trailer.set("Root", Object::Reference(catalog_id));
+
+    let mut tmp = tempfile::NamedTempFile::new().unwrap();
+    doc.save_to(&mut tmp).unwrap();
+    tmp.flush().unwrap();
+
+    let output = Command::new(binary_path())
+        .arg(tmp.path())
+        .arg("--tree")
+        .arg("--json")
+        .output()
+        .expect("failed to execute binary");
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(output.status.success());
+    let parsed: serde_json::Value = serde_json::from_str(&stdout).unwrap();
+    let tree_str = serde_json::to_string(&parsed).unwrap();
+    assert!(tree_str.contains("\"missing\""), "JSON tree should contain missing status: {}", tree_str);
+}
+
+// ── P2 gap: depth with --page mode ──────────────────────────────────
+
+#[test]
+fn depth_with_page_limits_output() {
+    let tmp = create_minimal_pdf();
+    let output = Command::new(binary_path())
+        .arg(tmp.path())
+        .arg("--page").arg("1")
+        .arg("--depth").arg("0")
+        .output()
+        .expect("failed to execute binary");
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(output.status.success());
+    assert!(stdout.contains("depth limit reached"), "Depth 0 with page should limit: {}", stdout);
+}
+
+#[test]
+fn depth_with_page_unlimited() {
+    let tmp = create_minimal_pdf();
+    let output = Command::new(binary_path())
+        .arg(tmp.path())
+        .arg("--page").arg("1")
+        .arg("--depth").arg("100")
+        .output()
+        .expect("failed to execute binary");
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(output.status.success());
+    assert!(!stdout.contains("depth limit reached"), "Large depth should not limit: {}", stdout);
+}
+
+// ── P2 gap: truncate=0 via CLI ──────────────────────────────────────
+
+#[test]
+fn truncate_zero_cli() {
+    let mut doc = Document::new();
+    let binary_content: Vec<u8> = (0..500).map(|i| (i as u8).wrapping_add(0x80)).collect();
+    let stream = Stream::new(Dictionary::new(), binary_content);
+    let stream_id = doc.add_object(Object::Stream(stream));
+    let mut catalog = Dictionary::new();
+    catalog.set("Type", Object::Name(b"Catalog".to_vec()));
+    catalog.set("BinaryData", Object::Reference(stream_id));
+    let catalog_id = doc.add_object(Object::Dictionary(catalog));
+    doc.trailer.set("Root", Object::Reference(catalog_id));
+
+    let mut tmp = tempfile::NamedTempFile::new().unwrap();
+    doc.save_to(&mut tmp).unwrap();
+    tmp.flush().unwrap();
+
+    let output = Command::new(binary_path())
+        .arg(tmp.path())
+        .arg("--decode-streams")
+        .arg("--truncate").arg("0")
+        .output()
+        .expect("failed to execute binary");
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(output.status.success());
+    assert!(stdout.contains("truncated to 0"), "Truncate 0 should truncate everything: {}", stdout);
+}
+
+// ── P2 gap: depth=1 with --tree (verify children are limited) ───────
+
+#[test]
+fn tree_depth_one_shows_root_children_only() {
+    let tmp = create_minimal_pdf();
+    let output = Command::new(binary_path())
+        .arg(tmp.path())
+        .arg("--tree")
+        .arg("--depth").arg("2")
+        .output()
+        .expect("failed to execute binary");
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(output.status.success());
+    assert!(stdout.contains("Reference Tree:"));
+    assert!(stdout.contains("Catalog"), "Should show Catalog at depth 2");
+}
+
+// ── P2 gap: tree --json --depth combined ────────────────────────────
+
+#[test]
+fn tree_json_depth_zero() {
+    let tmp = create_minimal_pdf();
+    let output = Command::new(binary_path())
+        .arg(tmp.path())
+        .arg("--tree")
+        .arg("--json")
+        .arg("--depth").arg("0")
+        .output()
+        .expect("failed to execute binary");
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(output.status.success());
+    let parsed: serde_json::Value = serde_json::from_str(&stdout).unwrap();
+    assert_eq!(parsed["tree"]["node"], "Trailer");
+    let tree_str = serde_json::to_string(&parsed).unwrap();
+    assert!(tree_str.contains("depth_limit_reached"), "Depth 0 should limit all children: {}", tree_str);
+}
+
+// ── P2 gap: extract with decode warning ─────────────────────────────
+
+#[test]
+fn extract_corrupt_stream_shows_warning_on_stderr() {
+    let mut doc = Document::new();
+    let mut stream_dict = Dictionary::new();
+    stream_dict.set("Filter", Object::Name(b"FlateDecode".to_vec()));
+    let stream = Stream::new(stream_dict, b"not valid zlib data".to_vec());
+    let stream_id = doc.add_object(Object::Stream(stream));
+
+    let mut catalog = Dictionary::new();
+    catalog.set("Type", Object::Name(b"Catalog".to_vec()));
+    let catalog_id = doc.add_object(Object::Dictionary(catalog));
+    doc.trailer.set("Root", Object::Reference(catalog_id));
+
+    let mut tmp = tempfile::NamedTempFile::new().unwrap();
+    doc.save_to(&mut tmp).unwrap();
+    tmp.flush().unwrap();
+
+    let output_file = tempfile::NamedTempFile::new().unwrap();
+    let output = Command::new(binary_path())
+        .arg(tmp.path())
+        .arg("--extract-object").arg(stream_id.0.to_string())
+        .arg("--output").arg(output_file.path())
+        .output()
+        .expect("failed to execute binary");
+
+    assert!(output.status.success());
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(stderr.contains("Warning"), "Extract should show warning on stderr: {}", stderr);
+}
+
+// ── P2 gap: --diff incompatible with --tree ─────────────────────────
+
+#[test]
+fn diff_incompatible_with_tree() {
+    let pdf = create_minimal_pdf();
+    let output = Command::new(binary_path())
+        .arg(pdf.path())
+        .arg("--diff").arg(pdf.path())
+        .arg("--tree")
+        .output()
+        .expect("failed to execute binary");
+
+    assert!(!output.status.success(), "diff + tree should fail");
+}
+
+// ── P2 gap: tree with stream objects ────────────────────────────────
+
+#[test]
+fn tree_with_stream_object() {
+    let mut doc = Document::new();
+
+    let stream = Stream::new(Dictionary::new(), vec![1, 2, 3, 4, 5]);
+    let stream_id = doc.add_object(Object::Stream(stream));
+
+    let mut catalog = Dictionary::new();
+    catalog.set("Type", Object::Name(b"Catalog".to_vec()));
+    catalog.set("Data", Object::Reference(stream_id));
+    let catalog_id = doc.add_object(Object::Dictionary(catalog));
+    doc.trailer.set("Root", Object::Reference(catalog_id));
+
+    let mut tmp = tempfile::NamedTempFile::new().unwrap();
+    doc.save_to(&mut tmp).unwrap();
+    tmp.flush().unwrap();
+
+    let output = Command::new(binary_path())
+        .arg(tmp.path())
+        .arg("--tree")
+        .output()
+        .expect("failed to execute binary");
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(output.status.success());
+    assert!(stdout.contains("Stream"), "Tree should show Stream label: {}", stdout);
+    assert!(stdout.contains("bytes"), "Tree should show byte count for streams: {}", stdout);
+}

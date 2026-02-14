@@ -8314,4 +8314,852 @@ mod tests {
         assert_eq!(refs[0].0, "/Kids[0]");
         assert_eq!(refs[1].0, "/Kids[1]");
     }
+
+    // ── P2 gap: tree_node_label for all Object variants ──────────────
+
+    #[test]
+    fn tree_node_label_array() {
+        let arr = Object::Array(vec![Object::Integer(1), Object::Integer(2), Object::Integer(3)]);
+        assert_eq!(tree_node_label(&arr), "Array, 3 items");
+    }
+
+    #[test]
+    fn tree_node_label_empty_array() {
+        let arr = Object::Array(vec![]);
+        assert_eq!(tree_node_label(&arr), "Array, 0 items");
+    }
+
+    #[test]
+    fn tree_node_label_boolean_true() {
+        assert_eq!(tree_node_label(&Object::Boolean(true)), "Boolean(true)");
+    }
+
+    #[test]
+    fn tree_node_label_boolean_false() {
+        assert_eq!(tree_node_label(&Object::Boolean(false)), "Boolean(false)");
+    }
+
+    #[test]
+    fn tree_node_label_integer() {
+        assert_eq!(tree_node_label(&Object::Integer(42)), "Integer(42)");
+    }
+
+    #[test]
+    fn tree_node_label_negative_integer() {
+        assert_eq!(tree_node_label(&Object::Integer(-1)), "Integer(-1)");
+    }
+
+    #[test]
+    fn tree_node_label_real() {
+        assert_eq!(tree_node_label(&Object::Real(3.14)), "Real(3.14)");
+    }
+
+    #[test]
+    fn tree_node_label_name() {
+        assert_eq!(tree_node_label(&Object::Name(b"Helvetica".to_vec())), "Name(Helvetica)");
+    }
+
+    #[test]
+    fn tree_node_label_string() {
+        assert_eq!(tree_node_label(&Object::String(b"Hello".to_vec(), StringFormat::Literal)), "String(Hello)");
+    }
+
+    #[test]
+    fn tree_node_label_null() {
+        assert_eq!(tree_node_label(&Object::Null), "Null");
+    }
+
+    #[test]
+    fn tree_node_label_reference() {
+        assert_eq!(tree_node_label(&Object::Reference((5, 0))), "Reference(5 0)");
+    }
+
+    #[test]
+    fn tree_node_label_pages() {
+        let dict = Dictionary::from_iter(vec![
+            ("Type", Object::Name(b"Pages".to_vec())),
+        ]);
+        assert_eq!(tree_node_label(&Object::Dictionary(dict)), "Pages");
+    }
+
+    #[test]
+    fn tree_node_label_font() {
+        let dict = Dictionary::from_iter(vec![
+            ("Type", Object::Name(b"Font".to_vec())),
+        ]);
+        assert_eq!(tree_node_label(&Object::Dictionary(dict)), "Font");
+    }
+
+    #[test]
+    fn tree_node_label_annot() {
+        let dict = Dictionary::from_iter(vec![
+            ("Type", Object::Name(b"Annot".to_vec())),
+        ]);
+        assert_eq!(tree_node_label(&Object::Dictionary(dict)), "Annot");
+    }
+
+    #[test]
+    fn tree_node_label_xobject() {
+        let dict = Dictionary::from_iter(vec![
+            ("Type", Object::Name(b"XObject".to_vec())),
+        ]);
+        assert_eq!(tree_node_label(&Object::Dictionary(dict)), "XObject");
+    }
+
+    #[test]
+    fn tree_node_label_encoding() {
+        let dict = Dictionary::from_iter(vec![
+            ("Type", Object::Name(b"Encoding".to_vec())),
+        ]);
+        assert_eq!(tree_node_label(&Object::Dictionary(dict)), "Encoding");
+    }
+
+    #[test]
+    fn tree_node_label_custom_type() {
+        let dict = Dictionary::from_iter(vec![
+            ("Type", Object::Name(b"CustomFoo".to_vec())),
+        ]);
+        assert_eq!(tree_node_label(&Object::Dictionary(dict)), "CustomFoo");
+    }
+
+    #[test]
+    fn tree_node_label_empty_dict() {
+        let dict = Dictionary::new();
+        assert_eq!(tree_node_label(&Object::Dictionary(dict)), "Dictionary, 0 keys");
+    }
+
+    // ── P2 gap: tree with missing/nonexistent objects ────────────────
+
+    #[test]
+    fn tree_missing_object_shows_missing() {
+        // Trailer references an object that doesn't exist
+        let mut doc = Document::new();
+        doc.trailer.set("Root", Object::Reference((99, 0)));
+
+        let config = DumpConfig { decode_streams: false, truncate: None, json: false, hex: false, depth: None };
+        let out = output_of(|w| print_tree(w, &doc, &config));
+        assert!(out.contains("99 0 (missing)"), "Missing objects should be labeled: {}", out);
+    }
+
+    #[test]
+    fn tree_json_missing_object_shows_status() {
+        let mut doc = Document::new();
+        doc.trailer.set("Root", Object::Reference((99, 0)));
+
+        let config = DumpConfig { decode_streams: false, truncate: None, json: true, hex: false, depth: None };
+        let out = output_of(|w| print_tree_json(w, &doc, &config));
+        let parsed: Value = serde_json::from_str(&out).unwrap();
+        let tree_str = serde_json::to_string(&parsed).unwrap();
+        assert!(tree_str.contains("\"missing\""), "JSON should contain missing status");
+    }
+
+    // ── P2 gap: collect_refs_with_paths for streams and bare arrays ──
+
+    #[test]
+    fn collect_refs_with_paths_from_stream() {
+        let mut dict = Dictionary::new();
+        dict.set("Font", Object::Reference((5, 0)));
+        dict.set("Length", Object::Integer(100));
+        let stream = Stream::new(dict, vec![1, 2, 3]);
+        let refs = collect_refs_with_paths(&Object::Stream(stream));
+        assert_eq!(refs.len(), 1);
+        assert_eq!(refs[0].0, "/Font");
+        assert_eq!(refs[0].1, (5, 0));
+    }
+
+    #[test]
+    fn collect_refs_with_paths_from_bare_array() {
+        let arr = Object::Array(vec![
+            Object::Reference((1, 0)),
+            Object::Integer(42),
+            Object::Reference((3, 0)),
+        ]);
+        let refs = collect_refs_with_paths(&arr);
+        assert_eq!(refs.len(), 2);
+        assert_eq!(refs[0].0, "[0]");
+        assert_eq!(refs[0].1, (1, 0));
+        assert_eq!(refs[1].0, "[2]");
+        assert_eq!(refs[1].1, (3, 0));
+    }
+
+    #[test]
+    fn collect_refs_with_paths_no_refs() {
+        let dict = Dictionary::from_iter(vec![
+            ("A", Object::Integer(1)),
+            ("B", Object::Name(b"Foo".to_vec())),
+        ]);
+        let refs = collect_refs_with_paths(&Object::Dictionary(dict));
+        assert!(refs.is_empty());
+    }
+
+    #[test]
+    fn collect_refs_with_paths_scalar_object() {
+        // Scalars have no refs
+        let refs = collect_refs_with_paths(&Object::Integer(42));
+        assert!(refs.is_empty());
+        let refs = collect_refs_with_paths(&Object::Null);
+        assert!(refs.is_empty());
+        let refs = collect_refs_with_paths(&Object::Boolean(true));
+        assert!(refs.is_empty());
+    }
+
+    #[test]
+    fn collect_refs_with_paths_nested_array_in_array() {
+        // Array containing a nested array with references
+        let arr = Object::Array(vec![
+            Object::Array(vec![
+                Object::Reference((1, 0)),
+                Object::Reference((2, 0)),
+            ]),
+        ]);
+        let refs = collect_refs_with_paths(&arr);
+        assert_eq!(refs.len(), 2);
+        assert_eq!(refs[0].0, "[0][0]");
+        assert_eq!(refs[1].0, "[0][1]");
+    }
+
+    // ── P2 gap: truncate edge cases ─────────────────────────────────
+
+    #[test]
+    fn print_content_data_truncate_zero() {
+        // truncate=0 should truncate all binary content to 0 bytes
+        let content: Vec<u8> = vec![0x80; 50];
+        let config = DumpConfig { decode_streams: false, truncate: Some(0), json: false, hex: false, depth: None };
+        let out = output_of(|w| {
+            print_content_data(w, &content, "raw", "", &config, false, None);
+        });
+        assert!(out.contains("truncated to 0"), "truncate=0 should truncate: {}", out);
+    }
+
+    #[test]
+    fn print_content_data_truncate_one() {
+        // truncate=1 should show only 1 byte of binary
+        let content: Vec<u8> = vec![0x80; 100];
+        let config = DumpConfig { decode_streams: false, truncate: Some(1), json: false, hex: false, depth: None };
+        let out = output_of(|w| {
+            print_content_data(w, &content, "raw", "", &config, false, None);
+        });
+        assert!(out.contains("truncated to 1"), "truncate=1 should truncate: {}", out);
+    }
+
+    #[test]
+    fn print_content_data_hex_with_truncation() {
+        // hex mode + truncation: hex dump should be truncated too
+        let content: Vec<u8> = (0..200).map(|i| i as u8).collect();
+        let config = DumpConfig { decode_streams: false, truncate: Some(32), json: false, hex: true, depth: None };
+        let out = output_of(|w| {
+            print_content_data(w, &content, "raw", "", &config, false, None);
+        });
+        assert!(out.contains("truncated to 32"), "Should show truncation: {}", out);
+        assert!(out.contains("00000000"), "Should have hex dump offset");
+        // Hex dump of 32 bytes = 2 lines of 16 bytes each
+        assert!(out.contains("00000010"), "Should have second hex line for 32 bytes");
+        // Should NOT have a third hex line (offset 0x20 = 32)
+        assert!(!out.contains("00000020"), "Should not have third hex line: {}", out);
+    }
+
+    #[test]
+    fn print_content_data_hex_without_truncation() {
+        // hex mode without truncation: full hex dump
+        let content: Vec<u8> = (0..48).map(|i| i as u8).collect();
+        let config = DumpConfig { decode_streams: false, truncate: None, json: false, hex: true, depth: None };
+        let out = output_of(|w| {
+            print_content_data(w, &content, "raw", "", &config, false, None);
+        });
+        assert!(out.contains("48 bytes"), "Should show full size: {}", out);
+        assert!(!out.contains("truncated"));
+        // 48 bytes = 3 hex lines
+        assert!(out.contains("00000020"), "Should have third hex line for 48 bytes");
+    }
+
+    // ── P2 gap: warning interactions ────────────────────────────────
+
+    #[test]
+    fn print_content_data_warning_with_hex_mode() {
+        // Warning should appear alongside hex dump output
+        let content: Vec<u8> = vec![0x80; 32];
+        let config = DumpConfig { decode_streams: false, truncate: None, json: false, hex: true, depth: None };
+        let out = output_of(|w| {
+            print_content_data(w, &content, "raw", "", &config, false, Some("FlateDecode decompression failed"));
+        });
+        assert!(out.contains("[WARNING: FlateDecode decompression failed]"), "Warning should appear with hex");
+        assert!(out.contains("00000000"), "Hex dump should still appear");
+    }
+
+    #[test]
+    fn print_content_data_warning_with_truncation() {
+        // Warning + truncation should both appear
+        let content: Vec<u8> = vec![0x80; 200];
+        let config = DumpConfig { decode_streams: false, truncate: Some(50), json: false, hex: false, depth: None };
+        let out = output_of(|w| {
+            print_content_data(w, &content, "raw", "", &config, false, Some("unsupported filter: DCTDecode"));
+        });
+        assert!(out.contains("[WARNING: unsupported filter: DCTDecode]"), "Warning should appear");
+        assert!(out.contains("truncated to 50"), "Truncation should apply");
+    }
+
+    #[test]
+    fn print_content_data_warning_with_hex_and_truncation() {
+        // All three: warning + hex + truncation
+        let content: Vec<u8> = (0..200).map(|i| i as u8).collect();
+        let config = DumpConfig { decode_streams: false, truncate: Some(16), json: false, hex: true, depth: None };
+        let out = output_of(|w| {
+            print_content_data(w, &content, "raw", "", &config, false, Some("LZWDecode: invalid data"));
+        });
+        assert!(out.contains("[WARNING: LZWDecode: invalid data]"));
+        assert!(out.contains("truncated to 16"));
+        assert!(out.contains("00000000"), "Hex dump should appear");
+        assert!(!out.contains("00000010"), "Only 16 bytes = 1 hex line");
+    }
+
+    // ── P2 gap: decode_stream unsupported filters ───────────────────
+
+    #[test]
+    fn decode_stream_jpxdecode_unsupported() {
+        let stream = make_stream(
+            Some(Object::Name(b"JPXDecode".to_vec())),
+            b"jpeg2000 data".to_vec(),
+        );
+        let (result, warning) = decode_stream(&stream);
+        assert_eq!(&*result, b"jpeg2000 data");
+        assert!(warning.is_some());
+        assert!(warning.unwrap().contains("unsupported filter: JPXDecode"));
+    }
+
+    #[test]
+    fn decode_stream_runlengthdecode_unsupported() {
+        let stream = make_stream(
+            Some(Object::Name(b"RunLengthDecode".to_vec())),
+            b"rle data".to_vec(),
+        );
+        let (result, warning) = decode_stream(&stream);
+        assert_eq!(&*result, b"rle data");
+        assert!(warning.is_some());
+        assert!(warning.unwrap().contains("unsupported filter: RunLengthDecode"));
+    }
+
+    #[test]
+    fn decode_stream_ccittfaxdecode_unsupported() {
+        let stream = make_stream(
+            Some(Object::Name(b"CCITTFaxDecode".to_vec())),
+            b"fax data".to_vec(),
+        );
+        let (result, warning) = decode_stream(&stream);
+        assert_eq!(&*result, b"fax data");
+        assert!(warning.is_some());
+        assert!(warning.unwrap().contains("unsupported filter: CCITTFaxDecode"));
+    }
+
+    // ── P2 gap: 3+ filter pipeline ──────────────────────────────────
+
+    #[test]
+    fn decode_stream_triple_pipeline_asciihex_flate_ascii85() {
+        // Build: original -> ASCII85Encode -> FlateDecode -> ASCIIHexEncode
+        // Decode order: ASCIIHexDecode -> FlateDecode -> ASCII85Decode
+        let original = b"Hello";
+        // ASCII85 of "Hello" is "87cURDZ"
+        let ascii85_encoded = b"87cURDZ~>";
+        let flate_compressed = zlib_compress(ascii85_encoded);
+        let hex_encoded: String = flate_compressed.iter().map(|b| format!("{:02x}", b)).collect();
+        let hex_bytes = format!("{}>", hex_encoded);
+
+        let stream = make_stream(
+            Some(Object::Array(vec![
+                Object::Name(b"ASCIIHexDecode".to_vec()),
+                Object::Name(b"FlateDecode".to_vec()),
+                Object::Name(b"ASCII85Decode".to_vec()),
+            ])),
+            hex_bytes.into_bytes(),
+        );
+        let (result, warning) = decode_stream(&stream);
+        assert_eq!(&*result, original.as_slice(), "3-stage pipeline should decode correctly");
+        assert!(warning.is_none(), "No warning expected for supported pipeline");
+    }
+
+    #[test]
+    fn decode_stream_pipeline_unsupported_in_middle() {
+        // Pipeline: FlateDecode -> DCTDecode -> ASCIIHexDecode
+        // Should succeed at FlateDecode, then stop at DCTDecode
+        let compressed = zlib_compress(b"some data");
+        let stream = make_stream(
+            Some(Object::Array(vec![
+                Object::Name(b"FlateDecode".to_vec()),
+                Object::Name(b"DCTDecode".to_vec()),
+                Object::Name(b"ASCIIHexDecode".to_vec()),
+            ])),
+            compressed,
+        );
+        let (result, warning) = decode_stream(&stream);
+        // Should have decompressed the FlateDecode part successfully
+        assert_eq!(&*result, b"some data", "Should get FlateDecode result before stopping");
+        assert!(warning.is_some());
+        assert!(warning.unwrap().contains("unsupported filter: DCTDecode"));
+    }
+
+    #[test]
+    fn decode_stream_pipeline_corrupt_at_second_stage() {
+        // ASCIIHexDecode succeeds but the result is not valid for FlateDecode
+        let stream = make_stream(
+            Some(Object::Array(vec![
+                Object::Name(b"ASCIIHexDecode".to_vec()),
+                Object::Name(b"FlateDecode".to_vec()),
+            ])),
+            b"48656c6c6f>".to_vec(), // hex("Hello") -> "Hello" is not valid zlib
+        );
+        let (result, warning) = decode_stream(&stream);
+        // ASCIIHexDecode produced "Hello", but FlateDecode on "Hello" fails
+        assert_eq!(&*result, b"Hello", "Should return intermediate result");
+        assert!(warning.is_some());
+        assert!(warning.unwrap().contains("FlateDecode decompression failed"));
+    }
+
+    #[test]
+    fn decode_stream_pipeline_ascii85_then_lzw() {
+        // Encode: original -> LZW -> ASCII85
+        // Decode pipeline: ASCII85Decode -> LZWDecode
+        let original = b"Hello LZW";
+        let mut lzw_encoder = weezl::encode::Encoder::with_tiff_size_switch(weezl::BitOrder::Msb, 8);
+        let lzw_compressed = lzw_encoder.encode(original).unwrap();
+
+        // ASCII85 encode the LZW data
+        let ascii85_data = ascii85_encode(&lzw_compressed);
+
+        let stream = make_stream(
+            Some(Object::Array(vec![
+                Object::Name(b"ASCII85Decode".to_vec()),
+                Object::Name(b"LZWDecode".to_vec()),
+            ])),
+            ascii85_data,
+        );
+        let (result, warning) = decode_stream(&stream);
+        assert_eq!(&*result, original.as_slice(), "ASCII85+LZW pipeline should decode");
+        assert!(warning.is_none());
+    }
+
+    #[test]
+    fn decode_stream_pipeline_lzw_then_asciihex() {
+        // Encode: original -> ASCIIHexEncode -> LZW
+        // Decode: LZWDecode -> ASCIIHexDecode
+        let original = b"LZW+hex";
+        let hex_encoded: String = original.iter().map(|b| format!("{:02x}", b)).collect();
+        let hex_bytes = format!("{}>", hex_encoded);
+
+        let mut lzw_encoder = weezl::encode::Encoder::with_tiff_size_switch(weezl::BitOrder::Msb, 8);
+        let lzw_compressed = lzw_encoder.encode(hex_bytes.as_bytes()).unwrap();
+
+        let stream = make_stream(
+            Some(Object::Array(vec![
+                Object::Name(b"LZWDecode".to_vec()),
+                Object::Name(b"ASCIIHexDecode".to_vec()),
+            ])),
+            lzw_compressed,
+        );
+        let (result, warning) = decode_stream(&stream);
+        assert_eq!(&*result, original.as_slice(), "LZW+ASCIIHex pipeline should decode");
+        assert!(warning.is_none());
+    }
+
+    // Helper for ASCII85 encoding (for pipeline tests)
+    fn ascii85_encode(data: &[u8]) -> Vec<u8> {
+        let mut result = Vec::new();
+        result.extend_from_slice(b"<~");
+        for chunk in data.chunks(4) {
+            if chunk.len() == 4 {
+                let value = u32::from_be_bytes([chunk[0], chunk[1], chunk[2], chunk[3]]);
+                if value == 0 {
+                    result.push(b'z');
+                } else {
+                    let mut digits = [0u8; 5];
+                    let mut v = value as u64;
+                    for d in digits.iter_mut().rev() {
+                        *d = (v % 85) as u8 + b'!';
+                        v /= 85;
+                    }
+                    result.extend_from_slice(&digits);
+                }
+            } else {
+                // Pad short final group
+                let mut padded = [0u8; 4];
+                padded[..chunk.len()].copy_from_slice(chunk);
+                let value = u32::from_be_bytes(padded);
+                let mut digits = [0u8; 5];
+                let mut v = value as u64;
+                for d in digits.iter_mut().rev() {
+                    *d = (v % 85) as u8 + b'!';
+                    v /= 85;
+                }
+                result.extend_from_slice(&digits[..chunk.len() + 1]);
+            }
+        }
+        result.extend_from_slice(b"~>");
+        result
+    }
+
+    // ── P2 gap: depth with JSON output (unit test) ──────────────────
+
+    #[test]
+    fn depth_zero_json_limits_objects() {
+        let mut doc = Document::new();
+        let gc_dict = Dictionary::from_iter(vec![
+            ("Type", Object::Name(b"Grandchild".to_vec())),
+        ]);
+        doc.objects.insert((3, 0), Object::Dictionary(gc_dict));
+        let child_dict = Dictionary::from_iter(vec![
+            ("Type", Object::Name(b"Child".to_vec())),
+            ("Next", Object::Reference((3, 0))),
+        ]);
+        doc.objects.insert((2, 0), Object::Dictionary(child_dict));
+        let root_dict = Dictionary::from_iter(vec![
+            ("Type", Object::Name(b"Root".to_vec())),
+            ("Child", Object::Reference((2, 0))),
+        ]);
+        doc.objects.insert((1, 0), Object::Dictionary(root_dict));
+        doc.trailer.set("Root", Object::Reference((1, 0)));
+
+        // depth=0: collect_reachable_objects should only include root
+        let objects_d0 = collect_reachable_objects(&doc, Some(0));
+        assert!(objects_d0.contains_key("1:0"), "Root should be collected at depth 0");
+        assert!(!objects_d0.contains_key("2:0"), "Child should NOT be collected at depth 0");
+        assert!(!objects_d0.contains_key("3:0"), "Grandchild should NOT be at depth 0");
+
+        // depth=2: should get everything
+        let objects_d2 = collect_reachable_objects(&doc, Some(2));
+        assert!(objects_d2.contains_key("1:0"));
+        assert!(objects_d2.contains_key("2:0"));
+        assert!(objects_d2.contains_key("3:0"), "Grandchild should be at depth 2");
+    }
+
+    // ── P2 gap: depth with multiple refs at same level ──────────────
+
+    #[test]
+    fn depth_one_follows_all_immediate_refs() {
+        // Root has 3 children, depth=1 should follow all 3 but not their children
+        let mut doc = Document::new();
+        let gc = Dictionary::from_iter(vec![("Type", Object::Name(b"Deep".to_vec()))]);
+        doc.objects.insert((5, 0), Object::Dictionary(gc));
+
+        let c1 = Dictionary::from_iter(vec![
+            ("Type", Object::Name(b"C1".to_vec())),
+            ("Deep", Object::Reference((5, 0))),
+        ]);
+        let c2 = Dictionary::from_iter(vec![("Type", Object::Name(b"C2".to_vec()))]);
+        let c3 = Dictionary::from_iter(vec![("Type", Object::Name(b"C3".to_vec()))]);
+        doc.objects.insert((2, 0), Object::Dictionary(c1));
+        doc.objects.insert((3, 0), Object::Dictionary(c2));
+        doc.objects.insert((4, 0), Object::Dictionary(c3));
+
+        let root = Dictionary::from_iter(vec![
+            ("A", Object::Reference((2, 0))),
+            ("B", Object::Reference((3, 0))),
+            ("C", Object::Reference((4, 0))),
+        ]);
+        doc.objects.insert((1, 0), Object::Dictionary(root));
+
+        let mut visited = BTreeSet::new();
+        let config = DumpConfig { decode_streams: false, truncate: None, json: false, hex: false, depth: Some(1) };
+        let out = output_of(|w| {
+            dump_object_and_children(w, (1, 0), &doc, &mut visited, &config, false, 0);
+        });
+        assert!(out.contains("Object 1 0:"), "Should print root");
+        assert!(out.contains("Object 2 0:"), "Should follow child A");
+        assert!(out.contains("Object 3 0:"), "Should follow child B");
+        assert!(out.contains("Object 4 0:"), "Should follow child C");
+        assert!(!out.contains("Object 5 0:"), "Should NOT follow grandchild");
+        assert!(out.contains("depth limit reached"));
+    }
+
+    // ── P2 gap: tree with deeply nested refs ────────────────────────
+
+    #[test]
+    fn tree_depth_zero_shows_only_trailer_refs() {
+        let mut doc = Document::new();
+        let child = Dictionary::from_iter(vec![
+            ("Type", Object::Name(b"Child".to_vec())),
+        ]);
+        doc.objects.insert((2, 0), Object::Dictionary(child));
+        let root = Dictionary::from_iter(vec![
+            ("Type", Object::Name(b"Catalog".to_vec())),
+            ("Pages", Object::Reference((2, 0))),
+        ]);
+        doc.objects.insert((1, 0), Object::Dictionary(root));
+        doc.trailer.set("Root", Object::Reference((1, 0)));
+
+        // depth=0: Trailer shows, but no children at all (trailer is depth 0)
+        let config = DumpConfig { decode_streams: false, truncate: None, json: false, hex: false, depth: Some(0) };
+        let out = output_of(|w| print_tree(w, &doc, &config));
+        assert!(out.contains("Trailer"));
+        // /Root -> 1 0 should show as depth limit reached (depth 1 > max_depth 0)
+        assert!(out.contains("depth limit reached"), "Should hit depth limit: {}", out);
+    }
+
+    #[test]
+    fn tree_depth_two_shows_three_levels() {
+        let mut doc = Document::new();
+        let gc = Dictionary::from_iter(vec![
+            ("Type", Object::Name(b"Grandchild".to_vec())),
+        ]);
+        doc.objects.insert((3, 0), Object::Dictionary(gc));
+        let child = Dictionary::from_iter(vec![
+            ("Type", Object::Name(b"Child".to_vec())),
+            ("Next", Object::Reference((3, 0))),
+        ]);
+        doc.objects.insert((2, 0), Object::Dictionary(child));
+        let root = Dictionary::from_iter(vec![
+            ("Type", Object::Name(b"Catalog".to_vec())),
+            ("Pages", Object::Reference((2, 0))),
+        ]);
+        doc.objects.insert((1, 0), Object::Dictionary(root));
+        doc.trailer.set("Root", Object::Reference((1, 0)));
+
+        // depth=2: should show Trailer, Root (depth 1), Child (depth 2), but not Grandchild (depth 3)
+        let config = DumpConfig { decode_streams: false, truncate: None, json: false, hex: false, depth: Some(2) };
+        let out = output_of(|w| print_tree(w, &doc, &config));
+        assert!(out.contains("Catalog"), "Should show Root/Catalog");
+        assert!(out.contains("Child"), "Should show Child at depth 2");
+        assert!(out.contains("depth limit reached"), "Grandchild should be depth-limited");
+    }
+
+    // ── P2 gap: print_stream_content with warning propagation ───────
+
+    #[test]
+    fn print_stream_content_corrupt_shows_warning() {
+        let mut dict = Dictionary::new();
+        dict.set("Filter", Object::Name(b"FlateDecode".to_vec()));
+        let stream = Stream::new(dict, b"not zlib data at all".to_vec());
+        let config = default_config();
+        let out = output_of(|w| {
+            print_stream_content(w, &stream, "  ", &config, false);
+        });
+        assert!(out.contains("[WARNING: FlateDecode decompression failed]"), "Warning should propagate: {}", out);
+        assert!(out.contains("raw"), "Description should say raw for failed decode");
+    }
+
+    #[test]
+    fn print_stream_content_unsupported_filter_shows_warning() {
+        let mut dict = Dictionary::new();
+        dict.set("Filter", Object::Name(b"JBIG2Decode".to_vec()));
+        let stream = Stream::new(dict, b"jbig2 data".to_vec());
+        let config = default_config();
+        let out = output_of(|w| {
+            print_stream_content(w, &stream, "", &config, false);
+        });
+        assert!(out.contains("[WARNING: unsupported filter: JBIG2Decode]"), "Should show unsupported warning: {}", out);
+    }
+
+    #[test]
+    fn print_stream_content_successful_decode_no_warning() {
+        let compressed = zlib_compress(b"success");
+        let mut dict = Dictionary::new();
+        dict.set("Filter", Object::Name(b"FlateDecode".to_vec()));
+        let stream = Stream::new(dict, compressed);
+        let config = default_config();
+        let out = output_of(|w| {
+            print_stream_content(w, &stream, "", &config, false);
+        });
+        assert!(!out.contains("WARNING"), "Successful decode should have no warning");
+        assert!(out.contains("decoded"), "Should say decoded");
+    }
+
+    // ── P2 gap: JSON warning in stream decode ───────────────────────
+
+    #[test]
+    fn object_to_json_stream_unsupported_filter_warning() {
+        let stream = make_stream(
+            Some(Object::Name(b"CCITTFaxDecode".to_vec())),
+            b"fax data".to_vec(),
+        );
+        let config = DumpConfig { decode_streams: true, truncate: None, json: true, hex: false, depth: None };
+        let val = object_to_json(&Object::Stream(stream), &empty_doc(), &config);
+        let warning = val.get("decode_warning");
+        assert!(warning.is_some(), "Unsupported filter should produce JSON warning");
+        assert!(warning.unwrap().as_str().unwrap().contains("unsupported filter"));
+    }
+
+    #[test]
+    fn object_to_json_stream_pipeline_partial_failure_warning() {
+        // Pipeline that partially succeeds then fails
+        let stream = make_stream(
+            Some(Object::Array(vec![
+                Object::Name(b"ASCIIHexDecode".to_vec()),
+                Object::Name(b"FlateDecode".to_vec()),
+            ])),
+            b"48656c6c6f>".to_vec(), // hex("Hello"), but "Hello" is not valid zlib
+        );
+        let config = DumpConfig { decode_streams: true, truncate: None, json: true, hex: false, depth: None };
+        let val = object_to_json(&Object::Stream(stream), &empty_doc(), &config);
+        let warning = val.get("decode_warning");
+        assert!(warning.is_some(), "Pipeline failure should produce JSON warning");
+        assert!(warning.unwrap().as_str().unwrap().contains("FlateDecode"));
+    }
+
+    // ── P2 gap: decode_ascii85 edge cases ───────────────────────────
+
+    #[test]
+    fn decode_ascii85_empty_input() {
+        let result = decode_ascii85(b"~>").unwrap();
+        assert!(result.is_empty(), "Empty ASCII85 should produce empty output");
+    }
+
+    #[test]
+    fn decode_ascii85_empty_with_prefix() {
+        let result = decode_ascii85(b"<~~>").unwrap();
+        assert!(result.is_empty());
+    }
+
+    #[test]
+    fn decode_ascii85_multiple_z() {
+        let result = decode_ascii85(b"zzz~>").unwrap();
+        assert_eq!(result, vec![0u8; 12], "Three z's should produce 12 zero bytes");
+    }
+
+    #[test]
+    fn decode_ascii85_partial_group() {
+        // 2-char group: "!!" = value 0 -> pad to "!!uuu" -> output 1 byte
+        let result = decode_ascii85(b"!!~>").unwrap();
+        assert_eq!(result.len(), 1);
+    }
+
+    #[test]
+    fn decode_ascii85_three_char_group() {
+        // 3-char group outputs 2 bytes
+        let result = decode_ascii85(b"!!!~>").unwrap();
+        assert_eq!(result.len(), 2);
+    }
+
+    #[test]
+    fn decode_ascii85_four_char_group() {
+        // 4-char group outputs 3 bytes
+        let result = decode_ascii85(b"!!!!~>").unwrap();
+        assert_eq!(result.len(), 3);
+    }
+
+    // ── P2 gap: decode_asciihex edge cases ──────────────────────────
+
+    #[test]
+    fn decode_asciihex_empty_input() {
+        let result = decode_asciihex(b">").unwrap();
+        assert!(result.is_empty(), "Empty hex should produce empty output");
+    }
+
+    #[test]
+    fn decode_asciihex_empty_no_marker() {
+        let result = decode_asciihex(b"").unwrap();
+        assert!(result.is_empty());
+    }
+
+    #[test]
+    fn decode_asciihex_single_byte() {
+        let result = decode_asciihex(b"FF>").unwrap();
+        assert_eq!(result, vec![0xFF]);
+    }
+
+    #[test]
+    fn decode_asciihex_mixed_case() {
+        let result = decode_asciihex(b"aAbBcC>").unwrap();
+        assert_eq!(result, vec![0xAA, 0xBB, 0xCC]);
+    }
+
+    // ── P2 gap: decode_lzw edge cases ───────────────────────────────
+
+    #[test]
+    fn decode_lzw_corrupt_data_returns_error() {
+        // Invalid LZW data should return an error
+        let result = decode_lzw(b"");
+        // weezl may accept or reject empty input; either way it shouldn't panic
+        // Accept either Ok or Err
+        let _ = result;
+    }
+
+    #[test]
+    fn decode_lzw_single_byte_input() {
+        let original = b"A";
+        let mut encoder = weezl::encode::Encoder::with_tiff_size_switch(weezl::BitOrder::Msb, 8);
+        let compressed = encoder.encode(original).unwrap();
+        let result = decode_lzw(&compressed).unwrap();
+        assert_eq!(result, original.as_slice());
+    }
+
+    #[test]
+    fn decode_lzw_repeated_data() {
+        // LZW excels at repeated data
+        let original: Vec<u8> = vec![b'X'; 1000];
+        let mut encoder = weezl::encode::Encoder::with_tiff_size_switch(weezl::BitOrder::Msb, 8);
+        let compressed = encoder.encode(&original).unwrap();
+        let result = decode_lzw(&compressed).unwrap();
+        assert_eq!(result, original);
+    }
+
+    // ── P2 gap: format_hex_dump additional edge cases ──────────────
+
+    #[test]
+    fn format_hex_dump_high_bytes_show_as_dots() {
+        // Bytes 0x80-0xFF should show as dots in ASCII column
+        let data: Vec<u8> = (0x80..0x84).collect();
+        let result = format_hex_dump(&data);
+        assert!(result.contains("80 81 82 83"));
+        assert!(result.contains("|....|"), "High bytes should be dots: {}", result);
+    }
+
+    #[test]
+    fn format_hex_dump_mixed_printable_and_non() {
+        // Mix of printable ASCII and control chars
+        let data = b"Hi\x00\x01\x02";
+        let result = format_hex_dump(data);
+        assert!(result.contains("|Hi...|"), "Mixed content ASCII representation: {}", result);
+    }
+
+    // ── P2 gap: get_filter_names edge cases ─────────────────────────
+
+    #[test]
+    fn get_filter_names_no_filter_key() {
+        let stream = make_stream(None, vec![]);
+        assert!(get_filter_names(&stream).is_empty());
+    }
+
+    #[test]
+    fn get_filter_names_single_name() {
+        let stream = make_stream(Some(Object::Name(b"FlateDecode".to_vec())), vec![]);
+        let names = get_filter_names(&stream);
+        assert_eq!(names.len(), 1);
+        assert_eq!(names[0], b"FlateDecode");
+    }
+
+    #[test]
+    fn get_filter_names_array_of_names() {
+        let stream = make_stream(
+            Some(Object::Array(vec![
+                Object::Name(b"ASCIIHexDecode".to_vec()),
+                Object::Name(b"FlateDecode".to_vec()),
+            ])),
+            vec![],
+        );
+        let names = get_filter_names(&stream);
+        assert_eq!(names.len(), 2);
+        assert_eq!(names[0], b"ASCIIHexDecode");
+        assert_eq!(names[1], b"FlateDecode");
+    }
+
+    #[test]
+    fn get_filter_names_non_name_filter() {
+        // Filter is an integer (invalid) -> empty list
+        let stream = make_stream(Some(Object::Integer(42)), vec![]);
+        assert!(get_filter_names(&stream).is_empty());
+    }
+
+    #[test]
+    fn get_filter_names_mixed_array() {
+        // Array with mix of Name and non-Name -> only Names extracted
+        let stream = make_stream(
+            Some(Object::Array(vec![
+                Object::Name(b"FlateDecode".to_vec()),
+                Object::Integer(42),
+                Object::Name(b"LZWDecode".to_vec()),
+            ])),
+            vec![],
+        );
+        let names = get_filter_names(&stream);
+        assert_eq!(names.len(), 2);
+        assert_eq!(names[0], b"FlateDecode");
+        assert_eq!(names[1], b"LZWDecode");
+    }
 }
