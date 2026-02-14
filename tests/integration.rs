@@ -1824,3 +1824,214 @@ fn diff_incompatible_with_validate() {
 
     assert!(!output.status.success());
 }
+
+// ── Configurable truncation ──────────────────────────────────────────
+
+#[test]
+fn truncate_flag_with_custom_value() {
+    let mut doc = Document::new();
+    let binary_content: Vec<u8> = (0..500).map(|i| (i as u8).wrapping_add(0x80)).collect();
+    let stream = Stream::new(Dictionary::new(), binary_content);
+    let stream_id = doc.add_object(Object::Stream(stream));
+    let mut catalog = Dictionary::new();
+    catalog.set("Type", Object::Name(b"Catalog".to_vec()));
+    catalog.set("BinaryData", Object::Reference(stream_id));
+    let catalog_id = doc.add_object(Object::Dictionary(catalog));
+    doc.trailer.set("Root", Object::Reference(catalog_id));
+
+    let mut tmp = tempfile::NamedTempFile::new().unwrap();
+    doc.save_to(&mut tmp).unwrap();
+    tmp.flush().unwrap();
+
+    let output = Command::new(binary_path())
+        .arg(tmp.path())
+        .arg("--decode-streams")
+        .arg("--truncate")
+        .arg("50")
+        .output()
+        .expect("failed to execute binary");
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(output.status.success());
+    assert!(stdout.contains("truncated to 50"), "Should truncate to custom value: {}", stdout);
+}
+
+#[test]
+fn truncate_binary_streams_backward_compat() {
+    let pdf = create_minimal_pdf();
+    let output = Command::new(binary_path())
+        .arg(pdf.path())
+        .arg("--decode-streams")
+        .arg("--truncate-binary-streams")
+        .output()
+        .expect("failed to execute binary");
+
+    assert!(output.status.success(), "--truncate-binary-streams should still work");
+}
+
+#[test]
+fn truncate_conflicts_with_truncate_binary_streams() {
+    let pdf = create_minimal_pdf();
+    let output = Command::new(binary_path())
+        .arg(pdf.path())
+        .arg("--truncate-binary-streams")
+        .arg("--truncate")
+        .arg("50")
+        .output()
+        .expect("failed to execute binary");
+
+    assert!(!output.status.success(), "--truncate and --truncate-binary-streams should conflict");
+}
+
+// ── Decode failure warnings ──────────────────────────────────────────
+
+#[test]
+fn corrupt_stream_shows_warning() {
+    let mut doc = Document::new();
+    let mut stream_dict = Dictionary::new();
+    stream_dict.set("Filter", Object::Name(b"FlateDecode".to_vec()));
+    let stream = Stream::new(stream_dict, b"not valid zlib data".to_vec());
+    let stream_id = doc.add_object(Object::Stream(stream));
+
+    let mut catalog = Dictionary::new();
+    catalog.set("Type", Object::Name(b"Catalog".to_vec()));
+    catalog.set("Data", Object::Reference(stream_id));
+    let catalog_id = doc.add_object(Object::Dictionary(catalog));
+    doc.trailer.set("Root", Object::Reference(catalog_id));
+
+    let mut tmp = tempfile::NamedTempFile::new().unwrap();
+    doc.save_to(&mut tmp).unwrap();
+    tmp.flush().unwrap();
+
+    let output = Command::new(binary_path())
+        .arg(tmp.path())
+        .arg("--decode-streams")
+        .output()
+        .expect("failed to execute binary");
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(output.status.success());
+    assert!(stdout.contains("WARNING"), "Should show warning for corrupt stream: {}", stdout);
+    assert!(stdout.contains("FlateDecode decompression failed"), "Should describe the failure: {}", stdout);
+}
+
+// ── --depth integration tests ────────────────────────────────────────
+
+#[test]
+fn depth_zero_limits_output() {
+    let tmp = create_minimal_pdf();
+    let output = Command::new(binary_path())
+        .arg(tmp.path())
+        .arg("--depth")
+        .arg("0")
+        .output()
+        .expect("failed to execute binary");
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(output.status.success());
+    assert!(stdout.contains("depth limit reached"), "Should show depth limit message: {}", stdout);
+}
+
+#[test]
+fn depth_large_value_shows_all() {
+    let tmp = create_minimal_pdf();
+    let output = Command::new(binary_path())
+        .arg(tmp.path())
+        .arg("--depth")
+        .arg("100")
+        .output()
+        .expect("failed to execute binary");
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(output.status.success());
+    assert!(!stdout.contains("depth limit reached"), "Large depth should not limit: {}", stdout);
+}
+
+#[test]
+fn depth_with_json() {
+    let tmp = create_minimal_pdf();
+    let output = Command::new(binary_path())
+        .arg(tmp.path())
+        .arg("--depth")
+        .arg("0")
+        .arg("--json")
+        .output()
+        .expect("failed to execute binary");
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(output.status.success());
+    // JSON output should parse and have limited objects
+    let parsed: serde_json::Value = serde_json::from_str(&stdout).unwrap();
+    assert!(parsed["objects"].is_object(), "Should have objects key");
+    // With depth 0, only immediate trailer refs should be in objects
+    let obj_count = parsed["objects"].as_object().unwrap().len();
+    // Without depth, a minimal PDF has more objects
+    let output_no_depth = Command::new(binary_path())
+        .arg(tmp.path())
+        .arg("--json")
+        .output()
+        .expect("failed to execute binary");
+    let stdout_no_depth = String::from_utf8_lossy(&output_no_depth.stdout);
+    let parsed_no_depth: serde_json::Value = serde_json::from_str(&stdout_no_depth).unwrap();
+    let obj_count_no_depth = parsed_no_depth["objects"].as_object().unwrap().len();
+    assert!(obj_count <= obj_count_no_depth, "Depth-limited should have fewer or equal objects: {} vs {}", obj_count, obj_count_no_depth);
+}
+
+// ── --tree integration tests ─────────────────────────────────────────
+
+#[test]
+fn tree_shows_reference_tree() {
+    let tmp = create_minimal_pdf();
+    let output = Command::new(binary_path())
+        .arg(tmp.path())
+        .arg("--tree")
+        .output()
+        .expect("failed to execute binary");
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(output.status.success());
+    assert!(stdout.contains("Reference Tree:"), "Should have tree header: {}", stdout);
+    assert!(stdout.contains("Trailer"), "Should show Trailer root: {}", stdout);
+    assert!(stdout.contains("/Root ->"), "Should show /Root reference: {}", stdout);
+    assert!(stdout.contains("Catalog"), "Should identify Catalog: {}", stdout);
+}
+
+#[test]
+fn tree_json_valid_structure() {
+    let tmp = create_minimal_pdf();
+    let output = Command::new(binary_path())
+        .arg(tmp.path())
+        .arg("--tree")
+        .arg("--json")
+        .output()
+        .expect("failed to execute binary");
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(output.status.success());
+    let parsed: serde_json::Value = serde_json::from_str(&stdout).unwrap();
+    assert_eq!(parsed["tree"]["node"], "Trailer");
+    assert!(parsed["tree"]["children"].is_array());
+}
+
+#[test]
+fn tree_with_depth_limit() {
+    let tmp = create_minimal_pdf();
+    let output = Command::new(binary_path())
+        .arg(tmp.path())
+        .arg("--tree")
+        .arg("--depth")
+        .arg("1")
+        .output()
+        .expect("failed to execute binary");
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(output.status.success());
+    assert!(stdout.contains("Reference Tree:"));
+    assert!(stdout.contains("depth limit reached"), "Should show depth limit: {}", stdout);
+}
+
+#[test]
+fn tree_mutually_exclusive() {
+    let tmp = create_minimal_pdf();
+    let output = Command::new(binary_path())
+        .arg(tmp.path())
+        .arg("--tree")
+        .arg("--summary")
+        .output()
+        .expect("failed to execute binary");
+    assert!(!output.status.success(), "tree + summary should fail");
+}
