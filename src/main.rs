@@ -20,12 +20,8 @@ struct Args {
     #[arg(long)]
     decode_streams: bool,
 
-    /// Truncate binary streams to the first 100 bytes
-    #[arg(long, conflicts_with = "truncate")]
-    truncate_binary_streams: bool,
-
     /// Truncate binary streams to the first N bytes
-    #[arg(long, conflicts_with = "truncate_binary_streams")]
+    #[arg(long)]
     truncate: Option<usize>,
 
     /// Object number to extract
@@ -44,9 +40,9 @@ struct Args {
     #[arg(short = 's', long)]
     summary: bool,
 
-    /// Dump the object tree for a specific page (1-based)
+    /// Dump the object tree for a specific page or range (e.g. 1, 1-3)
     #[arg(long)]
-    page: Option<u32>,
+    page: Option<String>,
 
     /// Print document metadata
     #[arg(short = 'm', long)]
@@ -95,6 +91,26 @@ struct Args {
     /// Show the object graph as an indented reference tree
     #[arg(long)]
     tree: bool,
+
+    /// Show document statistics (object types, stream sizes, filter usage)
+    #[arg(long)]
+    stats: bool,
+
+    /// Show cross-reference table listing all objects
+    #[arg(long)]
+    xref: bool,
+
+    /// Show document bookmarks (outline tree)
+    #[arg(long)]
+    bookmarks: bool,
+
+    /// Show annotations (all pages, or filtered with --page)
+    #[arg(long)]
+    annotations: bool,
+
+    /// Output tree as GraphViz DOT format (use with --tree)
+    #[arg(long, requires = "tree")]
+    dot: bool,
 }
 
 struct DumpConfig {
@@ -103,6 +119,51 @@ struct DumpConfig {
     json: bool,
     hex: bool,
     depth: Option<usize>,
+}
+
+enum PageSpec {
+    Single(u32),
+    Range(u32, u32),
+}
+
+impl PageSpec {
+    fn parse(s: &str) -> Result<PageSpec, String> {
+        if let Some((start_s, end_s)) = s.split_once('-') {
+            let start: u32 = start_s.trim().parse()
+                .map_err(|_| format!("Invalid page range start: '{}'", start_s.trim()))?;
+            let end: u32 = end_s.trim().parse()
+                .map_err(|_| format!("Invalid page range end: '{}'", end_s.trim()))?;
+            if start == 0 || end == 0 {
+                return Err("Page numbers must be >= 1".to_string());
+            }
+            if start > end {
+                return Err(format!("Invalid page range: {} > {}", start, end));
+            }
+            Ok(PageSpec::Range(start, end))
+        } else {
+            let num: u32 = s.trim().parse()
+                .map_err(|_| format!("Invalid page number: '{}'", s.trim()))?;
+            if num == 0 {
+                return Err("Page numbers must be >= 1".to_string());
+            }
+            Ok(PageSpec::Single(num))
+        }
+    }
+
+    fn contains(&self, page: u32) -> bool {
+        match self {
+            PageSpec::Single(n) => page == *n,
+            PageSpec::Range(start, end) => page >= *start && page <= *end,
+        }
+    }
+
+    fn pages(&self) -> Vec<u32> {
+        match self {
+            PageSpec::Single(n) => vec![*n],
+            PageSpec::Range(start, end) => (*start..=*end).collect(),
+        }
+    }
+
 }
 
 fn main() {
@@ -116,7 +177,7 @@ fn main() {
         args.object.is_some(),
         args.summary && args.search.is_none(),
         args.metadata,
-        args.page.is_some() && !args.text,
+        args.page.is_some() && !args.text && !args.annotations,
         args.search.is_some(),
         args.text,
         args.refs_to.is_some(),
@@ -124,6 +185,10 @@ fn main() {
         args.images,
         args.validate,
         args.tree,
+        args.stats,
+        args.xref,
+        args.bookmarks,
+        args.annotations && args.page.is_none(),
     ].iter().filter(|&&b| b).count();
     if mode_count > 1 {
         eprintln!("Error: Only one mode flag may be used at a time.");
@@ -142,7 +207,11 @@ fn main() {
             || args.fonts
             || args.images
             || args.validate
-            || args.tree;
+            || args.tree
+            || args.stats
+            || args.xref
+            || args.bookmarks
+            || args.annotations;
         if incompatible {
             eprintln!("Error: --diff can only be combined with --page and --json.");
             std::process::exit(1);
@@ -158,8 +227,7 @@ fn main() {
         }
     };
 
-    let truncate = if args.truncate_binary_streams { Some(100) }
-                   else { args.truncate };
+    let truncate = args.truncate;
     let config = DumpConfig {
         decode_streams: args.decode_streams,
         truncate,
@@ -167,6 +235,13 @@ fn main() {
         hex: args.hex,
         depth: args.depth,
     };
+
+    let page_spec = args.page.as_deref().map(|s| {
+        PageSpec::parse(s).unwrap_or_else(|e| {
+            eprintln!("Error: {}", e);
+            std::process::exit(1);
+        })
+    });
 
     // --diff mode: load second doc and compare
     if let Some(ref diff_path) = args.diff {
@@ -178,8 +253,7 @@ fn main() {
                 std::process::exit(1);
             }
         };
-        let page_filter = args.page;
-        let result = compare_pdfs(&doc, &doc2, page_filter);
+        let result = compare_pdfs(&doc, &doc2, page_spec.as_ref());
         let mut out = io::stdout().lock();
         if config.json {
             print_diff_json(&mut out, &result, &args.file, diff_path);
@@ -230,9 +304,9 @@ fn main() {
     } else if args.text {
         let mut out = io::stdout().lock();
         if config.json {
-            print_text_json(&mut out, &doc, args.page);
+            print_text_json(&mut out, &doc, page_spec.as_ref());
         } else {
-            print_text(&mut out, &doc, args.page);
+            print_text(&mut out, &doc, page_spec.as_ref());
         }
     } else if let Some(target) = args.refs_to {
         let mut out = io::stdout().lock();
@@ -262,9 +336,39 @@ fn main() {
         } else {
             print_validation(&mut out, &doc);
         }
-    } else if args.tree {
+    } else if args.stats {
         let mut out = io::stdout().lock();
         if config.json {
+            print_stats_json(&mut out, &doc);
+        } else {
+            print_stats(&mut out, &doc);
+        }
+    } else if args.xref {
+        let mut out = io::stdout().lock();
+        if config.json {
+            print_xref_json(&mut out, &doc);
+        } else {
+            print_xref(&mut out, &doc);
+        }
+    } else if args.bookmarks {
+        let mut out = io::stdout().lock();
+        if config.json {
+            print_bookmarks_json(&mut out, &doc);
+        } else {
+            print_bookmarks(&mut out, &doc);
+        }
+    } else if args.annotations {
+        let mut out = io::stdout().lock();
+        if config.json {
+            print_annotations_json(&mut out, &doc, page_spec.as_ref());
+        } else {
+            print_annotations(&mut out, &doc, page_spec.as_ref());
+        }
+    } else if args.tree {
+        let mut out = io::stdout().lock();
+        if args.dot {
+            print_tree_dot(&mut out, &doc, &config);
+        } else if config.json {
             print_tree_json(&mut out, &doc, &config);
         } else {
             print_tree(&mut out, &doc, &config);
@@ -283,12 +387,12 @@ fn main() {
         } else {
             print_summary(&mut out, &doc);
         }
-    } else if let Some(page_num) = args.page {
+    } else if let Some(ref spec) = page_spec {
         let mut out = io::stdout().lock();
         if config.json {
-            dump_page_json(&mut out, &doc, page_num, &config);
+            dump_page_json(&mut out, &doc, spec, &config);
         } else {
-            dump_page(&mut out, &doc, page_num, &config);
+            dump_page(&mut out, &doc, spec, &config);
         }
     } else if args.metadata {
         let mut out = io::stdout().lock();
@@ -468,6 +572,37 @@ fn decode_lzw(data: &[u8]) -> Result<Vec<u8>, String> {
     decoder.decode(data).map_err(|e| format!("LZWDecode: {}", e))
 }
 
+fn decode_run_length(data: &[u8]) -> Result<Vec<u8>, String> {
+    let mut result = Vec::new();
+    let mut i = 0;
+    while i < data.len() {
+        let length = data[i];
+        i += 1;
+        if length <= 127 {
+            // Copy next (length+1) bytes literally
+            let count = length as usize + 1;
+            if i + count > data.len() {
+                return Err("RunLengthDecode: truncated literal run".to_string());
+            }
+            result.extend_from_slice(&data[i..i + count]);
+            i += count;
+        } else if length == 128 {
+            // EOD marker
+            break;
+        } else {
+            // Repeat next byte (257-length) times
+            if i >= data.len() {
+                return Err("RunLengthDecode: truncated repeat run".to_string());
+            }
+            let count = 257 - length as usize;
+            let byte = data[i];
+            i += 1;
+            result.extend(std::iter::repeat_n(byte, count));
+        }
+    }
+    Ok(result)
+}
+
 fn get_filter_names(stream: &lopdf::Stream) -> Vec<Vec<u8>> {
     match stream.dict.get(b"Filter").ok() {
         Some(filter_obj) => {
@@ -502,6 +637,7 @@ fn decode_stream(stream: &lopdf::Stream) -> (Cow<'_, [u8]>, Option<String>) {
             b"ASCII85Decode" => decode_ascii85(&data),
             b"ASCIIHexDecode" => decode_asciihex(&data),
             b"LZWDecode" => decode_lzw(&data),
+            b"RunLengthDecode" => decode_run_length(&data),
             other => {
                 let name = String::from_utf8_lossy(other);
                 return (Cow::Owned(data), Some(format!("unsupported filter: {}", name)));
@@ -722,28 +858,31 @@ fn print_summary(writer: &mut impl Write, doc: &Document) {
     }
 }
 
-fn dump_page(writer: &mut impl Write, doc: &Document, page_num: u32, config: &DumpConfig) {
+fn dump_page(writer: &mut impl Write, doc: &Document, spec: &PageSpec, config: &DumpConfig) {
     let pages = doc.get_pages();
     let total = pages.len();
-    let page_id = match pages.get(&page_num) {
-        Some(&id) => id,
-        None => {
-            eprintln!("Error: Page {} not found. Document has {} pages.", page_num, total);
-            std::process::exit(1);
+
+    for page_num in spec.pages() {
+        let page_id = match pages.get(&page_num) {
+            Some(&id) => id,
+            None => {
+                eprintln!("Error: Page {} not found. Document has {} pages.", page_num, total);
+                std::process::exit(1);
+            }
+        };
+
+        let mut visited = BTreeSet::new();
+
+        // Pre-seed visited with /Parent to confine traversal to this page's subtree
+        if let Ok(Object::Dictionary(dict)) = doc.get_object(page_id)
+            && let Ok(parent_ref) = dict.get(b"Parent").and_then(|o| o.as_reference())
+        {
+            visited.insert(parent_ref);
         }
-    };
 
-    let mut visited = BTreeSet::new();
-
-    // Pre-seed visited with /Parent to confine traversal to this page's subtree
-    if let Ok(Object::Dictionary(dict)) = doc.get_object(page_id)
-        && let Ok(parent_ref) = dict.get(b"Parent").and_then(|o| o.as_reference())
-    {
-        visited.insert(parent_ref);
+        writeln!(writer, "Page {} (Object {} {}):", page_num, page_id.0, page_id.1).unwrap();
+        dump_object_and_children(writer, page_id, doc, &mut visited, config, false, 0);
     }
-
-    writeln!(writer, "Page {} (Object {} {}):", page_num, page_id.0, page_id.1).unwrap();
-    dump_object_and_children(writer, page_id, doc, &mut visited, config, false, 0);
 }
 
 // ── JSON output (Phase 1) ────────────────────────────────────────────
@@ -986,27 +1125,9 @@ fn print_metadata_json(writer: &mut impl Write, doc: &Document) {
     writeln!(writer, "{}", serde_json::to_string_pretty(&output).unwrap()).unwrap();
 }
 
-fn dump_page_json(writer: &mut impl Write, doc: &Document, page_num: u32, config: &DumpConfig) {
+fn dump_page_json(writer: &mut impl Write, doc: &Document, spec: &PageSpec, config: &DumpConfig) {
     let pages = doc.get_pages();
     let total = pages.len();
-    let page_id = match pages.get(&page_num) {
-        Some(&id) => id,
-        None => {
-            eprintln!("Error: Page {} not found. Document has {} pages.", page_num, total);
-            std::process::exit(1);
-        }
-    };
-
-    // Collect page subtree objects into JSON
-    let mut visited = BTreeSet::new();
-    let mut objects = BTreeMap::new();
-
-    // Pre-seed visited with /Parent
-    if let Ok(Object::Dictionary(dict)) = doc.get_object(page_id)
-        && let Ok(parent_ref) = dict.get(b"Parent").and_then(|o| o.as_reference())
-    {
-        visited.insert(parent_ref);
-    }
 
     fn walk_page(doc: &Document, obj_id: ObjectId, visited: &mut BTreeSet<ObjectId>, objects: &mut BTreeMap<String, Value>, config: &DumpConfig) {
         if visited.contains(&obj_id) { return; }
@@ -1034,13 +1155,40 @@ fn dump_page_json(writer: &mut impl Write, doc: &Document, page_num: u32, config
         }
     }
 
-    walk_page(doc, page_id, &mut visited, &mut objects, config);
+    let mut page_outputs = Vec::new();
 
-    let output = json!({
-        "page_number": page_num,
-        "objects": objects,
-    });
-    writeln!(writer, "{}", serde_json::to_string_pretty(&output).unwrap()).unwrap();
+    for page_num in spec.pages() {
+        let page_id = match pages.get(&page_num) {
+            Some(&id) => id,
+            None => {
+                eprintln!("Error: Page {} not found. Document has {} pages.", page_num, total);
+                std::process::exit(1);
+            }
+        };
+
+        let mut visited = BTreeSet::new();
+        let mut objects = BTreeMap::new();
+
+        if let Ok(Object::Dictionary(dict)) = doc.get_object(page_id)
+            && let Ok(parent_ref) = dict.get(b"Parent").and_then(|o| o.as_reference())
+        {
+            visited.insert(parent_ref);
+        }
+
+        walk_page(doc, page_id, &mut visited, &mut objects, config);
+
+        page_outputs.push(json!({
+            "page_number": page_num,
+            "objects": objects,
+        }));
+    }
+
+    // For single page, output as before; for range, output array
+    if page_outputs.len() == 1 {
+        writeln!(writer, "{}", serde_json::to_string_pretty(&page_outputs[0]).unwrap()).unwrap();
+    } else {
+        writeln!(writer, "{}", serde_json::to_string_pretty(&json!({"pages": page_outputs})).unwrap()).unwrap();
+    }
 }
 
 // ── Search (Phase 2) ─────────────────────────────────────────────────
@@ -1251,20 +1399,22 @@ fn extract_text_from_page(doc: &Document, page_id: ObjectId) -> String {
     text
 }
 
-fn print_text(writer: &mut impl Write, doc: &Document, page_filter: Option<u32>) {
+fn print_text(writer: &mut impl Write, doc: &Document, page_filter: Option<&PageSpec>) {
     let pages = doc.get_pages();
 
-    if let Some(page_num) = page_filter {
-        let page_id = match pages.get(&page_num) {
-            Some(&id) => id,
-            None => {
-                eprintln!("Error: Page {} not found. Document has {} pages.", page_num, pages.len());
-                std::process::exit(1);
-            }
-        };
-        writeln!(writer, "--- Page {} ---", page_num).unwrap();
-        let text = extract_text_from_page(doc, page_id);
-        writeln!(writer, "{}", text).unwrap();
+    if let Some(spec) = page_filter {
+        for pn in spec.pages() {
+            let page_id = match pages.get(&pn) {
+                Some(&id) => id,
+                None => {
+                    eprintln!("Error: Page {} not found. Document has {} pages.", pn, pages.len());
+                    std::process::exit(1);
+                }
+            };
+            writeln!(writer, "--- Page {} ---", pn).unwrap();
+            let text = extract_text_from_page(doc, page_id);
+            writeln!(writer, "{}", text).unwrap();
+        }
     } else {
         for (&page_num, &page_id) in &pages {
             writeln!(writer, "--- Page {} ---", page_num).unwrap();
@@ -1274,20 +1424,22 @@ fn print_text(writer: &mut impl Write, doc: &Document, page_filter: Option<u32>)
     }
 }
 
-fn print_text_json(writer: &mut impl Write, doc: &Document, page_filter: Option<u32>) {
+fn print_text_json(writer: &mut impl Write, doc: &Document, page_filter: Option<&PageSpec>) {
     let pages = doc.get_pages();
     let mut page_results = Vec::new();
 
-    if let Some(page_num) = page_filter {
-        let page_id = match pages.get(&page_num) {
-            Some(&id) => id,
-            None => {
-                eprintln!("Error: Page {} not found. Document has {} pages.", page_num, pages.len());
-                std::process::exit(1);
-            }
-        };
-        let text = extract_text_from_page(doc, page_id);
-        page_results.push(json!({"page_number": page_num, "text": text}));
+    if let Some(spec) = page_filter {
+        for pn in spec.pages() {
+            let page_id = match pages.get(&pn) {
+                Some(&id) => id,
+                None => {
+                    eprintln!("Error: Page {} not found. Document has {} pages.", pn, pages.len());
+                    std::process::exit(1);
+                }
+            };
+            let text = extract_text_from_page(doc, page_id);
+            page_results.push(json!({"page_number": pn, "text": text}));
+        }
     } else {
         for (&page_num, &page_id) in &pages {
             let text = extract_text_from_page(doc, page_id);
@@ -1321,7 +1473,7 @@ struct FontDiff {
     only_in_second: Vec<String>,
 }
 
-fn compare_pdfs(doc1: &Document, doc2: &Document, page_filter: Option<u32>) -> DiffResult {
+fn compare_pdfs(doc1: &Document, doc2: &Document, page_filter: Option<&PageSpec>) -> DiffResult {
     let metadata_diffs = compare_metadata(doc1, doc2);
     let font_diffs = compare_fonts(doc1, doc2);
 
@@ -1330,7 +1482,14 @@ fn compare_pdfs(doc1: &Document, doc2: &Document, page_filter: Option<u32>) -> D
 
     let mut page_diffs = Vec::new();
 
-    if let Some(pn) = page_filter {
+    let page_numbers: Vec<u32> = if let Some(spec) = page_filter {
+        spec.pages()
+    } else {
+        let max_pages = pages1.len().max(pages2.len()) as u32;
+        (1..=max_pages).collect()
+    };
+
+    for pn in page_numbers {
         let id1 = pages1.get(&pn);
         let id2 = pages2.get(&pn);
         match (id1, id2) {
@@ -1341,7 +1500,7 @@ fn compare_pdfs(doc1: &Document, doc2: &Document, page_filter: Option<u32>) -> D
                 page_diffs.push(PageDiff {
                     page_number: pn,
                     identical: false,
-                    dict_diffs: vec![format!("Page {} only exists in first file", pn)],
+                    dict_diffs: vec![format!("Page {} only in first file", pn)],
                     resource_diffs: vec![],
                     content_diffs: vec![],
                 });
@@ -1350,12 +1509,12 @@ fn compare_pdfs(doc1: &Document, doc2: &Document, page_filter: Option<u32>) -> D
                 page_diffs.push(PageDiff {
                     page_number: pn,
                     identical: false,
-                    dict_diffs: vec![format!("Page {} only exists in second file", pn)],
+                    dict_diffs: vec![format!("Page {} only in second file", pn)],
                     resource_diffs: vec![],
                     content_diffs: vec![],
                 });
             }
-            (None, None) => {
+            (None, None) if page_filter.is_some() => {
                 page_diffs.push(PageDiff {
                     page_number: pn,
                     identical: false,
@@ -1364,36 +1523,7 @@ fn compare_pdfs(doc1: &Document, doc2: &Document, page_filter: Option<u32>) -> D
                     content_diffs: vec![],
                 });
             }
-        }
-    } else {
-        let max_pages = pages1.len().max(pages2.len()) as u32;
-        for pn in 1..=max_pages {
-            let id1 = pages1.get(&pn);
-            let id2 = pages2.get(&pn);
-            match (id1, id2) {
-                (Some(&id1), Some(&id2)) => {
-                    page_diffs.push(compare_page(doc1, doc2, id1, id2, pn));
-                }
-                (Some(_), None) => {
-                    page_diffs.push(PageDiff {
-                        page_number: pn,
-                        identical: false,
-                        dict_diffs: vec![format!("Page {} only in first file", pn)],
-                        resource_diffs: vec![],
-                        content_diffs: vec![],
-                    });
-                }
-                (None, Some(_)) => {
-                    page_diffs.push(PageDiff {
-                        page_number: pn,
-                        identical: false,
-                        dict_diffs: vec![format!("Page {} only in second file", pn)],
-                        resource_diffs: vec![],
-                        content_diffs: vec![],
-                    });
-                }
-                _ => {}
-            }
+            _ => {}
         }
     }
 
@@ -2324,6 +2454,467 @@ fn print_validation_json(writer: &mut impl Write, doc: &Document) {
     writeln!(writer, "{}", serde_json::to_string_pretty(&output).unwrap()).unwrap();
 }
 
+// ── Stats ────────────────────────────────────────────────────────────
+
+struct PdfStats {
+    page_count: usize,
+    object_count: usize,
+    type_counts: BTreeMap<String, usize>,
+    total_stream_bytes: usize,
+    total_decoded_bytes: usize,
+    filter_counts: BTreeMap<String, usize>,
+    largest_streams: Vec<(ObjectId, usize)>,
+}
+
+fn collect_stats(doc: &Document) -> PdfStats {
+    let page_count = doc.get_pages().len();
+    let object_count = doc.objects.len();
+    let mut type_counts: BTreeMap<String, usize> = BTreeMap::new();
+    let mut total_stream_bytes = 0usize;
+    let mut total_decoded_bytes = 0usize;
+    let mut filter_counts: BTreeMap<String, usize> = BTreeMap::new();
+    let mut stream_sizes: Vec<(ObjectId, usize)> = Vec::new();
+
+    for (&obj_id, object) in &doc.objects {
+        let variant = object.enum_variant().to_string();
+        *type_counts.entry(variant).or_insert(0) += 1;
+
+        if let Object::Stream(stream) = object {
+            let raw_len = stream.content.len();
+            total_stream_bytes += raw_len;
+            stream_sizes.push((obj_id, raw_len));
+
+            let (decoded, _) = decode_stream(stream);
+            total_decoded_bytes += decoded.len();
+
+            let filters = get_filter_names(stream);
+            for f in &filters {
+                let name = String::from_utf8_lossy(f).into_owned();
+                *filter_counts.entry(name).or_insert(0) += 1;
+            }
+        }
+    }
+
+    stream_sizes.sort_by(|a, b| b.1.cmp(&a.1));
+    stream_sizes.truncate(10);
+
+    PdfStats {
+        page_count,
+        object_count,
+        type_counts,
+        total_stream_bytes,
+        total_decoded_bytes,
+        filter_counts,
+        largest_streams: stream_sizes,
+    }
+}
+
+fn print_stats(writer: &mut impl Write, doc: &Document) {
+    let stats = collect_stats(doc);
+
+    writeln!(writer, "--- Overview ---").unwrap();
+    writeln!(writer, "  Pages:   {}", stats.page_count).unwrap();
+    writeln!(writer, "  Objects: {}", stats.object_count).unwrap();
+    writeln!(writer).unwrap();
+
+    writeln!(writer, "--- Objects by Type ---").unwrap();
+    for (typ, count) in &stats.type_counts {
+        writeln!(writer, "  {:<14} {}", typ, count).unwrap();
+    }
+    writeln!(writer).unwrap();
+
+    writeln!(writer, "--- Stream Statistics ---").unwrap();
+    let stream_count: usize = stats.type_counts.get("Stream").copied().unwrap_or(0);
+    writeln!(writer, "  Streams:        {}", stream_count).unwrap();
+    writeln!(writer, "  Total raw:      {} bytes", stats.total_stream_bytes).unwrap();
+    writeln!(writer, "  Total decoded:  {} bytes", stats.total_decoded_bytes).unwrap();
+    if !stats.filter_counts.is_empty() {
+        writeln!(writer, "  Filters:").unwrap();
+        for (name, count) in &stats.filter_counts {
+            writeln!(writer, "    {:<20} {}", name, count).unwrap();
+        }
+    }
+    writeln!(writer).unwrap();
+
+    if !stats.largest_streams.is_empty() {
+        writeln!(writer, "--- Largest Streams (top {}) ---", stats.largest_streams.len()).unwrap();
+        for (obj_id, size) in &stats.largest_streams {
+            writeln!(writer, "  Object {:>4}  {} bytes", obj_id.0, size).unwrap();
+        }
+    }
+}
+
+fn print_stats_json(writer: &mut impl Write, doc: &Document) {
+    let stats = collect_stats(doc);
+    let largest: Vec<Value> = stats.largest_streams.iter()
+        .map(|(id, size)| json!({"object_number": id.0, "generation": id.1, "size": size}))
+        .collect();
+    let output = json!({
+        "page_count": stats.page_count,
+        "object_count": stats.object_count,
+        "type_counts": stats.type_counts,
+        "total_stream_bytes": stats.total_stream_bytes,
+        "total_decoded_bytes": stats.total_decoded_bytes,
+        "filter_counts": stats.filter_counts,
+        "largest_streams": largest,
+    });
+    writeln!(writer, "{}", serde_json::to_string_pretty(&output).unwrap()).unwrap();
+}
+
+// ── Xref ─────────────────────────────────────────────────────────────
+
+fn print_xref(writer: &mut impl Write, doc: &Document) {
+    writeln!(writer, "{} objects\n", doc.objects.len()).unwrap();
+    writeln!(writer, "  {:>4}  {:>3}  {:<13} /Type", "Obj#", "Gen", "Kind").unwrap();
+    for (&(obj_num, generation), object) in &doc.objects {
+        let kind = object.enum_variant();
+        let type_label = object_type_label(object);
+        writeln!(writer, "  {:>4}  {:>3}  {:<13} {}", obj_num, generation, kind, type_label).unwrap();
+    }
+}
+
+fn print_xref_json(writer: &mut impl Write, doc: &Document) {
+    let entries: Vec<Value> = doc.objects.iter()
+        .map(|(&(obj_num, generation), object)| {
+            json!({
+                "object_number": obj_num,
+                "generation": generation,
+                "kind": object.enum_variant(),
+                "type": object_type_label(object),
+            })
+        })
+        .collect();
+    let output = json!({
+        "object_count": entries.len(),
+        "entries": entries,
+    });
+    writeln!(writer, "{}", serde_json::to_string_pretty(&output).unwrap()).unwrap();
+}
+
+// ── Bookmarks ────────────────────────────────────────────────────────
+
+struct OutlineItem {
+    object_id: ObjectId,
+    title: String,
+    destination: String,
+    children: Vec<OutlineItem>,
+}
+
+fn collect_outline_items(doc: &Document, first_id: ObjectId) -> Vec<OutlineItem> {
+    let mut items = Vec::new();
+    let mut current_id = Some(first_id);
+    let mut seen = BTreeSet::new();
+
+    while let Some(id) = current_id {
+        if seen.contains(&id) { break; }
+        seen.insert(id);
+
+        let dict = match doc.get_object(id) {
+            Ok(Object::Dictionary(d)) => d,
+            _ => break,
+        };
+
+        let title = dict.get(b"Title").ok()
+            .map(|v| match v {
+                Object::String(bytes, _) => String::from_utf8_lossy(bytes).into_owned(),
+                _ => "(untitled)".to_string(),
+            })
+            .unwrap_or_else(|| "(untitled)".to_string());
+
+        let destination = format_destination(doc, dict);
+
+        let children = dict.get(b"First").ok()
+            .and_then(|v| v.as_reference().ok())
+            .map(|child_id| collect_outline_items(doc, child_id))
+            .unwrap_or_default();
+
+        items.push(OutlineItem { object_id: id, title, destination, children });
+
+        current_id = dict.get(b"Next").ok()
+            .and_then(|v| v.as_reference().ok());
+    }
+
+    items
+}
+
+fn format_destination(doc: &Document, dict: &lopdf::Dictionary) -> String {
+    // Check /Dest first
+    if let Ok(dest) = dict.get(b"Dest") {
+        return format_dest_value(doc, dest);
+    }
+    // Check /A (action)
+    if let Ok(action_obj) = dict.get(b"A") {
+        let action_dict = match action_obj {
+            Object::Dictionary(d) => d,
+            Object::Reference(id) => {
+                match doc.get_object(*id) {
+                    Ok(Object::Dictionary(d)) => d,
+                    _ => return format!("Action({} {} R)", id.0, id.1),
+                }
+            }
+            _ => return "-".to_string(),
+        };
+        let action_type = action_dict.get(b"S").ok()
+            .and_then(|v| v.as_name().ok().map(|n| String::from_utf8_lossy(n).into_owned()))
+            .unwrap_or_else(|| "?".to_string());
+        match action_type.as_str() {
+            "GoTo" => {
+                if let Ok(d) = action_dict.get(b"D") {
+                    return format!("GoTo({})", format_dest_value(doc, d));
+                }
+                "GoTo(?)".to_string()
+            }
+            "URI" => {
+                let uri = action_dict.get(b"URI").ok()
+                    .map(|v| match v {
+                        Object::String(bytes, _) => String::from_utf8_lossy(bytes).into_owned(),
+                        _ => "?".to_string(),
+                    })
+                    .unwrap_or_else(|| "?".to_string());
+                format!("URI({})", uri)
+            }
+            other => format!("Action({})", other),
+        }
+    } else {
+        "-".to_string()
+    }
+}
+
+fn format_dest_value(doc: &Document, dest: &Object) -> String {
+    match dest {
+        Object::Array(arr) => {
+            let parts: Vec<String> = arr.iter().map(|item| match item {
+                Object::Reference(id) => format!("{} {} R", id.0, id.1),
+                Object::Name(n) => format!("/{}", String::from_utf8_lossy(n)),
+                Object::Integer(i) => i.to_string(),
+                Object::Real(r) => r.to_string(),
+                Object::Null => "null".to_string(),
+                _ => "?".to_string(),
+            }).collect();
+            format!("[{}]", parts.join(" "))
+        }
+        Object::String(bytes, _) => format!("({})", String::from_utf8_lossy(bytes)),
+        Object::Name(n) => format!("/{}", String::from_utf8_lossy(n)),
+        Object::Reference(id) => {
+            if let Ok(resolved) = doc.get_object(*id) {
+                format_dest_value(doc, resolved)
+            } else {
+                format!("{} {} R", id.0, id.1)
+            }
+        }
+        _ => "-".to_string(),
+    }
+}
+
+fn count_outline_items(items: &[OutlineItem]) -> usize {
+    items.iter().map(|item| 1 + count_outline_items(&item.children)).sum()
+}
+
+fn print_bookmarks(writer: &mut impl Write, doc: &Document) {
+    let root_ref = match doc.trailer.get(b"Root").ok().and_then(|o| o.as_reference().ok()) {
+        Some(id) => id,
+        None => {
+            writeln!(writer, "No bookmarks (no /Root in trailer).").unwrap();
+            return;
+        }
+    };
+    let catalog = match doc.get_object(root_ref) {
+        Ok(Object::Dictionary(d)) => d,
+        _ => {
+            writeln!(writer, "No bookmarks (could not read catalog).").unwrap();
+            return;
+        }
+    };
+    let outlines_ref = match catalog.get(b"Outlines").ok().and_then(|v| {
+        match v {
+            Object::Reference(id) => Some(*id),
+            _ => None,
+        }
+    }) {
+        Some(id) => id,
+        None => {
+            writeln!(writer, "No bookmarks.").unwrap();
+            return;
+        }
+    };
+    let outlines_dict = match doc.get_object(outlines_ref) {
+        Ok(Object::Dictionary(d)) => d,
+        _ => {
+            writeln!(writer, "No bookmarks (could not read /Outlines).").unwrap();
+            return;
+        }
+    };
+    let first_id = match outlines_dict.get(b"First").ok().and_then(|v| v.as_reference().ok()) {
+        Some(id) => id,
+        None => {
+            writeln!(writer, "No bookmarks.").unwrap();
+            return;
+        }
+    };
+
+    let items = collect_outline_items(doc, first_id);
+    let total = count_outline_items(&items);
+    writeln!(writer, "{} bookmarks\n", total).unwrap();
+    print_outline_tree(writer, &items, 0);
+}
+
+fn print_outline_tree(writer: &mut impl Write, items: &[OutlineItem], depth: usize) {
+    let indent = "  ".repeat(depth);
+    for item in items {
+        writeln!(writer, "{}[{}] {} -> {}", indent, item.object_id.0, item.title, item.destination).unwrap();
+        if !item.children.is_empty() {
+            print_outline_tree(writer, &item.children, depth + 1);
+        }
+    }
+}
+
+fn print_bookmarks_json(writer: &mut impl Write, doc: &Document) {
+    let root_ref = match doc.trailer.get(b"Root").ok().and_then(|o| o.as_reference().ok()) {
+        Some(id) => id,
+        None => {
+            writeln!(writer, "{}", serde_json::to_string_pretty(&json!({"bookmark_count": 0, "bookmarks": []})).unwrap()).unwrap();
+            return;
+        }
+    };
+    let catalog = match doc.get_object(root_ref) {
+        Ok(Object::Dictionary(d)) => d,
+        _ => {
+            writeln!(writer, "{}", serde_json::to_string_pretty(&json!({"bookmark_count": 0, "bookmarks": []})).unwrap()).unwrap();
+            return;
+        }
+    };
+    let first_id = catalog.get(b"Outlines").ok()
+        .and_then(|v| v.as_reference().ok())
+        .and_then(|id| doc.get_object(id).ok())
+        .and_then(|obj| if let Object::Dictionary(d) = obj { Some(d) } else { None })
+        .and_then(|d| d.get(b"First").ok())
+        .and_then(|v| v.as_reference().ok());
+
+    let items = match first_id {
+        Some(id) => collect_outline_items(doc, id),
+        None => vec![],
+    };
+    let total = count_outline_items(&items);
+
+    fn items_to_json(items: &[OutlineItem]) -> Vec<Value> {
+        items.iter().map(|item| {
+            let mut obj = json!({
+                "object_number": item.object_id.0,
+                "title": item.title,
+                "destination": item.destination,
+            });
+            if !item.children.is_empty() {
+                obj["children"] = json!(items_to_json(&item.children));
+            }
+            obj
+        }).collect()
+    }
+
+    let output = json!({
+        "bookmark_count": total,
+        "bookmarks": items_to_json(&items),
+    });
+    writeln!(writer, "{}", serde_json::to_string_pretty(&output).unwrap()).unwrap();
+}
+
+// ── Annotations ──────────────────────────────────────────────────────
+
+struct AnnotationInfo {
+    page_num: u32,
+    object_id: ObjectId,
+    subtype: String,
+    rect: String,
+    contents: String,
+}
+
+fn collect_annotations(doc: &Document, page_filter: Option<&PageSpec>) -> Vec<AnnotationInfo> {
+    let pages = doc.get_pages();
+    let mut annotations = Vec::new();
+
+    for (&page_num, &page_id) in &pages {
+        if let Some(spec) = page_filter
+            && !spec.contains(page_num) { continue; }
+
+        let page_dict = match doc.get_object(page_id) {
+            Ok(Object::Dictionary(d)) => d,
+            _ => continue,
+        };
+
+        let annot_refs: Vec<ObjectId> = match page_dict.get(b"Annots") {
+            Ok(Object::Array(arr)) => arr.iter().filter_map(|o| o.as_reference().ok()).collect(),
+            Ok(Object::Reference(id)) => {
+                if let Ok(Object::Array(arr)) = doc.get_object(*id) {
+                    arr.iter().filter_map(|o| o.as_reference().ok()).collect()
+                } else {
+                    continue;
+                }
+            }
+            _ => continue,
+        };
+
+        for annot_id in annot_refs {
+            let annot_dict = match doc.get_object(annot_id) {
+                Ok(Object::Dictionary(d)) => d,
+                _ => continue,
+            };
+
+            let subtype = annot_dict.get(b"Subtype").ok()
+                .and_then(|v| v.as_name().ok().map(|n| String::from_utf8_lossy(n).into_owned()))
+                .unwrap_or_else(|| "-".to_string());
+
+            let rect = annot_dict.get(b"Rect").ok()
+                .map(format_dict_value)
+                .unwrap_or_else(|| "-".to_string());
+
+            let contents = annot_dict.get(b"Contents").ok()
+                .map(|v| match v {
+                    Object::String(bytes, _) => String::from_utf8_lossy(bytes).into_owned(),
+                    _ => "-".to_string(),
+                })
+                .unwrap_or_default();
+
+            annotations.push(AnnotationInfo {
+                page_num,
+                object_id: annot_id,
+                subtype,
+                rect,
+                contents,
+            });
+        }
+    }
+
+    annotations
+}
+
+fn print_annotations(writer: &mut impl Write, doc: &Document, page_filter: Option<&PageSpec>) {
+    let annotations = collect_annotations(doc, page_filter);
+    writeln!(writer, "{} annotations found\n", annotations.len()).unwrap();
+    if annotations.is_empty() { return; }
+    writeln!(writer, "  {:>4}  {:>4}  {:<12} {:<30} Contents", "Page", "Obj#", "Subtype", "Rect").unwrap();
+    for a in &annotations {
+        writeln!(writer, "  {:>4}  {:>4}  {:<12} {:<30} {}", a.page_num, a.object_id.0, a.subtype, a.rect, a.contents).unwrap();
+    }
+}
+
+fn print_annotations_json(writer: &mut impl Write, doc: &Document, page_filter: Option<&PageSpec>) {
+    let annotations = collect_annotations(doc, page_filter);
+    let items: Vec<Value> = annotations.iter().map(|a| {
+        json!({
+            "page_number": a.page_num,
+            "object_number": a.object_id.0,
+            "generation": a.object_id.1,
+            "subtype": a.subtype,
+            "rect": a.rect,
+            "contents": a.contents,
+        })
+    }).collect();
+    let output = json!({
+        "annotation_count": items.len(),
+        "annotations": items,
+    });
+    writeln!(writer, "{}", serde_json::to_string_pretty(&output).unwrap()).unwrap();
+}
+
 // ── Tree view ────────────────────────────────────────────────────────
 
 fn tree_node_label(obj: &Object) -> String {
@@ -2513,6 +3104,65 @@ fn tree_node_to_json(obj_id: ObjectId, doc: &Document, visited: &mut BTreeSet<Ob
                 "object": format!("{} {}", obj_id.0, obj_id.1),
                 "status": "missing",
             })
+        }
+    }
+}
+
+// ── DOT output for tree ──────────────────────────────────────────────
+
+fn escape_dot(s: &str) -> String {
+    s.replace('\\', "\\\\").replace('"', "\\\"")
+}
+
+fn print_tree_dot(writer: &mut impl Write, doc: &Document, config: &DumpConfig) {
+    writeln!(writer, "digraph pdf {{").unwrap();
+    writeln!(writer, "  rankdir=LR;").unwrap();
+    writeln!(writer, "  node [shape=box, fontname=\"monospace\"];").unwrap();
+    writeln!(writer, "  \"trailer\" [label=\"Trailer\"];").unwrap();
+
+    let mut visited = BTreeSet::new();
+    let trailer_obj = Object::Dictionary(doc.trailer.clone());
+    let trailer_refs = collect_refs_with_paths(&trailer_obj);
+
+    for (path, ref_id) in trailer_refs {
+        emit_dot_node(writer, ref_id, doc, &mut visited, 1, &path, "trailer", config);
+    }
+
+    writeln!(writer, "}}").unwrap();
+}
+
+#[allow(clippy::too_many_arguments)]
+fn emit_dot_node(writer: &mut impl Write, obj_id: ObjectId, doc: &Document, visited: &mut BTreeSet<ObjectId>, depth: usize, key_path: &str, parent_node: &str, config: &DumpConfig) {
+    let node_name = format!("obj_{}_{}", obj_id.0, obj_id.1);
+    let edge_label = escape_dot(key_path);
+
+    if visited.contains(&obj_id) {
+        writeln!(writer, "  \"{}\" -> \"{}\" [label=\"{}\"];", parent_node, node_name, edge_label).unwrap();
+        return;
+    }
+
+    if let Some(max_depth) = config.depth
+        && depth > max_depth {
+            return;
+    }
+
+    visited.insert(obj_id);
+
+    match doc.get_object(obj_id) {
+        Ok(object) => {
+            let label = escape_dot(&tree_node_label(object));
+            let node_label = format!("{} {}: {}", obj_id.0, obj_id.1, label);
+            writeln!(writer, "  \"{}\" [label=\"{}\"];", node_name, node_label).unwrap();
+            writeln!(writer, "  \"{}\" -> \"{}\" [label=\"{}\"];", parent_node, node_name, edge_label).unwrap();
+
+            let child_refs = collect_refs_with_paths(object);
+            for (path, child_id) in child_refs {
+                emit_dot_node(writer, child_id, doc, visited, depth + 1, &path, &node_name, config);
+            }
+        }
+        Err(_) => {
+            writeln!(writer, "  \"{}\" [label=\"{} {} (missing)\", style=dashed];", node_name, obj_id.0, obj_id.1).unwrap();
+            writeln!(writer, "  \"{}\" -> \"{}\" [label=\"{}\"];", parent_node, node_name, edge_label).unwrap();
         }
     }
 }
@@ -2802,6 +3452,76 @@ mod tests {
         );
         let (result, warning) = decode_stream(&stream);
         assert_eq!(&*result, original.as_slice());
+        assert!(warning.is_none());
+    }
+
+    // ── RunLengthDecode ─────────────────────────────────────────────────
+
+    #[test]
+    fn decode_run_length_literal_run() {
+        // Length byte 4 → copy next 5 bytes literally
+        let data = vec![4, b'H', b'e', b'l', b'l', b'o', 128];
+        let result = decode_run_length(&data).unwrap();
+        assert_eq!(result, b"Hello");
+    }
+
+    #[test]
+    fn decode_run_length_repeat_run() {
+        // Length byte 254 → repeat next byte (257-254)=3 times
+        let data = vec![254, b'A', 128];
+        let result = decode_run_length(&data).unwrap();
+        assert_eq!(result, b"AAA");
+    }
+
+    #[test]
+    fn decode_run_length_mixed() {
+        // Literal "Hi" (length=1, 2 bytes) then repeat 'X' 4 times (length=253, 257-253=4)
+        let data = vec![1, b'H', b'i', 253, b'X', 128];
+        let result = decode_run_length(&data).unwrap();
+        assert_eq!(result, b"HiXXXX");
+    }
+
+    #[test]
+    fn decode_run_length_eod_marker() {
+        // EOD (128) stops processing
+        let data = vec![0, b'A', 128, 0, b'B'];
+        let result = decode_run_length(&data).unwrap();
+        assert_eq!(result, b"A");
+    }
+
+    #[test]
+    fn decode_run_length_truncated_literal() {
+        // Length byte says 2 bytes but only 1 available
+        let data = vec![1, b'A'];
+        let result = decode_run_length(&data);
+        assert!(result.is_err());
+        assert!(result.unwrap_err().contains("truncated literal run"));
+    }
+
+    #[test]
+    fn decode_run_length_truncated_repeat() {
+        // Repeat run with no byte following
+        let data = vec![255];
+        let result = decode_run_length(&data);
+        assert!(result.is_err());
+        assert!(result.unwrap_err().contains("truncated repeat run"));
+    }
+
+    #[test]
+    fn decode_run_length_empty_input() {
+        let result = decode_run_length(b"").unwrap();
+        assert!(result.is_empty());
+    }
+
+    #[test]
+    fn decode_run_length_stream_via_decode_stream() {
+        let data = vec![4, b'H', b'e', b'l', b'l', b'o', 128];
+        let stream = make_stream(
+            Some(Object::Name(b"RunLengthDecode".to_vec())),
+            data,
+        );
+        let (result, warning) = decode_stream(&stream);
+        assert_eq!(&*result, b"Hello");
         assert!(warning.is_none());
     }
 
@@ -3370,7 +4090,7 @@ mod tests {
 
     #[test]
     fn print_content_data_binary_no_truncation() {
-        // Binary content but truncate_binary_streams=false → full output
+        // Binary content but truncate=None → full output
         let content: Vec<u8> = (0..200).map(|i| (i as u8).wrapping_add(0x80)).collect();
         let config = default_config();
         let out = output_of(|w| {
@@ -3974,7 +4694,7 @@ mod tests {
 
     #[test]
     fn dump_object_with_decode_and_truncate() {
-        // Both decode_streams=true and truncate_binary_streams=true with binary stream
+        // Both decode_streams=true and truncate=Some(100) with binary stream
         let mut doc = Document::new();
         let binary_content: Vec<u8> = vec![0x80; 200];
         let stream = make_stream(None, binary_content);
@@ -4427,7 +5147,7 @@ mod tests {
         let doc = build_two_page_doc();
         let config = default_config();
         let out = output_of(|w| {
-            dump_page(w, &doc, 1, &config);
+            dump_page(w, &doc, &PageSpec::Single(1), &config);
         });
         assert!(out.contains("Page 1 (Object"));
     }
@@ -4437,7 +5157,7 @@ mod tests {
         let doc = build_two_page_doc();
         let config = DumpConfig { decode_streams: true, truncate: None, json: false, hex: false, depth: None };
         let out = output_of(|w| {
-            dump_page(w, &doc, 1, &config);
+            dump_page(w, &doc, &PageSpec::Single(1), &config);
         });
         // Should contain page 1's content but not page 2's
         assert!(out.contains("Page1"), "Should contain page 1 content");
@@ -4449,7 +5169,7 @@ mod tests {
         let doc = build_two_page_doc();
         let config = DumpConfig { decode_streams: true, truncate: None, json: false, hex: false, depth: None };
         let out = output_of(|w| {
-            dump_page(w, &doc, 2, &config);
+            dump_page(w, &doc, &PageSpec::Single(2), &config);
         });
         assert!(out.contains("Page 2 (Object"));
         assert!(out.contains("Page2"), "Should contain page 2 content");
@@ -4653,7 +5373,7 @@ mod tests {
     fn dump_page_json_produces_valid_json() {
         let doc = build_two_page_doc();
         let config = json_config();
-        let out = output_of(|w| dump_page_json(w, &doc, 1, &config));
+        let out = output_of(|w| dump_page_json(w, &doc, &PageSpec::Single(1), &config));
         let parsed: Value = serde_json::from_str(&out).expect("Should be valid JSON");
         assert_eq!(parsed["page_number"], 1);
         assert!(parsed.get("objects").is_some());
@@ -4987,7 +5707,8 @@ mod tests {
     #[test]
     fn diff_with_page_filter() {
         let doc = build_two_page_doc();
-        let result = compare_pdfs(&doc, &doc, Some(1));
+        let spec = PageSpec::Single(1);
+        let result = compare_pdfs(&doc, &doc, Some(&spec));
         assert_eq!(result.page_diffs.len(), 1);
         assert_eq!(result.page_diffs[0].page_number, 1);
         assert!(result.page_diffs[0].identical);
@@ -5802,26 +6523,29 @@ mod tests {
     fn compare_pdfs_page_only_in_first() {
         let doc1 = build_two_page_doc();
         let doc2 = Document::new();
-        let result = compare_pdfs(&doc1, &doc2, Some(1));
+        let spec = PageSpec::Single(1);
+        let result = compare_pdfs(&doc1, &doc2, Some(&spec));
         assert_eq!(result.page_diffs.len(), 1);
         assert!(!result.page_diffs[0].identical);
-        assert!(result.page_diffs[0].dict_diffs.iter().any(|d| d.contains("only exists in first")));
+        assert!(result.page_diffs[0].dict_diffs.iter().any(|d| d.contains("only in first")));
     }
 
     #[test]
     fn compare_pdfs_page_only_in_second() {
         let doc1 = Document::new();
         let doc2 = build_two_page_doc();
-        let result = compare_pdfs(&doc1, &doc2, Some(1));
+        let spec = PageSpec::Single(1);
+        let result = compare_pdfs(&doc1, &doc2, Some(&spec));
         assert_eq!(result.page_diffs.len(), 1);
         assert!(!result.page_diffs[0].identical);
-        assert!(result.page_diffs[0].dict_diffs.iter().any(|d| d.contains("only exists in second")));
+        assert!(result.page_diffs[0].dict_diffs.iter().any(|d| d.contains("only in second")));
     }
 
     #[test]
     fn compare_pdfs_page_not_in_either() {
         let doc = Document::new();
-        let result = compare_pdfs(&doc, &doc, Some(999));
+        let spec = PageSpec::Single(999);
+        let result = compare_pdfs(&doc, &doc, Some(&spec));
         assert_eq!(result.page_diffs.len(), 1);
         assert!(result.page_diffs[0].dict_diffs.iter().any(|d| d.contains("not found in either")));
     }
@@ -6027,7 +6751,8 @@ mod tests {
     #[test]
     fn print_text_json_with_page_filter() {
         let doc = build_two_page_doc();
-        let out = output_of(|w| print_text_json(w, &doc, Some(1)));
+        let spec = PageSpec::Single(1);
+        let out = output_of(|w| print_text_json(w, &doc, Some(&spec)));
         let parsed: Value = serde_json::from_str(&out).expect("Should be valid JSON");
         let pages = parsed["pages"].as_array().unwrap();
         assert_eq!(pages.len(), 1, "Should have exactly one page");
@@ -6189,8 +6914,10 @@ mod tests {
     fn dump_page_json_confines_to_page() {
         let doc = build_two_page_doc();
         let config = json_config();
-        let out1 = output_of(|w| dump_page_json(w, &doc, 1, &config));
-        let out2 = output_of(|w| dump_page_json(w, &doc, 2, &config));
+        let spec1 = PageSpec::Single(1);
+        let spec2 = PageSpec::Single(2);
+        let out1 = output_of(|w| dump_page_json(w, &doc, &spec1, &config));
+        let out2 = output_of(|w| dump_page_json(w, &doc, &spec2, &config));
         let parsed1: Value = serde_json::from_str(&out1).unwrap();
         let parsed2: Value = serde_json::from_str(&out2).unwrap();
         assert_eq!(parsed1["page_number"], 1);
@@ -8609,18 +9336,6 @@ mod tests {
     }
 
     #[test]
-    fn decode_stream_runlengthdecode_unsupported() {
-        let stream = make_stream(
-            Some(Object::Name(b"RunLengthDecode".to_vec())),
-            b"rle data".to_vec(),
-        );
-        let (result, warning) = decode_stream(&stream);
-        assert_eq!(&*result, b"rle data");
-        assert!(warning.is_some());
-        assert!(warning.unwrap().contains("unsupported filter: RunLengthDecode"));
-    }
-
-    #[test]
     fn decode_stream_ccittfaxdecode_unsupported() {
         let stream = make_stream(
             Some(Object::Name(b"CCITTFaxDecode".to_vec())),
@@ -9143,5 +9858,604 @@ mod tests {
         assert_eq!(names.len(), 2);
         assert_eq!(names[0], b"FlateDecode");
         assert_eq!(names[1], b"LZWDecode");
+    }
+
+    // ── Stats tests ─────────────────────────────────────────────────────
+
+    #[test]
+    fn stats_type_counting() {
+        let mut doc = Document::new();
+        doc.objects.insert((1, 0), Object::Integer(42));
+        doc.objects.insert((2, 0), Object::Integer(99));
+        doc.objects.insert((3, 0), Object::Boolean(true));
+        let stats = collect_stats(&doc);
+        assert_eq!(stats.object_count, 3);
+        assert_eq!(*stats.type_counts.get("Integer").unwrap(), 2);
+        assert_eq!(*stats.type_counts.get("Boolean").unwrap(), 1);
+    }
+
+    #[test]
+    fn stats_filter_histogram() {
+        let mut doc = Document::new();
+        let s1 = make_stream(Some(Object::Name(b"FlateDecode".to_vec())), vec![0; 10]);
+        let s2 = make_stream(Some(Object::Name(b"FlateDecode".to_vec())), vec![0; 20]);
+        let s3 = make_stream(Some(Object::Name(b"LZWDecode".to_vec())), vec![0; 5]);
+        doc.objects.insert((1, 0), Object::Stream(s1));
+        doc.objects.insert((2, 0), Object::Stream(s2));
+        doc.objects.insert((3, 0), Object::Stream(s3));
+        let stats = collect_stats(&doc);
+        assert_eq!(*stats.filter_counts.get("FlateDecode").unwrap(), 2);
+        assert_eq!(*stats.filter_counts.get("LZWDecode").unwrap(), 1);
+    }
+
+    #[test]
+    fn stats_largest_streams_sorted() {
+        let mut doc = Document::new();
+        let s1 = make_stream(None, vec![0; 100]);
+        let s2 = make_stream(None, vec![0; 500]);
+        let s3 = make_stream(None, vec![0; 50]);
+        doc.objects.insert((1, 0), Object::Stream(s1));
+        doc.objects.insert((2, 0), Object::Stream(s2));
+        doc.objects.insert((3, 0), Object::Stream(s3));
+        let stats = collect_stats(&doc);
+        assert_eq!(stats.largest_streams[0].0, (2, 0)); // 500 bytes
+        assert_eq!(stats.largest_streams[0].1, 500);
+        assert_eq!(stats.largest_streams[1].0, (1, 0)); // 100 bytes
+        assert_eq!(stats.largest_streams[2].0, (3, 0)); // 50 bytes
+    }
+
+    #[test]
+    fn stats_empty_doc() {
+        let doc = Document::new();
+        let stats = collect_stats(&doc);
+        assert_eq!(stats.object_count, 0);
+        assert_eq!(stats.total_stream_bytes, 0);
+        assert!(stats.type_counts.is_empty());
+        assert!(stats.filter_counts.is_empty());
+        assert!(stats.largest_streams.is_empty());
+    }
+
+    #[test]
+    fn stats_stream_bytes() {
+        let mut doc = Document::new();
+        let s1 = make_stream(None, vec![0; 100]);
+        let s2 = make_stream(None, vec![0; 200]);
+        doc.objects.insert((1, 0), Object::Stream(s1));
+        doc.objects.insert((2, 0), Object::Stream(s2));
+        let stats = collect_stats(&doc);
+        assert_eq!(stats.total_stream_bytes, 300);
+    }
+
+    #[test]
+    fn print_stats_output() {
+        let mut doc = Document::new();
+        doc.objects.insert((1, 0), Object::Integer(42));
+        let s = make_stream(None, vec![0; 50]);
+        doc.objects.insert((2, 0), Object::Stream(s));
+        let out = output_of(|w| print_stats(w, &doc));
+        assert!(out.contains("Overview"));
+        assert!(out.contains("Objects: 2"));
+        assert!(out.contains("Objects by Type"));
+        assert!(out.contains("Stream Statistics"));
+    }
+
+    #[test]
+    fn print_stats_json_output() {
+        let mut doc = Document::new();
+        doc.objects.insert((1, 0), Object::Integer(42));
+        let out = output_of(|w| print_stats_json(w, &doc));
+        let val: Value = serde_json::from_str(&out).unwrap();
+        assert_eq!(val["object_count"], 1);
+    }
+
+    // ── Xref tests ──────────────────────────────────────────────────────
+
+    #[test]
+    fn xref_various_object_types() {
+        let mut doc = Document::new();
+        doc.objects.insert((1, 0), Object::Integer(42));
+        let mut dict = Dictionary::new();
+        dict.set("Type", Object::Name(b"Catalog".to_vec()));
+        doc.objects.insert((2, 0), Object::Dictionary(dict));
+        let out = output_of(|w| print_xref(w, &doc));
+        assert!(out.contains("2 objects"));
+        assert!(out.contains("Integer"));
+        assert!(out.contains("Catalog"));
+    }
+
+    #[test]
+    fn xref_empty_doc() {
+        let doc = Document::new();
+        let out = output_of(|w| print_xref(w, &doc));
+        assert!(out.contains("0 objects"));
+    }
+
+    #[test]
+    fn xref_json_output() {
+        let mut doc = Document::new();
+        doc.objects.insert((1, 0), Object::Integer(42));
+        let out = output_of(|w| print_xref_json(w, &doc));
+        let val: Value = serde_json::from_str(&out).unwrap();
+        assert_eq!(val["object_count"], 1);
+        assert_eq!(val["entries"][0]["kind"], "Integer");
+    }
+
+    #[test]
+    fn xref_sorted_by_object_number() {
+        let mut doc = Document::new();
+        doc.objects.insert((3, 0), Object::Boolean(true));
+        doc.objects.insert((1, 0), Object::Integer(42));
+        doc.objects.insert((2, 0), Object::Null);
+        let out = output_of(|w| print_xref(w, &doc));
+        // BTreeMap iterates in order, so obj 1 should come before obj 3
+        let pos1 = out.find("   1").unwrap();
+        let pos3 = out.find("   3").unwrap();
+        assert!(pos1 < pos3);
+    }
+
+    // ── Bookmarks tests ─────────────────────────────────────────────────
+
+    fn make_doc_with_bookmarks() -> Document {
+        let mut doc = Document::new();
+
+        // Two bookmark items: "Chapter 1" -> "Chapter 2"
+        let mut bm2 = Dictionary::new();
+        bm2.set("Title", Object::String(b"Chapter 2".to_vec(), StringFormat::Literal));
+        bm2.set("Dest", Object::Array(vec![Object::Integer(0), Object::Name(b"Fit".to_vec())]));
+        let bm2_id = doc.add_object(Object::Dictionary(bm2));
+
+        let mut bm1 = Dictionary::new();
+        bm1.set("Title", Object::String(b"Chapter 1".to_vec(), StringFormat::Literal));
+        bm1.set("Dest", Object::Array(vec![Object::Integer(0), Object::Name(b"Fit".to_vec())]));
+        bm1.set("Next", Object::Reference(bm2_id));
+        let bm1_id = doc.add_object(Object::Dictionary(bm1));
+
+        let mut outlines = Dictionary::new();
+        outlines.set("Type", Object::Name(b"Outlines".to_vec()));
+        outlines.set("First", Object::Reference(bm1_id));
+        outlines.set("Last", Object::Reference(bm2_id));
+        let outlines_id = doc.add_object(Object::Dictionary(outlines));
+
+        let mut catalog = Dictionary::new();
+        catalog.set("Type", Object::Name(b"Catalog".to_vec()));
+        catalog.set("Outlines", Object::Reference(outlines_id));
+        let catalog_id = doc.add_object(Object::Dictionary(catalog));
+
+        doc.trailer.set("Root", Object::Reference(catalog_id));
+        doc
+    }
+
+    #[test]
+    fn bookmarks_siblings() {
+        let doc = make_doc_with_bookmarks();
+        let out = output_of(|w| print_bookmarks(w, &doc));
+        assert!(out.contains("2 bookmarks"));
+        assert!(out.contains("Chapter 1"));
+        assert!(out.contains("Chapter 2"));
+    }
+
+    #[test]
+    fn bookmarks_no_outlines() {
+        let mut doc = Document::new();
+        let mut catalog = Dictionary::new();
+        catalog.set("Type", Object::Name(b"Catalog".to_vec()));
+        let catalog_id = doc.add_object(Object::Dictionary(catalog));
+        doc.trailer.set("Root", Object::Reference(catalog_id));
+
+        let out = output_of(|w| print_bookmarks(w, &doc));
+        assert!(out.contains("No bookmarks"));
+    }
+
+    #[test]
+    fn bookmarks_nested_children() {
+        let mut doc = Document::new();
+
+        // Child bookmark
+        let mut child = Dictionary::new();
+        child.set("Title", Object::String(b"Section 1.1".to_vec(), StringFormat::Literal));
+        let child_id = doc.add_object(Object::Dictionary(child));
+
+        // Parent bookmark with /First pointing to child
+        let mut parent = Dictionary::new();
+        parent.set("Title", Object::String(b"Chapter 1".to_vec(), StringFormat::Literal));
+        parent.set("First", Object::Reference(child_id));
+        let parent_id = doc.add_object(Object::Dictionary(parent));
+
+        let mut outlines = Dictionary::new();
+        outlines.set("Type", Object::Name(b"Outlines".to_vec()));
+        outlines.set("First", Object::Reference(parent_id));
+        let outlines_id = doc.add_object(Object::Dictionary(outlines));
+
+        let mut catalog = Dictionary::new();
+        catalog.set("Type", Object::Name(b"Catalog".to_vec()));
+        catalog.set("Outlines", Object::Reference(outlines_id));
+        let catalog_id = doc.add_object(Object::Dictionary(catalog));
+        doc.trailer.set("Root", Object::Reference(catalog_id));
+
+        let out = output_of(|w| print_bookmarks(w, &doc));
+        assert!(out.contains("2 bookmarks"));
+        assert!(out.contains("Chapter 1"));
+        assert!(out.contains("Section 1.1"));
+    }
+
+    #[test]
+    fn bookmarks_with_dest_array() {
+        let doc = make_doc_with_bookmarks();
+        let out = output_of(|w| print_bookmarks(w, &doc));
+        assert!(out.contains("[0 /Fit]"));
+    }
+
+    #[test]
+    fn bookmarks_with_uri_action() {
+        let mut doc = Document::new();
+
+        let mut action = Dictionary::new();
+        action.set("S", Object::Name(b"URI".to_vec()));
+        action.set("URI", Object::String(b"https://example.com".to_vec(), StringFormat::Literal));
+        let action_id = doc.add_object(Object::Dictionary(action));
+
+        let mut bm = Dictionary::new();
+        bm.set("Title", Object::String(b"Link".to_vec(), StringFormat::Literal));
+        bm.set("A", Object::Reference(action_id));
+        let bm_id = doc.add_object(Object::Dictionary(bm));
+
+        let mut outlines = Dictionary::new();
+        outlines.set("Type", Object::Name(b"Outlines".to_vec()));
+        outlines.set("First", Object::Reference(bm_id));
+        let outlines_id = doc.add_object(Object::Dictionary(outlines));
+
+        let mut catalog = Dictionary::new();
+        catalog.set("Type", Object::Name(b"Catalog".to_vec()));
+        catalog.set("Outlines", Object::Reference(outlines_id));
+        let catalog_id = doc.add_object(Object::Dictionary(catalog));
+        doc.trailer.set("Root", Object::Reference(catalog_id));
+
+        let out = output_of(|w| print_bookmarks(w, &doc));
+        assert!(out.contains("URI(https://example.com)"));
+    }
+
+    #[test]
+    fn bookmarks_missing_title() {
+        let mut doc = Document::new();
+
+        let bm = Dictionary::new(); // No /Title
+        let bm_id = doc.add_object(Object::Dictionary(bm));
+
+        let mut outlines = Dictionary::new();
+        outlines.set("Type", Object::Name(b"Outlines".to_vec()));
+        outlines.set("First", Object::Reference(bm_id));
+        let outlines_id = doc.add_object(Object::Dictionary(outlines));
+
+        let mut catalog = Dictionary::new();
+        catalog.set("Type", Object::Name(b"Catalog".to_vec()));
+        catalog.set("Outlines", Object::Reference(outlines_id));
+        let catalog_id = doc.add_object(Object::Dictionary(catalog));
+        doc.trailer.set("Root", Object::Reference(catalog_id));
+
+        let out = output_of(|w| print_bookmarks(w, &doc));
+        assert!(out.contains("(untitled)"));
+    }
+
+    #[test]
+    fn bookmarks_json_output() {
+        let doc = make_doc_with_bookmarks();
+        let out = output_of(|w| print_bookmarks_json(w, &doc));
+        let val: Value = serde_json::from_str(&out).unwrap();
+        assert_eq!(val["bookmark_count"], 2);
+        assert_eq!(val["bookmarks"][0]["title"], "Chapter 1");
+        assert_eq!(val["bookmarks"][1]["title"], "Chapter 2");
+    }
+
+    #[test]
+    fn bookmarks_json_no_outlines() {
+        let mut doc = Document::new();
+        let mut catalog = Dictionary::new();
+        catalog.set("Type", Object::Name(b"Catalog".to_vec()));
+        let catalog_id = doc.add_object(Object::Dictionary(catalog));
+        doc.trailer.set("Root", Object::Reference(catalog_id));
+
+        let out = output_of(|w| print_bookmarks_json(w, &doc));
+        let val: Value = serde_json::from_str(&out).unwrap();
+        assert_eq!(val["bookmark_count"], 0);
+    }
+
+    // ── Annotations tests ───────────────────────────────────────────────
+
+    fn make_doc_with_annotations() -> Document {
+        let mut doc = Document::new();
+
+        // Annotation
+        let mut annot = Dictionary::new();
+        annot.set("Type", Object::Name(b"Annot".to_vec()));
+        annot.set("Subtype", Object::Name(b"Link".to_vec()));
+        annot.set("Rect", Object::Array(vec![
+            Object::Integer(0), Object::Integer(0),
+            Object::Integer(100), Object::Integer(50),
+        ]));
+        annot.set("Contents", Object::String(b"Click here".to_vec(), StringFormat::Literal));
+        let annot_id = doc.add_object(Object::Dictionary(annot));
+
+        // Content stream
+        let content_stream = Stream::new(Dictionary::new(), b"BT ET".to_vec());
+        let content_id = doc.add_object(Object::Stream(content_stream));
+
+        // Page
+        let mut page_dict = Dictionary::new();
+        page_dict.set("Type", Object::Name(b"Page".to_vec()));
+        page_dict.set("Contents", Object::Reference(content_id));
+        page_dict.set("Annots", Object::Array(vec![Object::Reference(annot_id)]));
+        page_dict.set("MediaBox", Object::Array(vec![
+            Object::Integer(0), Object::Integer(0),
+            Object::Integer(612), Object::Integer(792),
+        ]));
+        let page_id = doc.add_object(Object::Dictionary(page_dict));
+
+        // Pages
+        let mut pages_dict = Dictionary::new();
+        pages_dict.set("Type", Object::Name(b"Pages".to_vec()));
+        pages_dict.set("Kids", Object::Array(vec![Object::Reference(page_id)]));
+        pages_dict.set("Count", Object::Integer(1));
+        let pages_id = doc.add_object(Object::Dictionary(pages_dict));
+
+        // Update page /Parent
+        if let Ok(Object::Dictionary(d)) = doc.get_object_mut(page_id) {
+            d.set("Parent", Object::Reference(pages_id));
+        }
+
+        // Catalog
+        let mut catalog = Dictionary::new();
+        catalog.set("Type", Object::Name(b"Catalog".to_vec()));
+        catalog.set("Pages", Object::Reference(pages_id));
+        let catalog_id = doc.add_object(Object::Dictionary(catalog));
+        doc.trailer.set("Root", Object::Reference(catalog_id));
+
+        doc
+    }
+
+    #[test]
+    fn annotations_link_annotation() {
+        let doc = make_doc_with_annotations();
+        let out = output_of(|w| print_annotations(w, &doc, None));
+        assert!(out.contains("1 annotations found"));
+        assert!(out.contains("Link"));
+        assert!(out.contains("Click here"));
+    }
+
+    #[test]
+    fn annotations_page_filter() {
+        let doc = make_doc_with_annotations();
+        // Page 1 has annotations
+        let spec1 = PageSpec::Single(1);
+        let out = output_of(|w| print_annotations(w, &doc, Some(&spec1)));
+        assert!(out.contains("1 annotations found"));
+        // Page 2 doesn't exist, should return 0
+        let spec2 = PageSpec::Single(2);
+        let out2 = output_of(|w| print_annotations(w, &doc, Some(&spec2)));
+        assert!(out2.contains("0 annotations found"));
+    }
+
+    #[test]
+    fn annotations_no_annotations() {
+        let mut doc = Document::new();
+        // Page without /Annots
+        let mut page_dict = Dictionary::new();
+        page_dict.set("Type", Object::Name(b"Page".to_vec()));
+        page_dict.set("MediaBox", Object::Array(vec![
+            Object::Integer(0), Object::Integer(0),
+            Object::Integer(612), Object::Integer(792),
+        ]));
+        let page_id = doc.add_object(Object::Dictionary(page_dict));
+
+        let mut pages_dict = Dictionary::new();
+        pages_dict.set("Type", Object::Name(b"Pages".to_vec()));
+        pages_dict.set("Kids", Object::Array(vec![Object::Reference(page_id)]));
+        pages_dict.set("Count", Object::Integer(1));
+        let pages_id = doc.add_object(Object::Dictionary(pages_dict));
+
+        if let Ok(Object::Dictionary(d)) = doc.get_object_mut(page_id) {
+            d.set("Parent", Object::Reference(pages_id));
+        }
+
+        let mut catalog = Dictionary::new();
+        catalog.set("Type", Object::Name(b"Catalog".to_vec()));
+        catalog.set("Pages", Object::Reference(pages_id));
+        let catalog_id = doc.add_object(Object::Dictionary(catalog));
+        doc.trailer.set("Root", Object::Reference(catalog_id));
+
+        let out = output_of(|w| print_annotations(w, &doc, None));
+        assert!(out.contains("0 annotations found"));
+    }
+
+    #[test]
+    fn annotations_json_output() {
+        let doc = make_doc_with_annotations();
+        let out = output_of(|w| print_annotations_json(w, &doc, None));
+        let val: Value = serde_json::from_str(&out).unwrap();
+        assert_eq!(val["annotation_count"], 1);
+        assert_eq!(val["annotations"][0]["subtype"], "Link");
+        assert_eq!(val["annotations"][0]["contents"], "Click here");
+    }
+
+    #[test]
+    fn annotations_text_annotation() {
+        let mut doc = Document::new();
+
+        let mut annot = Dictionary::new();
+        annot.set("Type", Object::Name(b"Annot".to_vec()));
+        annot.set("Subtype", Object::Name(b"Text".to_vec()));
+        annot.set("Rect", Object::Array(vec![
+            Object::Integer(10), Object::Integer(20),
+            Object::Integer(30), Object::Integer(40),
+        ]));
+        annot.set("Contents", Object::String(b"A note".to_vec(), StringFormat::Literal));
+        let annot_id = doc.add_object(Object::Dictionary(annot));
+
+        let mut page_dict = Dictionary::new();
+        page_dict.set("Type", Object::Name(b"Page".to_vec()));
+        page_dict.set("Annots", Object::Array(vec![Object::Reference(annot_id)]));
+        page_dict.set("MediaBox", Object::Array(vec![
+            Object::Integer(0), Object::Integer(0),
+            Object::Integer(612), Object::Integer(792),
+        ]));
+        let page_id = doc.add_object(Object::Dictionary(page_dict));
+
+        let mut pages_dict = Dictionary::new();
+        pages_dict.set("Type", Object::Name(b"Pages".to_vec()));
+        pages_dict.set("Kids", Object::Array(vec![Object::Reference(page_id)]));
+        pages_dict.set("Count", Object::Integer(1));
+        let pages_id = doc.add_object(Object::Dictionary(pages_dict));
+
+        if let Ok(Object::Dictionary(d)) = doc.get_object_mut(page_id) {
+            d.set("Parent", Object::Reference(pages_id));
+        }
+
+        let mut catalog = Dictionary::new();
+        catalog.set("Type", Object::Name(b"Catalog".to_vec()));
+        catalog.set("Pages", Object::Reference(pages_id));
+        let catalog_id = doc.add_object(Object::Dictionary(catalog));
+        doc.trailer.set("Root", Object::Reference(catalog_id));
+
+        let out = output_of(|w| print_annotations(w, &doc, None));
+        assert!(out.contains("Text"));
+        assert!(out.contains("A note"));
+    }
+
+    // ── DOT output tests ────────────────────────────────────────────────
+
+    #[test]
+    fn escape_dot_quotes_and_backslash() {
+        assert_eq!(escape_dot("hello \"world\""), "hello \\\"world\\\"");
+        assert_eq!(escape_dot("a\\b"), "a\\\\b");
+    }
+
+    #[test]
+    fn dot_basic_output() {
+        let mut doc = Document::new();
+        let mut catalog = Dictionary::new();
+        catalog.set("Type", Object::Name(b"Catalog".to_vec()));
+        let catalog_id = doc.add_object(Object::Dictionary(catalog));
+        doc.trailer.set("Root", Object::Reference(catalog_id));
+
+        let config = default_config();
+        let out = output_of(|w| print_tree_dot(w, &doc, &config));
+        assert!(out.contains("digraph pdf {"));
+        assert!(out.contains("->"));
+        assert!(out.contains("}"));
+        assert!(out.contains("Catalog"));
+    }
+
+    #[test]
+    fn dot_revisited_nodes() {
+        let mut doc = Document::new();
+        // Two dict entries referencing the same object
+        let shared = doc.add_object(Object::Integer(42));
+        let mut root = Dictionary::new();
+        root.set("Type", Object::Name(b"Catalog".to_vec()));
+        root.set("A", Object::Reference(shared));
+        root.set("B", Object::Reference(shared));
+        let root_id = doc.add_object(Object::Dictionary(root));
+        doc.trailer.set("Root", Object::Reference(root_id));
+
+        let config = default_config();
+        let out = output_of(|w| print_tree_dot(w, &doc, &config));
+        // The shared node should be defined once, but have two edges pointing to it
+        let node_name = format!("obj_{}_{}", shared.0, shared.1);
+        let edge_count = out.matches(&format!("-> \"{}\"", node_name)).count();
+        assert!(edge_count >= 2, "Should have at least 2 edges to shared node, got {}", edge_count);
+    }
+
+    #[test]
+    fn dot_depth_limiting() {
+        let mut doc = Document::new();
+        let deep = doc.add_object(Object::Integer(99));
+        let mut child = Dictionary::new();
+        child.set("Deep", Object::Reference(deep));
+        let child_id = doc.add_object(Object::Dictionary(child));
+        let mut root = Dictionary::new();
+        root.set("Type", Object::Name(b"Catalog".to_vec()));
+        root.set("Child", Object::Reference(child_id));
+        let root_id = doc.add_object(Object::Dictionary(root));
+        doc.trailer.set("Root", Object::Reference(root_id));
+
+        let config = DumpConfig { decode_streams: false, truncate: None, json: false, hex: false, depth: Some(1) };
+        let out = output_of(|w| print_tree_dot(w, &doc, &config));
+        // Should include root and child, but not the deep object
+        let deep_node = format!("obj_{}_{}", deep.0, deep.1);
+        assert!(!out.contains(&deep_node), "Deep node should not appear with depth limit 1");
+    }
+
+    #[test]
+    fn dot_empty_tree() {
+        let doc = Document::new();
+        let config = default_config();
+        let out = output_of(|w| print_tree_dot(w, &doc, &config));
+        assert!(out.contains("digraph pdf {"));
+        assert!(out.contains("}"));
+    }
+
+    // ── PageSpec tests ──────────────────────────────────────────────────
+
+    #[test]
+    fn page_spec_parse_single() {
+        let spec = PageSpec::parse("5").unwrap();
+        assert!(matches!(spec, PageSpec::Single(5)));
+    }
+
+    #[test]
+    fn page_spec_parse_range() {
+        let spec = PageSpec::parse("1-5").unwrap();
+        assert!(matches!(spec, PageSpec::Range(1, 5)));
+    }
+
+    #[test]
+    fn page_spec_parse_invalid() {
+        assert!(PageSpec::parse("abc").is_err());
+        assert!(PageSpec::parse("0").is_err());
+        assert!(PageSpec::parse("5-3").is_err()); // start > end
+        assert!(PageSpec::parse("0-5").is_err()); // zero
+        assert!(PageSpec::parse("1-0").is_err()); // zero
+    }
+
+    #[test]
+    fn page_spec_contains() {
+        let single = PageSpec::Single(3);
+        assert!(single.contains(3));
+        assert!(!single.contains(4));
+
+        let range = PageSpec::Range(2, 5);
+        assert!(!range.contains(1));
+        assert!(range.contains(2));
+        assert!(range.contains(3));
+        assert!(range.contains(5));
+        assert!(!range.contains(6));
+    }
+
+    #[test]
+    fn page_spec_pages() {
+        let single = PageSpec::Single(3);
+        assert_eq!(single.pages(), vec![3]);
+
+        let range = PageSpec::Range(2, 5);
+        assert_eq!(range.pages(), vec![2, 3, 4, 5]);
+    }
+
+    #[test]
+    fn dump_page_range() {
+        let doc = build_two_page_doc();
+        let config = DumpConfig { decode_streams: true, truncate: None, json: false, hex: false, depth: None };
+        let out = output_of(|w| {
+            dump_page(w, &doc, &PageSpec::Range(1, 2), &config);
+        });
+        assert!(out.contains("Page 1 (Object"));
+        assert!(out.contains("Page 2 (Object"));
+    }
+
+    #[test]
+    fn text_with_page_range() {
+        let doc = build_two_page_doc();
+        let spec = PageSpec::Range(1, 2);
+        let out = output_of(|w| print_text(w, &doc, Some(&spec)));
+        assert!(out.contains("--- Page 1 ---"));
+        assert!(out.contains("--- Page 2 ---"));
     }
 }

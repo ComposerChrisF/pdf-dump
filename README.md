@@ -69,9 +69,9 @@ Prints PDF version, object count, page count, `/Info` dictionary fields (Title, 
 
 Prints a single object by number (generation 0) without following any references.
 
-### `--page N`
+### `--page N` or `--page N-M`
 
-Dumps the object subtree for a specific page (1-based). Only follows references reachable from that page's dictionary.
+Dumps the object subtree for a specific page or page range (1-based). Only follows references reachable from each page's dictionary. Examples: `--page 3` for a single page, `--page 1-5` for pages 1 through 5.
 
 ### `--search <expr>`
 
@@ -93,6 +93,7 @@ Extracts readable text from page content streams (Tj, TJ, ', " operators). Outpu
 ```
 pdf-dump file.pdf --text               # all pages
 pdf-dump file.pdf --text --page 3      # just page 3
+pdf-dump file.pdf --text --page 1-5    # pages 1 through 5
 ```
 
 Limitations: no font encoding or ToUnicode mapping; text appears in content stream order, not visual order.
@@ -111,6 +112,46 @@ Shows the object graph as an indented reference tree. Displays object IDs, types
 
 ```
 pdf-dump file.pdf --tree --depth 3    # limit to 3 levels
+pdf-dump file.pdf --tree --dot        # GraphViz DOT output
+pdf-dump file.pdf --tree --dot --depth 2  # DOT with depth limit
+```
+
+### `--stats`
+
+Shows document statistics: page count, object count, object type breakdown, stream statistics (total raw/decoded bytes, filter usage histogram), and the top 10 largest streams.
+
+```
+pdf-dump file.pdf --stats
+pdf-dump file.pdf --stats --json
+```
+
+### `--xref`
+
+Shows a cross-reference table listing every object in the document with its number, generation, kind, and `/Type`.
+
+```
+pdf-dump file.pdf --xref
+pdf-dump file.pdf --xref --json
+```
+
+### `--bookmarks`
+
+Shows the document's bookmark (outline) tree. Displays titles, destinations (/Dest arrays, /Fit types), and actions (GoTo, URI, etc.) with proper indentation for nested bookmarks.
+
+```
+pdf-dump file.pdf --bookmarks
+pdf-dump file.pdf --bookmarks --json
+```
+
+### `--annotations`
+
+Lists all annotations in the document, grouped by page. Shows subtype, rectangle, and contents. Can be filtered to specific pages.
+
+```
+pdf-dump file.pdf --annotations              # all pages
+pdf-dump file.pdf --annotations --page 1     # just page 1
+pdf-dump file.pdf --annotations --page 1-3   # pages 1-3
+pdf-dump file.pdf --annotations --json
 ```
 
 ### `--refs-to N`
@@ -136,11 +177,11 @@ These combine with any mode:
 | Flag | Effect |
 |------|--------|
 | `--json` | Structured JSON output. Works with every mode. |
-| `--decode-streams` | Decompress and display stream contents (FlateDecode, ASCII85Decode, ASCIIHexDecode, LZWDecode). |
+| `--decode-streams` | Decompress and display stream contents (FlateDecode, ASCII85Decode, ASCIIHexDecode, LZWDecode, RunLengthDecode). |
 | `--hex` | Show binary streams as hex dump (use with `--decode-streams`). |
 | `--truncate N` | Limit binary stream output to N bytes. |
-| `--truncate-binary-streams` | Shorthand for `--truncate 100`. |
 | `--depth N` | Limit traversal depth (0 = root only). Works with dump, page, tree. |
+| `--dot` | Output tree as GraphViz DOT format (use with `--tree`). |
 
 ## Examples
 
@@ -172,6 +213,25 @@ See the object tree two levels deep:
 
 ```
 pdf-dump file.pdf --tree --depth 2
+```
+
+Generate a DOT graph for visualization:
+
+```
+pdf-dump file.pdf --tree --dot | dot -Tpng -o tree.png
+```
+
+Show document statistics:
+
+```
+pdf-dump file.pdf --stats
+```
+
+List bookmarks and annotations:
+
+```
+pdf-dump file.pdf --bookmarks
+pdf-dump file.pdf --annotations --page 1-3
 ```
 
 ## For Claude Code users

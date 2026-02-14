@@ -20,7 +20,7 @@ fn binary_path() -> PathBuf {
     if path.ends_with("deps") {
         path.pop(); // remove "deps"
     }
-    path.push("pdf_dump");
+    path.push("pdf-dump");
     path
 }
 
@@ -251,19 +251,6 @@ fn no_arguments_shows_error() {
     );
 }
 
-#[test]
-fn truncate_binary_streams_flag_accepted() {
-    let pdf = create_minimal_pdf();
-    let output = Command::new(binary_path())
-        .arg(pdf.path())
-        .arg("--decode-streams")
-        .arg("--truncate-binary-streams")
-        .output()
-        .expect("failed to execute binary");
-
-    assert!(output.status.success(), "Should accept --truncate-binary-streams flag");
-}
-
 // ── CLI argument validation ─────────────────────────────────────────
 
 #[test]
@@ -312,7 +299,7 @@ fn version_flag_prints_version() {
 
     let stdout = String::from_utf8_lossy(&output.stdout);
     assert!(
-        stdout.contains("0.2.0") || stdout.contains("pdf_dump"),
+        stdout.contains("0.5.0") || stdout.contains("pdf-dump"),
         "Should print version info: {}",
         stdout
     );
@@ -407,7 +394,8 @@ fn dump_binary_stream_truncation_visible() {
     let output = Command::new(binary_path())
         .arg(tmp.path())
         .arg("--decode-streams")
-        .arg("--truncate-binary-streams")
+        .arg("--truncate")
+        .arg("100")
         .output()
         .expect("failed to execute binary");
 
@@ -1856,31 +1844,40 @@ fn truncate_flag_with_custom_value() {
     assert!(stdout.contains("truncated to 50"), "Should truncate to custom value: {}", stdout);
 }
 
+
+// ── RunLengthDecode integration ──────────────────────────────────────
+
 #[test]
-fn truncate_binary_streams_backward_compat() {
-    let pdf = create_minimal_pdf();
+fn run_length_decode_stream_decodes() {
+    let mut doc = Document::new();
+
+    // RunLengthDecode data: literal "Hi" (length=1) then repeat '!' 3 times (254) then EOD (128)
+    let rle_data = vec![1, b'H', b'i', 254, b'!', 128];
+    let mut stream_dict = Dictionary::new();
+    stream_dict.set("Filter", Object::Name(b"RunLengthDecode".to_vec()));
+    let stream = Stream::new(stream_dict, rle_data);
+    let stream_id = doc.add_object(Object::Stream(stream));
+
+    let mut catalog = Dictionary::new();
+    catalog.set("Type", Object::Name(b"Catalog".to_vec()));
+    catalog.set("Data", Object::Reference(stream_id));
+    let catalog_id = doc.add_object(Object::Dictionary(catalog));
+    doc.trailer.set("Root", Object::Reference(catalog_id));
+
+    let mut tmp = tempfile::NamedTempFile::new().unwrap();
+    doc.save_to(&mut tmp).unwrap();
+    tmp.flush().unwrap();
+
     let output = Command::new(binary_path())
-        .arg(pdf.path())
+        .arg(tmp.path())
         .arg("--decode-streams")
-        .arg("--truncate-binary-streams")
         .output()
         .expect("failed to execute binary");
 
-    assert!(output.status.success(), "--truncate-binary-streams should still work");
-}
-
-#[test]
-fn truncate_conflicts_with_truncate_binary_streams() {
-    let pdf = create_minimal_pdf();
-    let output = Command::new(binary_path())
-        .arg(pdf.path())
-        .arg("--truncate-binary-streams")
-        .arg("--truncate")
-        .arg("50")
-        .output()
-        .expect("failed to execute binary");
-
-    assert!(!output.status.success(), "--truncate and --truncate-binary-streams should conflict");
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(output.status.success());
+    assert!(stdout.contains("decoded"), "Should show 'decoded' for RunLengthDecode stream: {}", stdout);
+    assert!(stdout.contains("Hi!!!"), "Should contain decoded content 'Hi!!!': {}", stdout);
 }
 
 // ── Decode failure warnings ──────────────────────────────────────────
@@ -2431,4 +2428,465 @@ fn tree_with_stream_object() {
     assert!(output.status.success());
     assert!(stdout.contains("Stream"), "Tree should show Stream label: {}", stdout);
     assert!(stdout.contains("bytes"), "Tree should show byte count for streams: {}", stdout);
+}
+
+// ── --stats integration tests ───────────────────────────────────────
+
+#[test]
+fn stats_on_minimal_pdf() {
+    let pdf = create_minimal_pdf();
+    let output = Command::new(binary_path())
+        .arg(pdf.path())
+        .arg("--stats")
+        .output()
+        .expect("failed to execute binary");
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(output.status.success());
+    assert!(stdout.contains("Overview"), "Should show Overview section: {}", stdout);
+    assert!(stdout.contains("Objects by Type"), "Should show type breakdown: {}", stdout);
+    assert!(stdout.contains("Stream Statistics"), "Should show stream stats: {}", stdout);
+}
+
+#[test]
+fn stats_json_output() {
+    let pdf = create_minimal_pdf();
+    let output = Command::new(binary_path())
+        .arg(pdf.path())
+        .arg("--stats")
+        .arg("--json")
+        .output()
+        .expect("failed to execute binary");
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(output.status.success());
+    let val: serde_json::Value = serde_json::from_str(&stdout).expect("Should be valid JSON");
+    assert!(val["object_count"].as_u64().unwrap() > 0);
+    assert!(val["page_count"].as_u64().unwrap() > 0);
+}
+
+// ── --xref integration tests ────────────────────────────────────────
+
+#[test]
+fn xref_on_minimal_pdf() {
+    let pdf = create_minimal_pdf();
+    let output = Command::new(binary_path())
+        .arg(pdf.path())
+        .arg("--xref")
+        .output()
+        .expect("failed to execute binary");
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(output.status.success());
+    assert!(stdout.contains("objects"), "Should show object count: {}", stdout);
+    assert!(stdout.contains("Obj#"), "Should show table header: {}", stdout);
+}
+
+// ── --bookmarks integration tests ───────────────────────────────────
+
+#[test]
+fn bookmarks_on_pdf_with_outlines() {
+    let mut doc = Document::new();
+
+    // Bookmark
+    let mut bm = Dictionary::new();
+    bm.set("Title", Object::String(b"Introduction".to_vec(), lopdf::StringFormat::Literal));
+    let bm_id = doc.add_object(Object::Dictionary(bm));
+
+    let mut outlines = Dictionary::new();
+    outlines.set("Type", Object::Name(b"Outlines".to_vec()));
+    outlines.set("First", Object::Reference(bm_id));
+    let outlines_id = doc.add_object(Object::Dictionary(outlines));
+
+    // Page + Pages for catalog
+    let mut page_dict = Dictionary::new();
+    page_dict.set("Type", Object::Name(b"Page".to_vec()));
+    page_dict.set("MediaBox", Object::Array(vec![
+        Object::Integer(0), Object::Integer(0),
+        Object::Integer(612), Object::Integer(792),
+    ]));
+    let page_id = doc.add_object(Object::Dictionary(page_dict));
+    let mut pages_dict = Dictionary::new();
+    pages_dict.set("Type", Object::Name(b"Pages".to_vec()));
+    pages_dict.set("Kids", Object::Array(vec![Object::Reference(page_id)]));
+    pages_dict.set("Count", Object::Integer(1));
+    let pages_id = doc.add_object(Object::Dictionary(pages_dict));
+    if let Ok(Object::Dictionary(d)) = doc.get_object_mut(page_id) {
+        d.set("Parent", Object::Reference(pages_id));
+    }
+
+    let mut catalog = Dictionary::new();
+    catalog.set("Type", Object::Name(b"Catalog".to_vec()));
+    catalog.set("Pages", Object::Reference(pages_id));
+    catalog.set("Outlines", Object::Reference(outlines_id));
+    let catalog_id = doc.add_object(Object::Dictionary(catalog));
+    doc.trailer.set("Root", Object::Reference(catalog_id));
+
+    let mut tmp = tempfile::NamedTempFile::new().unwrap();
+    doc.save_to(&mut tmp).unwrap();
+    tmp.flush().unwrap();
+
+    let output = Command::new(binary_path())
+        .arg(tmp.path())
+        .arg("--bookmarks")
+        .output()
+        .expect("failed to execute binary");
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(output.status.success());
+    assert!(stdout.contains("Introduction"), "Should show bookmark title: {}", stdout);
+    assert!(stdout.contains("1 bookmarks"), "Should show count: {}", stdout);
+}
+
+#[test]
+fn bookmarks_no_outlines_says_no_bookmarks() {
+    let pdf = create_minimal_pdf();
+    let output = Command::new(binary_path())
+        .arg(pdf.path())
+        .arg("--bookmarks")
+        .output()
+        .expect("failed to execute binary");
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(output.status.success());
+    assert!(stdout.contains("No bookmarks"), "Should indicate no bookmarks: {}", stdout);
+}
+
+// ── --annotations integration tests ─────────────────────────────────
+
+#[test]
+fn annotations_on_pdf_with_link() {
+    let mut doc = Document::new();
+
+    let mut annot = Dictionary::new();
+    annot.set("Type", Object::Name(b"Annot".to_vec()));
+    annot.set("Subtype", Object::Name(b"Link".to_vec()));
+    annot.set("Rect", Object::Array(vec![
+        Object::Integer(0), Object::Integer(0),
+        Object::Integer(100), Object::Integer(50),
+    ]));
+    annot.set("Contents", Object::String(b"Test link".to_vec(), lopdf::StringFormat::Literal));
+    let annot_id = doc.add_object(Object::Dictionary(annot));
+
+    let content_stream = Stream::new(Dictionary::new(), b"BT ET".to_vec());
+    let content_id = doc.add_object(Object::Stream(content_stream));
+
+    let mut page_dict = Dictionary::new();
+    page_dict.set("Type", Object::Name(b"Page".to_vec()));
+    page_dict.set("Contents", Object::Reference(content_id));
+    page_dict.set("Annots", Object::Array(vec![Object::Reference(annot_id)]));
+    page_dict.set("MediaBox", Object::Array(vec![
+        Object::Integer(0), Object::Integer(0),
+        Object::Integer(612), Object::Integer(792),
+    ]));
+    let page_id = doc.add_object(Object::Dictionary(page_dict));
+
+    let mut pages_dict = Dictionary::new();
+    pages_dict.set("Type", Object::Name(b"Pages".to_vec()));
+    pages_dict.set("Kids", Object::Array(vec![Object::Reference(page_id)]));
+    pages_dict.set("Count", Object::Integer(1));
+    let pages_id = doc.add_object(Object::Dictionary(pages_dict));
+
+    if let Ok(Object::Dictionary(d)) = doc.get_object_mut(page_id) {
+        d.set("Parent", Object::Reference(pages_id));
+    }
+
+    let mut catalog = Dictionary::new();
+    catalog.set("Type", Object::Name(b"Catalog".to_vec()));
+    catalog.set("Pages", Object::Reference(pages_id));
+    let catalog_id = doc.add_object(Object::Dictionary(catalog));
+    doc.trailer.set("Root", Object::Reference(catalog_id));
+
+    let mut tmp = tempfile::NamedTempFile::new().unwrap();
+    doc.save_to(&mut tmp).unwrap();
+    tmp.flush().unwrap();
+
+    let output = Command::new(binary_path())
+        .arg(tmp.path())
+        .arg("--annotations")
+        .output()
+        .expect("failed to execute binary");
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(output.status.success());
+    assert!(stdout.contains("1 annotations found"), "Should show count: {}", stdout);
+    assert!(stdout.contains("Link"), "Should show subtype: {}", stdout);
+    assert!(stdout.contains("Test link"), "Should show contents: {}", stdout);
+}
+
+#[test]
+fn annotations_with_page_filter() {
+    let mut doc = Document::new();
+
+    let mut annot = Dictionary::new();
+    annot.set("Type", Object::Name(b"Annot".to_vec()));
+    annot.set("Subtype", Object::Name(b"Text".to_vec()));
+    annot.set("Rect", Object::Array(vec![
+        Object::Integer(0), Object::Integer(0),
+        Object::Integer(50), Object::Integer(50),
+    ]));
+    let annot_id = doc.add_object(Object::Dictionary(annot));
+
+    let content_stream = Stream::new(Dictionary::new(), b"BT ET".to_vec());
+    let content_id = doc.add_object(Object::Stream(content_stream));
+
+    let mut page_dict = Dictionary::new();
+    page_dict.set("Type", Object::Name(b"Page".to_vec()));
+    page_dict.set("Contents", Object::Reference(content_id));
+    page_dict.set("Annots", Object::Array(vec![Object::Reference(annot_id)]));
+    page_dict.set("MediaBox", Object::Array(vec![
+        Object::Integer(0), Object::Integer(0),
+        Object::Integer(612), Object::Integer(792),
+    ]));
+    let page_id = doc.add_object(Object::Dictionary(page_dict));
+
+    let mut pages_dict = Dictionary::new();
+    pages_dict.set("Type", Object::Name(b"Pages".to_vec()));
+    pages_dict.set("Kids", Object::Array(vec![Object::Reference(page_id)]));
+    pages_dict.set("Count", Object::Integer(1));
+    let pages_id = doc.add_object(Object::Dictionary(pages_dict));
+
+    if let Ok(Object::Dictionary(d)) = doc.get_object_mut(page_id) {
+        d.set("Parent", Object::Reference(pages_id));
+    }
+
+    let mut catalog = Dictionary::new();
+    catalog.set("Type", Object::Name(b"Catalog".to_vec()));
+    catalog.set("Pages", Object::Reference(pages_id));
+    let catalog_id = doc.add_object(Object::Dictionary(catalog));
+    doc.trailer.set("Root", Object::Reference(catalog_id));
+
+    let mut tmp = tempfile::NamedTempFile::new().unwrap();
+    doc.save_to(&mut tmp).unwrap();
+    tmp.flush().unwrap();
+
+    // --annotations --page 1 should work
+    let output = Command::new(binary_path())
+        .arg(tmp.path())
+        .arg("--annotations")
+        .arg("--page").arg("1")
+        .output()
+        .expect("failed to execute binary");
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(output.status.success());
+    assert!(stdout.contains("1 annotations found"), "Should find annotation on page 1: {}", stdout);
+}
+
+// ── --tree --dot integration tests ──────────────────────────────────
+
+#[test]
+fn tree_dot_produces_valid_dot() {
+    let pdf = create_minimal_pdf();
+    let output = Command::new(binary_path())
+        .arg(pdf.path())
+        .arg("--tree")
+        .arg("--dot")
+        .output()
+        .expect("failed to execute binary");
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(output.status.success());
+    assert!(stdout.contains("digraph pdf {"), "Should contain digraph: {}", stdout);
+    assert!(stdout.contains("->"), "Should contain edges: {}", stdout);
+    assert!(stdout.trim_end().ends_with("}"), "Should end with }}: {}", stdout);
+}
+
+#[test]
+fn tree_dot_with_depth_limit() {
+    let pdf = create_minimal_pdf();
+    let output = Command::new(binary_path())
+        .arg(pdf.path())
+        .arg("--tree")
+        .arg("--dot")
+        .arg("--depth").arg("1")
+        .output()
+        .expect("failed to execute binary");
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(output.status.success());
+    assert!(stdout.contains("digraph pdf {"), "Should contain digraph: {}", stdout);
+}
+
+// ── --diff incompatible with new modes ──────────────────────────────
+
+#[test]
+fn diff_incompatible_with_stats() {
+    let pdf = create_minimal_pdf();
+    let output = Command::new(binary_path())
+        .arg(pdf.path())
+        .arg("--diff").arg(pdf.path())
+        .arg("--stats")
+        .output()
+        .expect("failed to execute binary");
+    assert!(!output.status.success(), "diff + stats should fail");
+}
+
+#[test]
+fn diff_incompatible_with_xref() {
+    let pdf = create_minimal_pdf();
+    let output = Command::new(binary_path())
+        .arg(pdf.path())
+        .arg("--diff").arg(pdf.path())
+        .arg("--xref")
+        .output()
+        .expect("failed to execute binary");
+    assert!(!output.status.success(), "diff + xref should fail");
+}
+
+#[test]
+fn diff_incompatible_with_bookmarks() {
+    let pdf = create_minimal_pdf();
+    let output = Command::new(binary_path())
+        .arg(pdf.path())
+        .arg("--diff").arg(pdf.path())
+        .arg("--bookmarks")
+        .output()
+        .expect("failed to execute binary");
+    assert!(!output.status.success(), "diff + bookmarks should fail");
+}
+
+#[test]
+fn diff_incompatible_with_annotations() {
+    let pdf = create_minimal_pdf();
+    let output = Command::new(binary_path())
+        .arg(pdf.path())
+        .arg("--diff").arg(pdf.path())
+        .arg("--annotations")
+        .output()
+        .expect("failed to execute binary");
+    assert!(!output.status.success(), "diff + annotations should fail");
+}
+
+// ── Mode mutual exclusivity for new modes ───────────────────────────
+
+#[test]
+fn stats_and_xref_mutual_exclusion() {
+    let pdf = create_minimal_pdf();
+    let output = Command::new(binary_path())
+        .arg(pdf.path())
+        .arg("--stats")
+        .arg("--xref")
+        .output()
+        .expect("failed to execute binary");
+    assert!(!output.status.success(), "stats + xref should fail");
+}
+
+#[test]
+fn bookmarks_and_fonts_mutual_exclusion() {
+    let pdf = create_minimal_pdf();
+    let output = Command::new(binary_path())
+        .arg(pdf.path())
+        .arg("--bookmarks")
+        .arg("--fonts")
+        .output()
+        .expect("failed to execute binary");
+    assert!(!output.status.success(), "bookmarks + fonts should fail");
+}
+
+// ── --page range integration tests ──────────────────────────────────
+
+/// Create a PDF with two pages for range testing.
+fn create_two_page_pdf_for_range() -> tempfile::NamedTempFile {
+    let mut doc = Document::new();
+
+    // Page 1
+    let c1 = Stream::new(Dictionary::new(), b"BT (Page1) Tj ET".to_vec());
+    let c1_id = doc.add_object(Object::Stream(c1));
+    let mut p1 = Dictionary::new();
+    p1.set("Type", Object::Name(b"Page".to_vec()));
+    p1.set("Contents", Object::Reference(c1_id));
+    p1.set("MediaBox", Object::Array(vec![
+        Object::Integer(0), Object::Integer(0), Object::Integer(612), Object::Integer(792),
+    ]));
+    let p1_id = doc.add_object(Object::Dictionary(p1));
+
+    // Page 2
+    let c2 = Stream::new(Dictionary::new(), b"BT (Page2) Tj ET".to_vec());
+    let c2_id = doc.add_object(Object::Stream(c2));
+    let mut p2 = Dictionary::new();
+    p2.set("Type", Object::Name(b"Page".to_vec()));
+    p2.set("Contents", Object::Reference(c2_id));
+    p2.set("MediaBox", Object::Array(vec![
+        Object::Integer(0), Object::Integer(0), Object::Integer(612), Object::Integer(792),
+    ]));
+    let p2_id = doc.add_object(Object::Dictionary(p2));
+
+    // Pages
+    let mut pages_dict = Dictionary::new();
+    pages_dict.set("Type", Object::Name(b"Pages".to_vec()));
+    pages_dict.set("Kids", Object::Array(vec![Object::Reference(p1_id), Object::Reference(p2_id)]));
+    pages_dict.set("Count", Object::Integer(2));
+    let pages_id = doc.add_object(Object::Dictionary(pages_dict));
+
+    if let Ok(Object::Dictionary(d)) = doc.get_object_mut(p1_id) { d.set("Parent", Object::Reference(pages_id)); }
+    if let Ok(Object::Dictionary(d)) = doc.get_object_mut(p2_id) { d.set("Parent", Object::Reference(pages_id)); }
+
+    let mut catalog = Dictionary::new();
+    catalog.set("Type", Object::Name(b"Catalog".to_vec()));
+    catalog.set("Pages", Object::Reference(pages_id));
+    let catalog_id = doc.add_object(Object::Dictionary(catalog));
+    doc.trailer.set("Root", Object::Reference(catalog_id));
+
+    let mut tmp = tempfile::NamedTempFile::new().unwrap();
+    doc.save_to(&mut tmp).unwrap();
+    tmp.flush().unwrap();
+    tmp
+}
+
+#[test]
+fn page_range_dump() {
+    let pdf = create_two_page_pdf_for_range();
+    let output = Command::new(binary_path())
+        .arg(pdf.path())
+        .arg("--page").arg("1-2")
+        .output()
+        .expect("failed to execute binary");
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(output.status.success());
+    assert!(stdout.contains("Page 1"), "Should contain Page 1: {}", stdout);
+    assert!(stdout.contains("Page 2"), "Should contain Page 2: {}", stdout);
+}
+
+#[test]
+fn page_range_text() {
+    let pdf = create_two_page_pdf_for_range();
+    let output = Command::new(binary_path())
+        .arg(pdf.path())
+        .arg("--text")
+        .arg("--page").arg("1-2")
+        .output()
+        .expect("failed to execute binary");
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(output.status.success());
+    assert!(stdout.contains("--- Page 1 ---"), "Should contain Page 1 header: {}", stdout);
+    assert!(stdout.contains("--- Page 2 ---"), "Should contain Page 2 header: {}", stdout);
+}
+
+#[test]
+fn page_zero_rejected() {
+    let pdf = create_minimal_pdf();
+    let output = Command::new(binary_path())
+        .arg(pdf.path())
+        .arg("--page").arg("0")
+        .output()
+        .expect("failed to execute binary");
+
+    assert!(!output.status.success(), "Page 0 should be rejected");
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(stderr.contains("must be >= 1") || stderr.contains("Error"), "Should show error: {}", stderr);
+}
+
+#[test]
+fn page_invalid_range_rejected() {
+    let pdf = create_minimal_pdf();
+    let output = Command::new(binary_path())
+        .arg(pdf.path())
+        .arg("--page").arg("5-3")
+        .output()
+        .expect("failed to execute binary");
+
+    assert!(!output.status.success(), "Reversed range should be rejected");
 }
