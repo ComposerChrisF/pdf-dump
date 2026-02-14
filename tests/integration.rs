@@ -312,7 +312,7 @@ fn version_flag_prints_version() {
 
     let stdout = String::from_utf8_lossy(&output.stdout);
     assert!(
-        stdout.contains("0.1.1") || stdout.contains("pdf_dump"),
+        stdout.contains("0.2.0") || stdout.contains("pdf_dump"),
         "Should print version info: {}",
         stdout
     );
@@ -479,6 +479,199 @@ fn extract_object_prints_success_message() {
     );
 }
 
+// ── New mode integration tests ───────────────────────────────────────
+
+#[test]
+fn object_flag_prints_single_object() {
+    let pdf = create_minimal_pdf();
+    let output = Command::new(binary_path())
+        .arg(pdf.path())
+        .arg("--object")
+        .arg("1")
+        .output()
+        .expect("failed to execute binary");
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(output.status.success(), "--object should succeed: {}", String::from_utf8_lossy(&output.stderr));
+    assert!(stdout.contains("Object 1 0:"), "Should show object header");
+    // Should NOT show trailer or full dump
+    assert!(!stdout.contains("Trailer:"), "Should not show trailer in --object mode");
+}
+
+#[test]
+fn object_flag_short_form() {
+    let pdf = create_minimal_pdf();
+    let output = Command::new(binary_path())
+        .arg(pdf.path())
+        .arg("-o")
+        .arg("1")
+        .output()
+        .expect("failed to execute binary");
+
+    assert!(output.status.success(), "-o should work as short form: {}", String::from_utf8_lossy(&output.stderr));
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(stdout.contains("Object 1 0:"));
+}
+
+#[test]
+fn object_flag_nonexistent_object_fails() {
+    let pdf = create_minimal_pdf();
+    let output = Command::new(binary_path())
+        .arg(pdf.path())
+        .arg("--object")
+        .arg("9999")
+        .output()
+        .expect("failed to execute binary");
+
+    assert!(!output.status.success());
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(stderr.contains("not found"), "Should report object not found: {}", stderr);
+}
+
+#[test]
+fn summary_flag_shows_object_table() {
+    let pdf = create_minimal_pdf();
+    let output = Command::new(binary_path())
+        .arg(pdf.path())
+        .arg("--summary")
+        .output()
+        .expect("failed to execute binary");
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(output.status.success(), "--summary should succeed: {}", String::from_utf8_lossy(&output.stderr));
+    assert!(stdout.contains("PDF"), "Should show PDF version");
+    assert!(stdout.contains("objects"), "Should show object count");
+    assert!(stdout.contains("Obj#"), "Should show table header");
+    assert!(stdout.contains("Dictionary") || stdout.contains("Stream"), "Should show object kinds");
+}
+
+#[test]
+fn summary_flag_short_form() {
+    let pdf = create_minimal_pdf();
+    let output = Command::new(binary_path())
+        .arg(pdf.path())
+        .arg("-s")
+        .output()
+        .expect("failed to execute binary");
+
+    assert!(output.status.success(), "-s should work as short form");
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(stdout.contains("Obj#"));
+}
+
+#[test]
+fn metadata_flag_shows_info() {
+    let pdf = create_minimal_pdf();
+    let output = Command::new(binary_path())
+        .arg(pdf.path())
+        .arg("--metadata")
+        .output()
+        .expect("failed to execute binary");
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(output.status.success(), "--metadata should succeed: {}", String::from_utf8_lossy(&output.stderr));
+    assert!(stdout.contains("PDF Version:"), "Should show PDF version");
+    assert!(stdout.contains("Objects:"), "Should show object count");
+    assert!(stdout.contains("Pages:"), "Should show page count");
+}
+
+#[test]
+fn metadata_flag_short_form() {
+    let pdf = create_minimal_pdf();
+    let output = Command::new(binary_path())
+        .arg(pdf.path())
+        .arg("-m")
+        .output()
+        .expect("failed to execute binary");
+
+    assert!(output.status.success(), "-m should work as short form");
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(stdout.contains("PDF Version:"));
+}
+
+#[test]
+fn page_flag_shows_page_content() {
+    let pdf = create_minimal_pdf();
+    let output = Command::new(binary_path())
+        .arg(pdf.path())
+        .arg("--page")
+        .arg("1")
+        .output()
+        .expect("failed to execute binary");
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(output.status.success(), "--page should succeed: {}", String::from_utf8_lossy(&output.stderr));
+    assert!(stdout.contains("Page 1 (Object"), "Should show page header");
+    assert!(stdout.contains("/Page"), "Should show page type");
+    assert!(stdout.contains("MediaBox"), "Should show page properties");
+}
+
+#[test]
+fn page_flag_with_decode_streams() {
+    let pdf = create_minimal_pdf();
+    let output = Command::new(binary_path())
+        .arg(pdf.path())
+        .arg("--page")
+        .arg("1")
+        .arg("--decode-streams")
+        .output()
+        .expect("failed to execute binary");
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(output.status.success());
+    assert!(
+        stdout.contains("Parsed Content Stream") || stdout.contains("Stream content"),
+        "Should show decoded stream content when --decode-streams is used with --page"
+    );
+}
+
+#[test]
+fn page_flag_nonexistent_page_fails() {
+    let pdf = create_minimal_pdf();
+    let output = Command::new(binary_path())
+        .arg(pdf.path())
+        .arg("--page")
+        .arg("999")
+        .output()
+        .expect("failed to execute binary");
+
+    assert!(!output.status.success());
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(stderr.contains("not found"), "Should report page not found: {}", stderr);
+}
+
+#[test]
+fn two_mode_flags_fails() {
+    let pdf = create_minimal_pdf();
+    let output = Command::new(binary_path())
+        .arg(pdf.path())
+        .arg("--summary")
+        .arg("--metadata")
+        .output()
+        .expect("failed to execute binary");
+
+    assert!(!output.status.success());
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(stderr.contains("Only one mode"), "Should report mutual exclusivity: {}", stderr);
+}
+
+#[test]
+fn object_and_page_flags_fails() {
+    let pdf = create_minimal_pdf();
+    let output = Command::new(binary_path())
+        .arg(pdf.path())
+        .arg("--object")
+        .arg("1")
+        .arg("--page")
+        .arg("1")
+        .output()
+        .expect("failed to execute binary");
+
+    assert!(!output.status.success());
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(stderr.contains("Only one mode"), "Should report mutual exclusivity: {}", stderr);
+}
+
 #[test]
 fn dump_traverses_all_page_tree_objects() {
     // Verify the dump traverses through Catalog → Pages → Page → Font
@@ -494,4 +687,812 @@ fn dump_traverses_all_page_tree_objects() {
     assert!(stdout.contains("/Pages"), "Should traverse to Pages");
     assert!(stdout.contains("/Helvetica"), "Should traverse to Font and show BaseFont");
     assert!(stdout.contains("MediaBox"), "Should show page's MediaBox");
+}
+
+// ── JSON mode integration tests ──────────────────────────────────────
+
+#[test]
+fn json_default_dump_is_valid_json() {
+    let pdf = create_minimal_pdf();
+    let output = Command::new(binary_path())
+        .arg(pdf.path())
+        .arg("--json")
+        .output()
+        .expect("failed to execute binary");
+
+    assert!(output.status.success(), "should succeed: {}", String::from_utf8_lossy(&output.stderr));
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let parsed: serde_json::Value = serde_json::from_str(&stdout).expect("Should be valid JSON");
+    assert!(parsed.get("trailer").is_some(), "Should have trailer");
+    assert!(parsed.get("objects").is_some(), "Should have objects");
+}
+
+#[test]
+fn json_object_mode() {
+    let pdf = create_minimal_pdf();
+    let output = Command::new(binary_path())
+        .arg(pdf.path())
+        .arg("--object").arg("1")
+        .arg("--json")
+        .output()
+        .expect("failed to execute binary");
+
+    assert!(output.status.success());
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let parsed: serde_json::Value = serde_json::from_str(&stdout).expect("Should be valid JSON");
+    assert_eq!(parsed["object_number"], 1);
+}
+
+#[test]
+fn json_summary_mode() {
+    let pdf = create_minimal_pdf();
+    let output = Command::new(binary_path())
+        .arg(pdf.path())
+        .arg("--summary")
+        .arg("--json")
+        .output()
+        .expect("failed to execute binary");
+
+    assert!(output.status.success());
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let parsed: serde_json::Value = serde_json::from_str(&stdout).expect("Should be valid JSON");
+    assert!(parsed.get("version").is_some());
+    assert!(parsed.get("objects").is_some());
+}
+
+#[test]
+fn json_metadata_mode() {
+    let pdf = create_minimal_pdf();
+    let output = Command::new(binary_path())
+        .arg(pdf.path())
+        .arg("--metadata")
+        .arg("--json")
+        .output()
+        .expect("failed to execute binary");
+
+    assert!(output.status.success());
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let parsed: serde_json::Value = serde_json::from_str(&stdout).expect("Should be valid JSON");
+    assert!(parsed.get("version").is_some());
+    assert!(parsed.get("page_count").is_some());
+}
+
+#[test]
+fn json_page_mode() {
+    let pdf = create_minimal_pdf();
+    let output = Command::new(binary_path())
+        .arg(pdf.path())
+        .arg("--page").arg("1")
+        .arg("--json")
+        .output()
+        .expect("failed to execute binary");
+
+    assert!(output.status.success());
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let parsed: serde_json::Value = serde_json::from_str(&stdout).expect("Should be valid JSON");
+    assert_eq!(parsed["page_number"], 1);
+}
+
+// ── Search mode integration tests ────────────────────────────────────
+
+#[test]
+fn search_finds_fonts() {
+    let pdf = create_minimal_pdf();
+    let output = Command::new(binary_path())
+        .arg(pdf.path())
+        .arg("--search").arg("Type=Font")
+        .output()
+        .expect("failed to execute binary");
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(output.status.success(), "search should succeed: {}", String::from_utf8_lossy(&output.stderr));
+    assert!(stdout.contains("Found"), "Should show match count");
+    assert!(stdout.contains("matching objects"), "Should show match summary");
+}
+
+#[test]
+fn search_no_matches() {
+    let pdf = create_minimal_pdf();
+    let output = Command::new(binary_path())
+        .arg(pdf.path())
+        .arg("--search").arg("Type=Nonexistent")
+        .output()
+        .expect("failed to execute binary");
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(output.status.success());
+    assert!(stdout.contains("Found 0 matching objects."));
+}
+
+#[test]
+fn search_with_json() {
+    let pdf = create_minimal_pdf();
+    let output = Command::new(binary_path())
+        .arg(pdf.path())
+        .arg("--search").arg("Type=Font")
+        .arg("--json")
+        .output()
+        .expect("failed to execute binary");
+
+    assert!(output.status.success());
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let parsed: serde_json::Value = serde_json::from_str(&stdout).expect("Should be valid JSON");
+    assert!(parsed.get("query").is_some());
+    assert!(parsed.get("match_count").is_some());
+    assert!(parsed.get("matches").is_some());
+}
+
+#[test]
+fn search_with_summary() {
+    let pdf = create_minimal_pdf();
+    let output = Command::new(binary_path())
+        .arg(pdf.path())
+        .arg("--search").arg("Type=Font")
+        .arg("--summary")
+        .output()
+        .expect("failed to execute binary");
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(output.status.success());
+    assert!(stdout.contains("Obj#"), "Should show summary table header");
+}
+
+#[test]
+fn search_bad_expression_fails() {
+    let pdf = create_minimal_pdf();
+    let output = Command::new(binary_path())
+        .arg(pdf.path())
+        .arg("--search").arg("badexpr")
+        .output()
+        .expect("failed to execute binary");
+
+    assert!(!output.status.success());
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(stderr.contains("Invalid") || stderr.contains("error"), "Should report bad expression: {}", stderr);
+}
+
+#[test]
+fn search_has_key() {
+    let pdf = create_minimal_pdf();
+    let output = Command::new(binary_path())
+        .arg(pdf.path())
+        .arg("--search").arg("key=MediaBox")
+        .output()
+        .expect("failed to execute binary");
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(output.status.success());
+    assert!(stdout.contains("Found"), "Should find objects with MediaBox");
+}
+
+// ── Text mode integration tests ──────────────────────────────────────
+
+#[test]
+fn text_extracts_hello() {
+    let pdf = create_minimal_pdf();
+    let output = Command::new(binary_path())
+        .arg(pdf.path())
+        .arg("--text")
+        .output()
+        .expect("failed to execute binary");
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(output.status.success(), "should succeed: {}", String::from_utf8_lossy(&output.stderr));
+    assert!(stdout.contains("--- Page 1 ---"), "Should show page header");
+    assert!(stdout.contains("Hello"), "Should extract Hello text");
+}
+
+#[test]
+fn text_with_page_filter() {
+    let pdf = create_minimal_pdf();
+    let output = Command::new(binary_path())
+        .arg(pdf.path())
+        .arg("--text")
+        .arg("--page").arg("1")
+        .output()
+        .expect("failed to execute binary");
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(output.status.success());
+    assert!(stdout.contains("--- Page 1 ---"));
+    assert!(stdout.contains("Hello"));
+}
+
+#[test]
+fn text_nonexistent_page_fails() {
+    let pdf = create_minimal_pdf();
+    let output = Command::new(binary_path())
+        .arg(pdf.path())
+        .arg("--text")
+        .arg("--page").arg("999")
+        .output()
+        .expect("failed to execute binary");
+
+    assert!(!output.status.success());
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(stderr.contains("not found"), "Should report page not found: {}", stderr);
+}
+
+#[test]
+fn text_with_json() {
+    let pdf = create_minimal_pdf();
+    let output = Command::new(binary_path())
+        .arg(pdf.path())
+        .arg("--text")
+        .arg("--json")
+        .output()
+        .expect("failed to execute binary");
+
+    assert!(output.status.success());
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let parsed: serde_json::Value = serde_json::from_str(&stdout).expect("Should be valid JSON");
+    assert!(parsed["pages"].is_array());
+    let page = &parsed["pages"][0];
+    assert_eq!(page["page_number"], 1);
+    assert!(page["text"].as_str().unwrap().contains("Hello"));
+}
+
+#[test]
+fn text_mutually_exclusive_with_summary() {
+    let pdf = create_minimal_pdf();
+    let output = Command::new(binary_path())
+        .arg(pdf.path())
+        .arg("--text")
+        .arg("--summary")
+        .output()
+        .expect("failed to execute binary");
+
+    assert!(!output.status.success());
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(stderr.contains("Only one mode"), "Should report mutual exclusivity: {}", stderr);
+}
+
+// ── Diff mode integration tests ──────────────────────────────────────
+
+#[test]
+fn diff_identical_files() {
+    let pdf = create_minimal_pdf();
+    let output = Command::new(binary_path())
+        .arg(pdf.path())
+        .arg("--diff").arg(pdf.path())
+        .output()
+        .expect("failed to execute binary");
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(output.status.success(), "should succeed: {}", String::from_utf8_lossy(&output.stderr));
+    assert!(stdout.contains("Comparing:"), "Should show comparison header");
+    assert!(stdout.contains("(identical)"), "Identical files should report identical pages");
+}
+
+#[test]
+fn diff_with_json() {
+    let pdf = create_minimal_pdf();
+    let output = Command::new(binary_path())
+        .arg(pdf.path())
+        .arg("--diff").arg(pdf.path())
+        .arg("--json")
+        .output()
+        .expect("failed to execute binary");
+
+    assert!(output.status.success());
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let parsed: serde_json::Value = serde_json::from_str(&stdout).expect("Should be valid JSON");
+    assert!(parsed.get("page_diffs").is_some());
+    assert!(parsed.get("metadata_diffs").is_some());
+}
+
+#[test]
+fn diff_with_page_filter() {
+    let pdf = create_minimal_pdf();
+    let output = Command::new(binary_path())
+        .arg(pdf.path())
+        .arg("--diff").arg(pdf.path())
+        .arg("--page").arg("1")
+        .output()
+        .expect("failed to execute binary");
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(output.status.success());
+    assert!(stdout.contains("Page 1"), "Should show page 1 comparison");
+}
+
+#[test]
+fn diff_nonexistent_second_file_fails() {
+    let pdf = create_minimal_pdf();
+    let output = Command::new(binary_path())
+        .arg(pdf.path())
+        .arg("--diff").arg("/tmp/nonexistent_file.pdf")
+        .output()
+        .expect("failed to execute binary");
+
+    assert!(!output.status.success());
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(stderr.contains("Error"), "Should report error: {}", stderr);
+}
+
+#[test]
+fn diff_incompatible_with_summary_mode() {
+    let pdf = create_minimal_pdf();
+    let output = Command::new(binary_path())
+        .arg(pdf.path())
+        .arg("--diff").arg(pdf.path())
+        .arg("--summary")
+        .output()
+        .expect("failed to execute binary");
+
+    assert!(!output.status.success());
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(stderr.contains("--diff can only be combined"), "Should report incompatible modes: {}", stderr);
+}
+
+#[test]
+fn diff_incompatible_with_object_mode() {
+    let pdf = create_minimal_pdf();
+    let output = Command::new(binary_path())
+        .arg(pdf.path())
+        .arg("--diff").arg(pdf.path())
+        .arg("--object").arg("1")
+        .output()
+        .expect("failed to execute binary");
+
+    assert!(!output.status.success());
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(stderr.contains("--diff can only be combined"), "Should report incompatible modes: {}", stderr);
+}
+
+#[test]
+fn diff_incompatible_with_text_mode() {
+    let pdf = create_minimal_pdf();
+    let output = Command::new(binary_path())
+        .arg(pdf.path())
+        .arg("--diff").arg(pdf.path())
+        .arg("--text")
+        .output()
+        .expect("failed to execute binary");
+
+    assert!(!output.status.success());
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(stderr.contains("--diff can only be combined"), "Should report incompatible modes: {}", stderr);
+}
+
+// ── Cross-mode tests ─────────────────────────────────────────────────
+
+#[test]
+fn search_with_decode_streams() {
+    let pdf = create_minimal_pdf();
+    let output = Command::new(binary_path())
+        .arg(pdf.path())
+        .arg("--search").arg("Type=Font")
+        .arg("--decode-streams")
+        .output()
+        .expect("failed to execute binary");
+
+    assert!(output.status.success(), "--search with --decode-streams should succeed");
+}
+
+// ── Additional integration tests ─────────────────────────────────
+
+/// Create a second PDF with different content for diff testing.
+fn create_different_pdf() -> tempfile::NamedTempFile {
+    let mut doc = Document::new();
+
+    // Different content: "BT /F1 14 Tf (World) Tj ET"
+    let content_bytes = b"BT\n/F1 14 Tf\n(World) Tj\nET";
+    let content_stream = Stream::new(Dictionary::new(), content_bytes.to_vec());
+    let content_id = doc.add_object(Object::Stream(content_stream));
+
+    // Different font
+    let mut font_dict = Dictionary::new();
+    font_dict.set("Type", Object::Name(b"Font".to_vec()));
+    font_dict.set("Subtype", Object::Name(b"Type1".to_vec()));
+    font_dict.set("BaseFont", Object::Name(b"Courier".to_vec()));
+    let font_id = doc.add_object(Object::Dictionary(font_dict));
+
+    let mut f1_dict = Dictionary::new();
+    f1_dict.set("F1", Object::Reference(font_id));
+    let mut resources = Dictionary::new();
+    resources.set("Font", Object::Dictionary(f1_dict));
+
+    let mut page_dict = Dictionary::new();
+    page_dict.set("Type", Object::Name(b"Page".to_vec()));
+    page_dict.set("Contents", Object::Reference(content_id));
+    page_dict.set("Resources", Object::Dictionary(resources));
+    page_dict.set(
+        "MediaBox",
+        Object::Array(vec![
+            Object::Integer(0),
+            Object::Integer(0),
+            Object::Integer(595),  // A4 width instead of letter
+            Object::Integer(842),  // A4 height
+        ]),
+    );
+    let page_id = doc.add_object(Object::Dictionary(page_dict));
+
+    let mut pages_dict = Dictionary::new();
+    pages_dict.set("Type", Object::Name(b"Pages".to_vec()));
+    pages_dict.set("Kids", Object::Array(vec![Object::Reference(page_id)]));
+    pages_dict.set("Count", Object::Integer(1));
+    let pages_id = doc.add_object(Object::Dictionary(pages_dict));
+
+    if let Ok(Object::Dictionary(d)) = doc.get_object_mut(page_id) {
+        d.set("Parent", Object::Reference(pages_id));
+    }
+
+    let mut catalog = Dictionary::new();
+    catalog.set("Type", Object::Name(b"Catalog".to_vec()));
+    catalog.set("Pages", Object::Reference(pages_id));
+    let catalog_id = doc.add_object(Object::Dictionary(catalog));
+
+    doc.trailer.set("Root", Object::Reference(catalog_id));
+
+    let mut tmp = tempfile::NamedTempFile::new().unwrap();
+    doc.save_to(&mut tmp).unwrap();
+    tmp.flush().unwrap();
+    tmp
+}
+
+/// Create a two-page PDF for multi-page tests.
+fn create_two_page_pdf() -> tempfile::NamedTempFile {
+    let mut doc = Document::new();
+
+    let c1 = Stream::new(Dictionary::new(), b"BT\n/F1 12 Tf\n(Page1Text) Tj\nET".to_vec());
+    let c1_id = doc.add_object(Object::Stream(c1));
+    let c2 = Stream::new(Dictionary::new(), b"BT\n/F1 12 Tf\n(Page2Text) Tj\nET".to_vec());
+    let c2_id = doc.add_object(Object::Stream(c2));
+
+    let mut font_dict = Dictionary::new();
+    font_dict.set("Type", Object::Name(b"Font".to_vec()));
+    font_dict.set("Subtype", Object::Name(b"Type1".to_vec()));
+    font_dict.set("BaseFont", Object::Name(b"Helvetica".to_vec()));
+    let font_id = doc.add_object(Object::Dictionary(font_dict));
+
+    let mut f1_dict = Dictionary::new();
+    f1_dict.set("F1", Object::Reference(font_id));
+    let mut resources = Dictionary::new();
+    resources.set("Font", Object::Dictionary(f1_dict));
+
+    let mut pages_dict = Dictionary::new();
+    pages_dict.set("Type", Object::Name(b"Pages".to_vec()));
+    pages_dict.set("Count", Object::Integer(2));
+    pages_dict.set("Kids", Object::Array(vec![])); // placeholder
+    let pages_id = doc.add_object(Object::Dictionary(pages_dict));
+
+    let mut page1 = Dictionary::new();
+    page1.set("Type", Object::Name(b"Page".to_vec()));
+    page1.set("Parent", Object::Reference(pages_id));
+    page1.set("Contents", Object::Reference(c1_id));
+    page1.set("Resources", Object::Dictionary(resources.clone()));
+    page1.set("MediaBox", Object::Array(vec![
+        Object::Integer(0), Object::Integer(0),
+        Object::Integer(612), Object::Integer(792),
+    ]));
+    let p1_id = doc.add_object(Object::Dictionary(page1));
+
+    let mut page2 = Dictionary::new();
+    page2.set("Type", Object::Name(b"Page".to_vec()));
+    page2.set("Parent", Object::Reference(pages_id));
+    page2.set("Contents", Object::Reference(c2_id));
+    page2.set("Resources", Object::Dictionary(resources));
+    page2.set("MediaBox", Object::Array(vec![
+        Object::Integer(0), Object::Integer(0),
+        Object::Integer(612), Object::Integer(792),
+    ]));
+    let p2_id = doc.add_object(Object::Dictionary(page2));
+
+    if let Ok(Object::Dictionary(d)) = doc.get_object_mut(pages_id) {
+        d.set("Kids", Object::Array(vec![
+            Object::Reference(p1_id),
+            Object::Reference(p2_id),
+        ]));
+    }
+
+    let mut catalog = Dictionary::new();
+    catalog.set("Type", Object::Name(b"Catalog".to_vec()));
+    catalog.set("Pages", Object::Reference(pages_id));
+    let catalog_id = doc.add_object(Object::Dictionary(catalog));
+    doc.trailer.set("Root", Object::Reference(catalog_id));
+
+    let mut tmp = tempfile::NamedTempFile::new().unwrap();
+    doc.save_to(&mut tmp).unwrap();
+    tmp.flush().unwrap();
+    tmp
+}
+
+#[test]
+fn diff_different_pdfs_shows_differences() {
+    let pdf1 = create_minimal_pdf();
+    let pdf2 = create_different_pdf();
+    let output = Command::new(binary_path())
+        .arg(pdf1.path())
+        .arg("--diff").arg(pdf2.path())
+        .output()
+        .expect("failed to execute binary");
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(output.status.success(), "should succeed: {}", String::from_utf8_lossy(&output.stderr));
+    assert!(stdout.contains("Comparing:"));
+    // Should show page differences (different MediaBox or content)
+    assert!(
+        !stdout.contains("(identical)") || stdout.contains("Content stream: differs") || stdout.contains("MediaBox"),
+        "Diff of different PDFs should show differences: {}",
+        stdout
+    );
+}
+
+#[test]
+fn diff_different_pdfs_json_shows_differences() {
+    let pdf1 = create_minimal_pdf();
+    let pdf2 = create_different_pdf();
+    let output = Command::new(binary_path())
+        .arg(pdf1.path())
+        .arg("--diff").arg(pdf2.path())
+        .arg("--json")
+        .output()
+        .expect("failed to execute binary");
+
+    assert!(output.status.success());
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let parsed: serde_json::Value = serde_json::from_str(&stdout).expect("Should be valid JSON");
+    assert!(parsed.get("page_diffs").is_some());
+    assert!(parsed.get("font_diffs").is_some());
+}
+
+#[test]
+fn search_multiple_and_conditions() {
+    let pdf = create_minimal_pdf();
+    let output = Command::new(binary_path())
+        .arg(pdf.path())
+        .arg("--search").arg("Type=Font,Subtype=Type1")
+        .output()
+        .expect("failed to execute binary");
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(output.status.success(), "search should succeed: {}", String::from_utf8_lossy(&output.stderr));
+    assert!(stdout.contains("Found"), "Should show match count");
+    // Our minimal PDF has a Helvetica Type1 font, so it should match
+    assert!(stdout.contains("matching objects"));
+}
+
+#[test]
+fn search_value_expression() {
+    let pdf = create_minimal_pdf();
+    let output = Command::new(binary_path())
+        .arg(pdf.path())
+        .arg("--search").arg("value=Helvetica")
+        .output()
+        .expect("failed to execute binary");
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(output.status.success(), "search should succeed: {}", String::from_utf8_lossy(&output.stderr));
+    assert!(stdout.contains("Found"), "Should show match count");
+}
+
+#[test]
+fn page_zero_fails() {
+    let pdf = create_minimal_pdf();
+    let output = Command::new(binary_path())
+        .arg(pdf.path())
+        .arg("--page").arg("0")
+        .output()
+        .expect("failed to execute binary");
+
+    assert!(!output.status.success(), "Page 0 should fail (pages are 1-based)");
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("not found") || stderr.contains("Error"),
+        "Should report page not found: {}",
+        stderr
+    );
+}
+
+#[test]
+fn text_extracts_from_multiple_pages() {
+    let pdf = create_two_page_pdf();
+    let output = Command::new(binary_path())
+        .arg(pdf.path())
+        .arg("--text")
+        .output()
+        .expect("failed to execute binary");
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(output.status.success());
+    assert!(stdout.contains("--- Page 1 ---"));
+    assert!(stdout.contains("--- Page 2 ---"));
+    assert!(stdout.contains("Page1Text"));
+    assert!(stdout.contains("Page2Text"));
+}
+
+#[test]
+fn text_page_2_only() {
+    let pdf = create_two_page_pdf();
+    let output = Command::new(binary_path())
+        .arg(pdf.path())
+        .arg("--text")
+        .arg("--page").arg("2")
+        .output()
+        .expect("failed to execute binary");
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(output.status.success());
+    assert!(stdout.contains("--- Page 2 ---"));
+    assert!(stdout.contains("Page2Text"));
+    assert!(!stdout.contains("Page1Text"), "Should not show page 1 text");
+}
+
+#[test]
+fn page_2_dump_shows_page_2() {
+    let pdf = create_two_page_pdf();
+    let output = Command::new(binary_path())
+        .arg(pdf.path())
+        .arg("--page").arg("2")
+        .output()
+        .expect("failed to execute binary");
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(output.status.success());
+    assert!(stdout.contains("Page 2 (Object"));
+}
+
+#[test]
+fn diff_different_page_counts() {
+    let pdf1 = create_two_page_pdf();
+    let pdf2 = create_minimal_pdf(); // single page
+    let output = Command::new(binary_path())
+        .arg(pdf1.path())
+        .arg("--diff").arg(pdf2.path())
+        .output()
+        .expect("failed to execute binary");
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(output.status.success());
+    assert!(stdout.contains("Comparing:"));
+    // Should report that page 2 only exists in first file
+    assert!(
+        stdout.contains("Page 2") || stdout.contains("only in first"),
+        "Should mention page count difference: {}",
+        stdout
+    );
+}
+
+#[test]
+fn search_multiple_conditions_json() {
+    let pdf = create_minimal_pdf();
+    let output = Command::new(binary_path())
+        .arg(pdf.path())
+        .arg("--search").arg("Type=Font,key=BaseFont")
+        .arg("--json")
+        .output()
+        .expect("failed to execute binary");
+
+    assert!(output.status.success());
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let parsed: serde_json::Value = serde_json::from_str(&stdout).expect("Should be valid JSON");
+    assert!(parsed["match_count"].as_u64().unwrap() >= 1, "Should find font with both conditions");
+}
+
+#[test]
+fn object_mode_with_decode_streams() {
+    let pdf = create_minimal_pdf();
+    let output = Command::new(binary_path())
+        .arg(pdf.path())
+        .arg("--object").arg("1")
+        .arg("--decode-streams")
+        .output()
+        .expect("failed to execute binary");
+
+    assert!(output.status.success(), "--object with --decode-streams should work");
+}
+
+#[test]
+fn search_with_summary_json() {
+    let pdf = create_minimal_pdf();
+    let output = Command::new(binary_path())
+        .arg(pdf.path())
+        .arg("--search").arg("Type=Font")
+        .arg("--summary")
+        .arg("--json")
+        .output()
+        .expect("failed to execute binary");
+
+    assert!(output.status.success());
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    // --summary with --search and --json: should still produce valid JSON
+    let _parsed: serde_json::Value = serde_json::from_str(&stdout).expect("Should be valid JSON");
+}
+
+#[test]
+fn diff_incompatible_with_metadata() {
+    let pdf = create_minimal_pdf();
+    let output = Command::new(binary_path())
+        .arg(pdf.path())
+        .arg("--diff").arg(pdf.path())
+        .arg("--metadata")
+        .output()
+        .expect("failed to execute binary");
+
+    assert!(!output.status.success());
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(stderr.contains("--diff can only be combined"));
+}
+
+#[test]
+fn diff_incompatible_with_search() {
+    let pdf = create_minimal_pdf();
+    let output = Command::new(binary_path())
+        .arg(pdf.path())
+        .arg("--diff").arg(pdf.path())
+        .arg("--search").arg("Type=Font")
+        .output()
+        .expect("failed to execute binary");
+
+    assert!(!output.status.success());
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(stderr.contains("--diff can only be combined"));
+}
+
+#[test]
+fn diff_incompatible_with_extract() {
+    let pdf = create_minimal_pdf();
+    let output_file = tempfile::NamedTempFile::new().unwrap();
+    let output = Command::new(binary_path())
+        .arg(pdf.path())
+        .arg("--diff").arg(pdf.path())
+        .arg("--extract-object").arg("1")
+        .arg("--output").arg(output_file.path())
+        .output()
+        .expect("failed to execute binary");
+
+    assert!(!output.status.success());
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(stderr.contains("--diff can only be combined"));
+}
+
+#[test]
+fn json_text_with_page_filter() {
+    let pdf = create_two_page_pdf();
+    let output = Command::new(binary_path())
+        .arg(pdf.path())
+        .arg("--text")
+        .arg("--page").arg("1")
+        .arg("--json")
+        .output()
+        .expect("failed to execute binary");
+
+    assert!(output.status.success());
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let parsed: serde_json::Value = serde_json::from_str(&stdout).expect("Should be valid JSON");
+    let pages = parsed["pages"].as_array().unwrap();
+    assert_eq!(pages.len(), 1, "Should have exactly one page");
+    assert_eq!(pages[0]["page_number"], 1);
+    assert!(pages[0]["text"].as_str().unwrap().contains("Page1Text"));
+}
+
+#[test]
+fn summary_with_two_page_pdf() {
+    let pdf = create_two_page_pdf();
+    let output = Command::new(binary_path())
+        .arg(pdf.path())
+        .arg("--summary")
+        .output()
+        .expect("failed to execute binary");
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(output.status.success());
+    assert!(stdout.contains("Obj#"), "Should show table header");
+    // Should list all objects
+    assert!(stdout.contains("Stream") || stdout.contains("Dictionary"));
+}
+
+#[test]
+fn metadata_with_two_page_pdf() {
+    let pdf = create_two_page_pdf();
+    let output = Command::new(binary_path())
+        .arg(pdf.path())
+        .arg("--metadata")
+        .output()
+        .expect("failed to execute binary");
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(output.status.success());
+    assert!(stdout.contains("Pages:       2") || stdout.contains("Pages:"), "Should show 2 pages");
 }
