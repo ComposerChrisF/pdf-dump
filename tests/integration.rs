@@ -1496,3 +1496,331 @@ fn metadata_with_two_page_pdf() {
     assert!(output.status.success());
     assert!(stdout.contains("Pages:       2") || stdout.contains("Pages:"), "Should show 2 pages");
 }
+
+// ── P1: --hex integration tests ─────────────────────────────────────
+
+fn create_pdf_with_binary_stream() -> (tempfile::NamedTempFile, u32) {
+    let mut doc = Document::new();
+
+    // Binary stream (not text)
+    let binary_content: Vec<u8> = (0..64).collect();
+    let stream = Stream::new(Dictionary::new(), binary_content);
+    let stream_id = doc.add_object(Object::Stream(stream));
+
+    let mut catalog = Dictionary::new();
+    catalog.set("Type", Object::Name(b"Catalog".to_vec()));
+    let catalog_id = doc.add_object(Object::Dictionary(catalog));
+    doc.trailer.set("Root", Object::Reference(catalog_id));
+
+    let mut tmp = tempfile::NamedTempFile::new().unwrap();
+    doc.save_to(&mut tmp).unwrap();
+    tmp.flush().unwrap();
+    (tmp, stream_id.0)
+}
+
+#[test]
+fn hex_flag_with_decode_streams() {
+    let (pdf, obj_num) = create_pdf_with_binary_stream();
+    let output = Command::new(binary_path())
+        .arg(pdf.path())
+        .arg("--object").arg(obj_num.to_string())
+        .arg("--decode-streams")
+        .arg("--hex")
+        .output()
+        .expect("failed to execute binary");
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(output.status.success());
+    // Hex dump should show offset
+    assert!(stdout.contains("00000000"), "Should show hex dump offsets");
+}
+
+#[test]
+fn hex_flag_json_mode() {
+    let (pdf, obj_num) = create_pdf_with_flatedecode_stream();
+    let output = Command::new(binary_path())
+        .arg(pdf.path())
+        .arg("--object").arg(obj_num.to_string())
+        .arg("--decode-streams")
+        .arg("--hex")
+        .arg("--json")
+        .output()
+        .expect("failed to execute binary");
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(output.status.success());
+    let parsed: serde_json::Value = serde_json::from_str(&stdout).unwrap();
+    // Text stream won't have content_hex; depends on content, but JSON should parse
+    assert!(parsed["object"].is_object());
+}
+
+// ── P1: --refs-to integration tests ────────────────────────────────
+
+#[test]
+fn refs_to_finds_references() {
+    let pdf = create_minimal_pdf();
+    // Object 1 should be referenced by the trailer
+    let output = Command::new(binary_path())
+        .arg(pdf.path())
+        .arg("--refs-to").arg("1")
+        .output()
+        .expect("failed to execute binary");
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(output.status.success());
+    assert!(stdout.contains("referencing 1 0 R"));
+}
+
+#[test]
+fn refs_to_json() {
+    let pdf = create_minimal_pdf();
+    let output = Command::new(binary_path())
+        .arg(pdf.path())
+        .arg("--refs-to").arg("1")
+        .arg("--json")
+        .output()
+        .expect("failed to execute binary");
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(output.status.success());
+    let parsed: serde_json::Value = serde_json::from_str(&stdout).unwrap();
+    assert_eq!(parsed["target_object"], 1);
+    assert!(parsed["references"].is_array());
+}
+
+#[test]
+fn refs_to_mutually_exclusive() {
+    let pdf = create_minimal_pdf();
+    let output = Command::new(binary_path())
+        .arg(pdf.path())
+        .arg("--refs-to").arg("1")
+        .arg("--summary")
+        .output()
+        .expect("failed to execute binary");
+
+    assert!(!output.status.success());
+}
+
+// ── P1: --fonts integration tests ──────────────────────────────────
+
+#[test]
+fn fonts_lists_fonts() {
+    let pdf = create_minimal_pdf();
+    let output = Command::new(binary_path())
+        .arg(pdf.path())
+        .arg("--fonts")
+        .output()
+        .expect("failed to execute binary");
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(output.status.success());
+    assert!(stdout.contains("fonts found"));
+    assert!(stdout.contains("Helvetica"));
+}
+
+#[test]
+fn fonts_json() {
+    let pdf = create_minimal_pdf();
+    let output = Command::new(binary_path())
+        .arg(pdf.path())
+        .arg("--fonts")
+        .arg("--json")
+        .output()
+        .expect("failed to execute binary");
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(output.status.success());
+    let parsed: serde_json::Value = serde_json::from_str(&stdout).unwrap();
+    assert!(parsed["font_count"].is_number());
+    assert!(parsed["fonts"].is_array());
+}
+
+#[test]
+fn fonts_mutually_exclusive() {
+    let pdf = create_minimal_pdf();
+    let output = Command::new(binary_path())
+        .arg(pdf.path())
+        .arg("--fonts")
+        .arg("--metadata")
+        .output()
+        .expect("failed to execute binary");
+
+    assert!(!output.status.success());
+}
+
+// ── P1: --images integration tests ─────────────────────────────────
+
+fn create_pdf_with_image() -> tempfile::NamedTempFile {
+    let mut doc = Document::new();
+
+    // Image stream
+    let mut img_dict = Dictionary::new();
+    img_dict.set("Type", Object::Name(b"XObject".to_vec()));
+    img_dict.set("Subtype", Object::Name(b"Image".to_vec()));
+    img_dict.set("Width", Object::Integer(100));
+    img_dict.set("Height", Object::Integer(100));
+    img_dict.set("ColorSpace", Object::Name(b"DeviceRGB".to_vec()));
+    img_dict.set("BitsPerComponent", Object::Integer(8));
+    let image_stream = Stream::new(img_dict, vec![0u8; 300]);
+    let _image_id = doc.add_object(Object::Stream(image_stream));
+
+    // Minimal catalog
+    let mut catalog = Dictionary::new();
+    catalog.set("Type", Object::Name(b"Catalog".to_vec()));
+    let catalog_id = doc.add_object(Object::Dictionary(catalog));
+    doc.trailer.set("Root", Object::Reference(catalog_id));
+
+    let mut tmp = tempfile::NamedTempFile::new().unwrap();
+    doc.save_to(&mut tmp).unwrap();
+    tmp.flush().unwrap();
+    tmp
+}
+
+#[test]
+fn images_lists_images() {
+    let pdf = create_pdf_with_image();
+    let output = Command::new(binary_path())
+        .arg(pdf.path())
+        .arg("--images")
+        .output()
+        .expect("failed to execute binary");
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(output.status.success());
+    assert!(stdout.contains("1 images found"));
+    assert!(stdout.contains("100"));
+    assert!(stdout.contains("DeviceRGB"));
+}
+
+#[test]
+fn images_json() {
+    let pdf = create_pdf_with_image();
+    let output = Command::new(binary_path())
+        .arg(pdf.path())
+        .arg("--images")
+        .arg("--json")
+        .output()
+        .expect("failed to execute binary");
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(output.status.success());
+    let parsed: serde_json::Value = serde_json::from_str(&stdout).unwrap();
+    assert_eq!(parsed["image_count"], 1);
+    assert_eq!(parsed["images"][0]["width"], 100);
+}
+
+#[test]
+fn images_no_images() {
+    let (pdf, _) = create_pdf_with_flatedecode_stream();
+    let output = Command::new(binary_path())
+        .arg(pdf.path())
+        .arg("--images")
+        .output()
+        .expect("failed to execute binary");
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(output.status.success());
+    assert!(stdout.contains("0 images found"));
+}
+
+// ── P1: --validate integration tests ───────────────────────────────
+
+#[test]
+fn validate_minimal_pdf() {
+    let pdf = create_minimal_pdf();
+    let output = Command::new(binary_path())
+        .arg(pdf.path())
+        .arg("--validate")
+        .output()
+        .expect("failed to execute binary");
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(output.status.success());
+    // A well-formed minimal PDF should pass validation or have only warnings
+    assert!(stdout.contains("[OK]") || stdout.contains("Summary:"));
+}
+
+#[test]
+fn validate_json() {
+    let pdf = create_minimal_pdf();
+    let output = Command::new(binary_path())
+        .arg(pdf.path())
+        .arg("--validate")
+        .arg("--json")
+        .output()
+        .expect("failed to execute binary");
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(output.status.success());
+    let parsed: serde_json::Value = serde_json::from_str(&stdout).unwrap();
+    assert!(parsed["error_count"].is_number());
+    assert!(parsed["warning_count"].is_number());
+    assert!(parsed["issues"].is_array());
+}
+
+#[test]
+fn validate_mutually_exclusive() {
+    let pdf = create_minimal_pdf();
+    let output = Command::new(binary_path())
+        .arg(pdf.path())
+        .arg("--validate")
+        .arg("--fonts")
+        .output()
+        .expect("failed to execute binary");
+
+    assert!(!output.status.success());
+}
+
+// ── P1: --diff incompatible with new modes ─────────────────────────
+
+#[test]
+fn diff_incompatible_with_refs_to() {
+    let pdf = create_minimal_pdf();
+    let output = Command::new(binary_path())
+        .arg(pdf.path())
+        .arg("--diff").arg(pdf.path())
+        .arg("--refs-to").arg("1")
+        .output()
+        .expect("failed to execute binary");
+
+    assert!(!output.status.success());
+}
+
+#[test]
+fn diff_incompatible_with_fonts() {
+    let pdf = create_minimal_pdf();
+    let output = Command::new(binary_path())
+        .arg(pdf.path())
+        .arg("--diff").arg(pdf.path())
+        .arg("--fonts")
+        .output()
+        .expect("failed to execute binary");
+
+    assert!(!output.status.success());
+}
+
+#[test]
+fn diff_incompatible_with_images() {
+    let pdf = create_minimal_pdf();
+    let output = Command::new(binary_path())
+        .arg(pdf.path())
+        .arg("--diff").arg(pdf.path())
+        .arg("--images")
+        .output()
+        .expect("failed to execute binary");
+
+    assert!(!output.status.success());
+}
+
+#[test]
+fn diff_incompatible_with_validate() {
+    let pdf = create_minimal_pdf();
+    let output = Command::new(binary_path())
+        .arg(pdf.path())
+        .arg("--diff").arg(pdf.path())
+        .arg("--validate")
+        .output()
+        .expect("failed to execute binary");
+
+    assert!(!output.status.success());
+}

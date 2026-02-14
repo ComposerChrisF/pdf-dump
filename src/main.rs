@@ -63,12 +63,33 @@ struct Args {
     /// Compare structurally with a second PDF file
     #[arg(long)]
     diff: Option<PathBuf>,
+
+    /// Display binary stream content as hex dump (use with --decode-streams)
+    #[arg(long)]
+    hex: bool,
+
+    /// Find all objects that reference a given object number
+    #[arg(long)]
+    refs_to: Option<u32>,
+
+    /// List all fonts in the document
+    #[arg(long)]
+    fonts: bool,
+
+    /// List all images in the document
+    #[arg(long)]
+    images: bool,
+
+    /// Run structural validation checks on the PDF
+    #[arg(long)]
+    validate: bool,
 }
 
 struct DumpConfig {
     decode_streams: bool,
     truncate_binary_streams: bool,
     json: bool,
+    hex: bool,
 }
 
 fn main() {
@@ -85,6 +106,10 @@ fn main() {
         args.page.is_some() && !args.text,
         args.search.is_some(),
         args.text,
+        args.refs_to.is_some(),
+        args.fonts,
+        args.images,
+        args.validate,
     ].iter().filter(|&&b| b).count();
     if mode_count > 1 {
         eprintln!("Error: Only one mode flag may be used at a time.");
@@ -98,7 +123,11 @@ fn main() {
             || args.metadata
             || args.extract_object.is_some()
             || args.search.is_some()
-            || args.text;
+            || args.text
+            || args.refs_to.is_some()
+            || args.fonts
+            || args.images
+            || args.validate;
         if incompatible {
             eprintln!("Error: --diff can only be combined with --page and --json.");
             std::process::exit(1);
@@ -118,6 +147,7 @@ fn main() {
         decode_streams: args.decode_streams,
         truncate_binary_streams: args.truncate_binary_streams,
         json: args.json,
+        hex: args.hex,
     };
 
     // --diff mode: load second doc and compare
@@ -182,6 +212,34 @@ fn main() {
             print_text_json(&mut out, &doc, args.page);
         } else {
             print_text(&mut out, &doc, args.page);
+        }
+    } else if let Some(target) = args.refs_to {
+        let mut out = io::stdout().lock();
+        if config.json {
+            print_refs_to_json(&mut out, &doc, target);
+        } else {
+            print_refs_to(&mut out, &doc, target);
+        }
+    } else if args.fonts {
+        let mut out = io::stdout().lock();
+        if config.json {
+            print_fonts_json(&mut out, &doc);
+        } else {
+            print_fonts(&mut out, &doc);
+        }
+    } else if args.images {
+        let mut out = io::stdout().lock();
+        if config.json {
+            print_images_json(&mut out, &doc);
+        } else {
+            print_images(&mut out, &doc);
+        }
+    } else if args.validate {
+        let mut out = io::stdout().lock();
+        if config.json {
+            print_validation_json(&mut out, &doc);
+        } else {
+            print_validation(&mut out, &doc);
         }
     } else if let Some(obj_num) = args.object {
         let mut out = io::stdout().lock();
@@ -298,6 +356,39 @@ fn decode_stream(stream: &lopdf::Stream) -> Cow<'_, [u8]> {
     Cow::Borrowed(&stream.content)
 }
 
+fn format_hex_dump(data: &[u8]) -> String {
+    let mut result = String::new();
+    for (offset, chunk) in data.chunks(16).enumerate() {
+        // Offset column
+        result.push_str(&format!("{:08x}  ", offset * 16));
+        // Hex bytes: first 8
+        for (i, &b) in chunk.iter().enumerate() {
+            result.push_str(&format!("{:02x} ", b));
+            if i == 7 { result.push(' '); }
+        }
+        // Pad if less than 16 bytes
+        if chunk.len() < 16 {
+            for i in chunk.len()..16 {
+                result.push_str("   ");
+                if i == 7 { result.push(' '); }
+            }
+        }
+        // ASCII column
+        result.push(' ');
+        result.push('|');
+        for &b in chunk {
+            if b.is_ascii_graphic() || b == b' ' {
+                result.push(b as char);
+            } else {
+                result.push('.');
+            }
+        }
+        result.push('|');
+        result.push('\n');
+    }
+    result
+}
+
 fn print_stream_content(writer: &mut impl Write, stream: &lopdf::Stream, indent_str: &str, config: &DumpConfig, is_contents: bool) {
     let decoded_content = decode_stream(stream);
     let description = if let Cow::Owned(_) = &decoded_content {
@@ -332,26 +423,38 @@ fn print_content_data(writer: &mut impl Write, content: &[u8], description: &str
     }
 
     let full_len = content.len();
-    let content_to_display = if config.truncate_binary_streams && is_binary_stream(content) {
+    let is_binary = is_binary_stream(content);
+    let content_to_display = if config.truncate_binary_streams && is_binary {
         &content[..full_len.min(100)]
     } else {
         content
     };
 
-    let len_str = if config.truncate_binary_streams && full_len > 100 && is_binary_stream(content) {
+    let len_str = if config.truncate_binary_streams && full_len > 100 && is_binary {
         format!("{} (truncated to 100)", full_len)
     } else {
         full_len.to_string()
     };
 
-    writeln!(
-        writer,
-        "\n{}Stream content ({}, {} bytes):\n---\n{}\n---",
-        indent_str,
-        description,
-        len_str,
-        String::from_utf8_lossy(content_to_display)
-    ).unwrap();
+    if config.hex && is_binary {
+        writeln!(
+            writer,
+            "\n{}Stream content ({}, {} bytes):\n{}",
+            indent_str,
+            description,
+            len_str,
+            format_hex_dump(content_to_display)
+        ).unwrap();
+    } else {
+        writeln!(
+            writer,
+            "\n{}Stream content ({}, {} bytes):\n---\n{}\n---",
+            indent_str,
+            description,
+            len_str,
+            String::from_utf8_lossy(content_to_display)
+        ).unwrap();
+    }
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -504,6 +607,13 @@ fn object_to_json(obj: &Object, doc: &Document, config: &DumpConfig) -> Value {
                 let decoded = decode_stream(stream);
                 if !is_binary_stream(&decoded) {
                     val["content"] = json!(String::from_utf8_lossy(&decoded));
+                } else if config.hex {
+                    let display_data = if config.truncate_binary_streams {
+                        &decoded[..decoded.len().min(100)]
+                    } else {
+                        &decoded
+                    };
+                    val["content_hex"] = json!(format_hex_dump(display_data));
                 } else if config.truncate_binary_streams {
                     val["content_truncated"] = json!(format!("<binary, {} bytes>", decoded.len()));
                 } else {
@@ -517,7 +627,7 @@ fn object_to_json(obj: &Object, doc: &Document, config: &DumpConfig) -> Value {
 }
 
 fn collect_reachable_objects(doc: &Document) -> BTreeMap<String, Value> {
-    let config = DumpConfig { decode_streams: false, truncate_binary_streams: false, json: true };
+    let config = DumpConfig { decode_streams: false, truncate_binary_streams: false, json: true, hex: false };
     let mut result = BTreeMap::new();
     let mut visited = BTreeSet::new();
 
@@ -918,12 +1028,12 @@ fn extract_text_from_page(doc: &Document, page_id: ObjectId) -> String {
                 first_bt = false;
             }
             "Td" | "TD" => {
-                // Check ty (second operand) for line break
+                // Check ty (second operand) for line break — negative y means downward movement
                 if op.operands.len() >= 2 {
                     if let Object::Integer(ty) = &op.operands[1] {
-                        if *ty != 0 { text.push('\n'); }
+                        if *ty < 0 { text.push('\n'); }
                     } else if let Object::Real(ty) = &op.operands[1]
-                        && *ty != 0.0 { text.push('\n');
+                        && *ty < 0.0 { text.push('\n');
                     }
                 }
             }
@@ -1220,8 +1330,8 @@ fn compare_page(doc1: &Document, doc2: &Document, page_id1: ObjectId, page_id2: 
         }
     }
 
-    // Compare resources
-    let get_font_names = |doc: &Document, dict: &lopdf::Dictionary| -> BTreeSet<String> {
+    // Compare resources across multiple categories
+    let get_resource_names = |doc: &Document, dict: &lopdf::Dictionary, category: &[u8]| -> BTreeSet<String> {
         let mut names = BTreeSet::new();
         let resources = match dict.get(b"Resources") {
             Ok(Object::Reference(id)) => {
@@ -1230,29 +1340,32 @@ fn compare_page(doc1: &Document, doc2: &Document, page_id1: ObjectId, page_id2: 
             Ok(Object::Dictionary(d)) => d,
             _ => return names,
         };
-        if let Ok(font_obj) = resources.get(b"Font") {
-            let font_dict = match font_obj {
+        if let Ok(cat_obj) = resources.get(category) {
+            let cat_dict = match cat_obj {
                 Object::Dictionary(d) => d,
                 Object::Reference(id) => {
                     if let Ok(Object::Dictionary(d)) = doc.get_object(*id) { d } else { return names; }
                 }
                 _ => return names,
             };
-            for (k, _) in font_dict.iter() {
+            for (k, _) in cat_dict.iter() {
                 names.insert(String::from_utf8_lossy(k).into_owned());
             }
         }
         names
     };
 
-    let fonts1 = get_font_names(doc1, dict1);
-    let fonts2 = get_font_names(doc2, dict2);
-    if fonts1 != fonts2 {
-        for f in fonts1.difference(&fonts2) {
-            resource_diffs.push(format!("Font {} only in first file", f));
-        }
-        for f in fonts2.difference(&fonts1) {
-            resource_diffs.push(format!("Font {} only in second file", f));
+    for category in &[b"Font" as &[u8], b"XObject", b"ColorSpace", b"ExtGState", b"Pattern", b"Shading"] {
+        let cat_name = String::from_utf8_lossy(category);
+        let names1 = get_resource_names(doc1, dict1, category);
+        let names2 = get_resource_names(doc2, dict2, category);
+        if names1 != names2 {
+            for n in names1.difference(&names2) {
+                resource_diffs.push(format!("{} {} only in first file", cat_name, n));
+            }
+            for n in names2.difference(&names1) {
+                resource_diffs.push(format!("{} {} only in second file", cat_name, n));
+            }
         }
     }
 
@@ -1268,6 +1381,32 @@ fn compare_page(doc1: &Document, doc2: &Document, page_id1: ObjectId, page_id2: 
         resource_diffs,
         content_diffs,
     }
+}
+
+fn format_operand(obj: &Object) -> String {
+    match obj {
+        Object::Name(n) => format!("/{}", String::from_utf8_lossy(n)),
+        Object::Integer(i) => i.to_string(),
+        Object::Real(r) => r.to_string(),
+        Object::Boolean(b) => b.to_string(),
+        Object::String(bytes, _) => format!("({})", String::from_utf8_lossy(bytes)),
+        Object::Array(arr) => {
+            let items: Vec<String> = arr.iter().map(format_operand).collect();
+            format!("[{}]", items.join(" "))
+        }
+        Object::Reference(id) => format!("{} {} R", id.0, id.1),
+        Object::Null => "null".to_string(),
+        Object::Dictionary(_) => "<<...>>".to_string(),
+        Object::Stream(_) => "<<stream>>".to_string(),
+    }
+}
+
+fn format_operation(op: &lopdf::content::Operation) -> String {
+    if op.operands.is_empty() {
+        return op.operator.clone();
+    }
+    let operands: Vec<String> = op.operands.iter().map(format_operand).collect();
+    format!("{} {}", operands.join(" "), op.operator)
 }
 
 fn get_content_ops(doc: &Document, page_id: ObjectId) -> Vec<String> {
@@ -1291,7 +1430,7 @@ fn get_content_ops(doc: &Document, page_id: ObjectId) -> Vec<String> {
     }
 
     match Content::decode(&all_bytes) {
-        Ok(content) => content.operations.iter().map(|op| format!("{:?}", op)).collect(),
+        Ok(content) => content.operations.iter().map(format_operation).collect(),
         Err(_) => vec![],
     }
 }
@@ -1470,6 +1609,565 @@ fn print_metadata(writer: &mut impl Write, doc: &Document) {
     }
 }
 
+// ── Refs-To (P1) ────────────────────────────────────────────────────
+
+fn collect_references_in_object(obj: &Object, target_id: ObjectId, path: &str) -> Vec<String> {
+    let mut found = Vec::new();
+    match obj {
+        Object::Reference(id) if *id == target_id => {
+            found.push(path.to_string());
+        }
+        Object::Array(arr) => {
+            for (i, item) in arr.iter().enumerate() {
+                let child_path = format!("{}[{}]", path, i);
+                found.extend(collect_references_in_object(item, target_id, &child_path));
+            }
+        }
+        Object::Dictionary(dict) => {
+            for (key, value) in dict.iter() {
+                let child_path = format!("{}/{}", path, String::from_utf8_lossy(key));
+                found.extend(collect_references_in_object(value, target_id, &child_path));
+            }
+        }
+        Object::Stream(stream) => {
+            for (key, value) in stream.dict.iter() {
+                let child_path = format!("{}/{}", path, String::from_utf8_lossy(key));
+                found.extend(collect_references_in_object(value, target_id, &child_path));
+            }
+        }
+        _ => {}
+    }
+    found
+}
+
+fn print_refs_to(writer: &mut impl Write, doc: &Document, target_num: u32) {
+    let target_id = (target_num, 0);
+    writeln!(writer, "Objects referencing {} 0 R:\n", target_num).unwrap();
+
+    let mut count = 0;
+    for (&(obj_num, generation), object) in &doc.objects {
+        let paths = collect_references_in_object(object, target_id, "");
+        if !paths.is_empty() {
+            count += 1;
+            let kind = object.enum_variant();
+            let type_label = object_type_label(object);
+            let via = paths.join(", ");
+            writeln!(writer, "  {:>4}  {:>3}  {:<13} {:<14} via {}", obj_num, generation, kind, type_label, via).unwrap();
+        }
+    }
+    writeln!(writer, "\nFound {} objects referencing {} 0 R.", count, target_num).unwrap();
+}
+
+fn print_refs_to_json(writer: &mut impl Write, doc: &Document, target_num: u32) {
+    let target_id = (target_num, 0);
+    let mut references = Vec::new();
+    for (&(obj_num, generation), object) in &doc.objects {
+        let paths = collect_references_in_object(object, target_id, "");
+        if !paths.is_empty() {
+            references.push(json!({
+                "object_number": obj_num,
+                "generation": generation,
+                "type": object_type_label(object),
+                "via_keys": paths,
+            }));
+        }
+    }
+    let output = json!({
+        "target_object": target_num,
+        "reference_count": references.len(),
+        "references": references,
+    });
+    writeln!(writer, "{}", serde_json::to_string_pretty(&output).unwrap()).unwrap();
+}
+
+// ── Fonts (P1) ──────────────────────────────────────────────────────
+
+struct FontInfo {
+    object_id: ObjectId,
+    base_font: String,
+    subtype: String,
+    encoding: String,
+    embedded: Option<ObjectId>,
+}
+
+fn collect_fonts(doc: &Document) -> Vec<FontInfo> {
+    let font_subtypes: &[&[u8]] = &[
+        b"Type1", b"TrueType", b"Type0", b"CIDFontType0", b"CIDFontType2", b"MMType1", b"Type3",
+    ];
+
+    let mut fonts = Vec::new();
+    for (&obj_id, object) in &doc.objects {
+        let dict = match object {
+            Object::Dictionary(d) => d,
+            Object::Stream(s) => &s.dict,
+            _ => continue,
+        };
+
+        let is_font = dict.get_type().ok().is_some_and(|t| t == b"Font")
+            || dict.get(b"Subtype").ok().is_some_and(|v| {
+                if let Ok(name) = v.as_name() {
+                    font_subtypes.contains(&name)
+                } else {
+                    false
+                }
+            });
+
+        if !is_font { continue; }
+
+        let base_font = dict.get(b"BaseFont").ok()
+            .and_then(|v| v.as_name().ok().map(|n| String::from_utf8_lossy(n).into_owned()))
+            .unwrap_or_else(|| "-".to_string());
+
+        let subtype = dict.get(b"Subtype").ok()
+            .and_then(|v| v.as_name().ok().map(|n| String::from_utf8_lossy(n).into_owned()))
+            .unwrap_or_else(|| "-".to_string());
+
+        let encoding = dict.get(b"Encoding").ok()
+            .map(|v| match v {
+                Object::Name(n) => String::from_utf8_lossy(n).into_owned(),
+                Object::Reference(id) => format!("{} {} R", id.0, id.1),
+                _ => "-".to_string(),
+            })
+            .unwrap_or_else(|| "-".to_string());
+
+        // Check FontDescriptor for embedded font files
+        let embedded = dict.get(b"FontDescriptor").ok()
+            .and_then(|v| v.as_reference().ok())
+            .and_then(|fd_id| doc.get_object(fd_id).ok())
+            .and_then(|fd_obj| {
+                let fd_dict = match fd_obj {
+                    Object::Dictionary(d) => d,
+                    Object::Stream(s) => &s.dict,
+                    _ => return None,
+                };
+                for key in &[b"FontFile".as_slice(), b"FontFile2", b"FontFile3"] {
+                    if let Ok(ff_ref) = fd_dict.get(key)
+                        && let Ok(id) = ff_ref.as_reference() {
+                            return Some(id);
+                    }
+                }
+                None
+            });
+
+        fonts.push(FontInfo { object_id: obj_id, base_font, subtype, encoding, embedded });
+    }
+
+    fonts.sort_by_key(|f| f.object_id);
+    fonts
+}
+
+fn print_fonts(writer: &mut impl Write, doc: &Document) {
+    let fonts = collect_fonts(doc);
+    writeln!(writer, "{} fonts found\n", fonts.len()).unwrap();
+    writeln!(writer, "  {:>4}  {:<30} {:<14} {:<18} Embedded", "Obj#", "BaseFont", "Subtype", "Encoding").unwrap();
+    for f in &fonts {
+        let embedded_str = match f.embedded {
+            Some(id) => format!("yes ({})", id.0),
+            None => "no".to_string(),
+        };
+        writeln!(writer, "  {:>4}  {:<30} {:<14} {:<18} {}", f.object_id.0, f.base_font, f.subtype, f.encoding, embedded_str).unwrap();
+    }
+}
+
+fn print_fonts_json(writer: &mut impl Write, doc: &Document) {
+    let fonts = collect_fonts(doc);
+    let items: Vec<Value> = fonts.iter().map(|f| {
+        let mut obj = json!({
+            "object_number": f.object_id.0,
+            "generation": f.object_id.1,
+            "base_font": f.base_font,
+            "subtype": f.subtype,
+            "encoding": f.encoding,
+        });
+        if let Some(id) = f.embedded {
+            obj["embedded"] = json!({"object_number": id.0, "generation": id.1});
+        } else {
+            obj["embedded"] = json!(null);
+        }
+        obj
+    }).collect();
+    let output = json!({
+        "font_count": items.len(),
+        "fonts": items,
+    });
+    writeln!(writer, "{}", serde_json::to_string_pretty(&output).unwrap()).unwrap();
+}
+
+// ── Images (P1) ─────────────────────────────────────────────────────
+
+struct ImageInfo {
+    object_id: ObjectId,
+    width: i64,
+    height: i64,
+    color_space: String,
+    bits_per_component: i64,
+    filter: String,
+    size: usize,
+}
+
+fn format_color_space(obj: &Object, doc: &Document) -> String {
+    match obj {
+        Object::Name(n) => String::from_utf8_lossy(n).into_owned(),
+        Object::Array(arr) => {
+            let names: Vec<String> = arr.iter().map(|item| match item {
+                Object::Name(n) => String::from_utf8_lossy(n).into_owned(),
+                Object::Reference(id) => format!("{} {} R", id.0, id.1),
+                Object::Integer(i) => i.to_string(),
+                _ => "?".to_string(),
+            }).collect();
+            format!("[{}]", names.join(" "))
+        }
+        Object::Reference(id) => {
+            if let Ok(resolved) = doc.get_object(*id) {
+                format_color_space(resolved, doc)
+            } else {
+                format!("{} {} R", id.0, id.1)
+            }
+        }
+        _ => "-".to_string(),
+    }
+}
+
+fn format_filter(obj: &Object) -> String {
+    match obj {
+        Object::Name(n) => String::from_utf8_lossy(n).into_owned(),
+        Object::Array(arr) => {
+            let names: Vec<String> = arr.iter().map(|item| match item {
+                Object::Name(n) => String::from_utf8_lossy(n).into_owned(),
+                _ => "?".to_string(),
+            }).collect();
+            names.join(", ")
+        }
+        _ => "-".to_string(),
+    }
+}
+
+fn collect_images(doc: &Document) -> Vec<ImageInfo> {
+    let mut images = Vec::new();
+    for (&obj_id, object) in &doc.objects {
+        let (dict, content_len) = match object {
+            Object::Stream(s) => (&s.dict, s.content.len()),
+            _ => continue,
+        };
+
+        let is_image = dict.get(b"Subtype").ok()
+            .is_some_and(|v| v.as_name().ok().is_some_and(|n| n == b"Image"));
+        if !is_image { continue; }
+
+        let width = dict.get(b"Width").ok()
+            .and_then(|v| v.as_i64().ok())
+            .unwrap_or(0);
+        let height = dict.get(b"Height").ok()
+            .and_then(|v| v.as_i64().ok())
+            .unwrap_or(0);
+        let color_space = dict.get(b"ColorSpace").ok()
+            .map(|v| format_color_space(v, doc))
+            .unwrap_or_else(|| "-".to_string());
+        let bits_per_component = dict.get(b"BitsPerComponent").ok()
+            .and_then(|v| v.as_i64().ok())
+            .unwrap_or(0);
+        let filter = dict.get(b"Filter").ok()
+            .map(format_filter)
+            .unwrap_or_else(|| "-".to_string());
+
+        images.push(ImageInfo {
+            object_id: obj_id,
+            width,
+            height,
+            color_space,
+            bits_per_component,
+            filter,
+            size: content_len,
+        });
+    }
+
+    images.sort_by_key(|i| i.object_id);
+    images
+}
+
+fn print_images(writer: &mut impl Write, doc: &Document) {
+    let images = collect_images(doc);
+    writeln!(writer, "{} images found\n", images.len()).unwrap();
+    writeln!(writer, "  {:>4}  {:>5}  {:>6}  {:<18} {:>3}  {:<18} {:>8}", "Obj#", "Width", "Height", "ColorSpace", "BPC", "Filter", "Size").unwrap();
+    for img in &images {
+        writeln!(writer, "  {:>4}  {:>5}  {:>6}  {:<18} {:>3}  {:<18} {:>8}", img.object_id.0, img.width, img.height, img.color_space, img.bits_per_component, img.filter, img.size).unwrap();
+    }
+}
+
+fn print_images_json(writer: &mut impl Write, doc: &Document) {
+    let images = collect_images(doc);
+    let items: Vec<Value> = images.iter().map(|img| {
+        json!({
+            "object_number": img.object_id.0,
+            "generation": img.object_id.1,
+            "width": img.width,
+            "height": img.height,
+            "color_space": img.color_space,
+            "bits_per_component": img.bits_per_component,
+            "filter": img.filter,
+            "size": img.size,
+        })
+    }).collect();
+    let output = json!({
+        "image_count": items.len(),
+        "images": items,
+    });
+    writeln!(writer, "{}", serde_json::to_string_pretty(&output).unwrap()).unwrap();
+}
+
+// ── Validate (P1) ───────────────────────────────────────────────────
+
+#[derive(PartialEq)]
+enum ValidationLevel {
+    Error,
+    Warn,
+    Info,
+}
+
+struct ValidationIssue {
+    level: ValidationLevel,
+    message: String,
+}
+
+struct ValidationReport {
+    issues: Vec<ValidationIssue>,
+    error_count: usize,
+    warn_count: usize,
+    info_count: usize,
+}
+
+fn validate_pdf(doc: &Document) -> ValidationReport {
+    let mut issues = Vec::new();
+
+    check_broken_references(doc, &mut issues);
+    check_unreachable_objects(doc, &mut issues);
+    check_required_keys(doc, &mut issues);
+    check_stream_lengths(doc, &mut issues);
+    check_page_tree(doc, &mut issues);
+
+    let error_count = issues.iter().filter(|i| i.level == ValidationLevel::Error).count();
+    let warn_count = issues.iter().filter(|i| i.level == ValidationLevel::Warn).count();
+    let info_count = issues.iter().filter(|i| i.level == ValidationLevel::Info).count();
+
+    ValidationReport { issues, error_count, warn_count, info_count }
+}
+
+fn check_broken_references(doc: &Document, issues: &mut Vec<ValidationIssue>) {
+    for (&(obj_num, generation), object) in &doc.objects {
+        let broken = collect_broken_refs(object, doc);
+        for (ref_num, ref_generation) in broken {
+            issues.push(ValidationIssue {
+                level: ValidationLevel::Error,
+                message: format!("Object {} {}: references non-existent object {} {}", obj_num, generation, ref_num, ref_generation),
+            });
+        }
+    }
+}
+
+fn collect_broken_refs(obj: &Object, doc: &Document) -> Vec<(u32, u16)> {
+    let mut broken = Vec::new();
+    match obj {
+        Object::Reference(id) => {
+            if doc.get_object(*id).is_err() {
+                broken.push(*id);
+            }
+        }
+        Object::Array(arr) => {
+            for item in arr {
+                broken.extend(collect_broken_refs(item, doc));
+            }
+        }
+        Object::Dictionary(dict) => {
+            for (_, v) in dict.iter() {
+                broken.extend(collect_broken_refs(v, doc));
+            }
+        }
+        Object::Stream(stream) => {
+            for (_, v) in stream.dict.iter() {
+                broken.extend(collect_broken_refs(v, doc));
+            }
+        }
+        _ => {}
+    }
+    broken
+}
+
+fn collect_reachable_ids(doc: &Document) -> BTreeSet<ObjectId> {
+    let mut visited = BTreeSet::new();
+
+    fn walk_refs(obj: &Object, doc: &Document, visited: &mut BTreeSet<ObjectId>) {
+        match obj {
+            Object::Reference(id) => {
+                if visited.contains(id) { return; }
+                visited.insert(*id);
+                if let Ok(resolved) = doc.get_object(*id) {
+                    walk_refs(resolved, doc, visited);
+                }
+            }
+            Object::Array(arr) => {
+                for item in arr { walk_refs(item, doc, visited); }
+            }
+            Object::Dictionary(dict) => {
+                for (_, v) in dict.iter() { walk_refs(v, doc, visited); }
+            }
+            Object::Stream(stream) => {
+                for (_, v) in stream.dict.iter() { walk_refs(v, doc, visited); }
+            }
+            _ => {}
+        }
+    }
+
+    // Start from trailer
+    for (_, v) in doc.trailer.iter() {
+        walk_refs(v, doc, &mut visited);
+    }
+
+    visited
+}
+
+fn check_unreachable_objects(doc: &Document, issues: &mut Vec<ValidationIssue>) {
+    let reachable = collect_reachable_ids(doc);
+    for &(obj_num, generation) in doc.objects.keys() {
+        if !reachable.contains(&(obj_num, generation)) {
+            issues.push(ValidationIssue {
+                level: ValidationLevel::Warn,
+                message: format!("Object {} {} is unreachable from trailer", obj_num, generation),
+            });
+        }
+    }
+}
+
+fn check_required_keys(doc: &Document, issues: &mut Vec<ValidationIssue>) {
+    // Catalog must have /Pages
+    if let Some(root_ref) = doc.trailer.get(b"Root").ok().and_then(|o| o.as_reference().ok()) {
+        if let Ok(Object::Dictionary(catalog)) = doc.get_object(root_ref)
+            && catalog.get(b"Pages").is_err() {
+                issues.push(ValidationIssue {
+                    level: ValidationLevel::Error,
+                    message: "Catalog missing required /Pages key".to_string(),
+                });
+        }
+    } else {
+        issues.push(ValidationIssue {
+            level: ValidationLevel::Error,
+            message: "Trailer missing /Root reference".to_string(),
+        });
+    }
+
+    // Each page must have /MediaBox (or inherit from parent)
+    let pages = doc.get_pages();
+    for (&page_num, &page_id) in &pages {
+        if !page_has_media_box(doc, page_id) {
+            issues.push(ValidationIssue {
+                level: ValidationLevel::Error,
+                message: format!("Page {} (object {}): missing /MediaBox (not found in page or parent chain)", page_num, page_id.0),
+            });
+        }
+    }
+}
+
+fn page_has_media_box(doc: &Document, page_id: ObjectId) -> bool {
+    let mut current_id = Some(page_id);
+    let mut depth = 0;
+    while let Some(id) = current_id {
+        if depth > 20 { break; } // Guard against cycles
+        depth += 1;
+        if let Ok(obj) = doc.get_object(id) {
+            let dict = match obj {
+                Object::Dictionary(d) => d,
+                Object::Stream(s) => &s.dict,
+                _ => break,
+            };
+            if dict.get(b"MediaBox").is_ok() {
+                return true;
+            }
+            // Walk up the /Parent chain
+            current_id = dict.get(b"Parent").ok()
+                .and_then(|v| v.as_reference().ok());
+        } else {
+            break;
+        }
+    }
+    false
+}
+
+fn check_stream_lengths(doc: &Document, issues: &mut Vec<ValidationIssue>) {
+    for (&(obj_num, generation), object) in &doc.objects {
+        if let Object::Stream(stream) = object
+            && let Ok(Object::Integer(declared)) = stream.dict.get(b"Length") {
+                let actual = stream.content.len() as i64;
+                if *declared != actual {
+                    issues.push(ValidationIssue {
+                        level: ValidationLevel::Warn,
+                        message: format!("Object {} {}: /Length is {} but stream content is {} bytes", obj_num, generation, declared, actual),
+                    });
+                }
+        }
+    }
+}
+
+fn check_page_tree(doc: &Document, issues: &mut Vec<ValidationIssue>) {
+    let pages = doc.get_pages();
+    let actual_count = pages.len();
+
+    // Check /Pages /Count
+    if let Some(root_ref) = doc.trailer.get(b"Root").ok().and_then(|o| o.as_reference().ok())
+        && let Ok(Object::Dictionary(catalog)) = doc.get_object(root_ref)
+        && let Ok(pages_ref) = catalog.get(b"Pages").and_then(|o| o.as_reference())
+        && let Ok(Object::Dictionary(pages_dict)) = doc.get_object(pages_ref)
+        && let Ok(Object::Integer(count)) = pages_dict.get(b"Count")
+        && *count as usize != actual_count
+    {
+        issues.push(ValidationIssue {
+            level: ValidationLevel::Error,
+            message: format!("/Pages /Count is {} but document has {} pages", count, actual_count),
+        });
+    }
+}
+
+fn print_validation(writer: &mut impl Write, doc: &Document) {
+    let report = validate_pdf(doc);
+
+    if report.issues.is_empty() {
+        writeln!(writer, "[OK] No issues found.").unwrap();
+        return;
+    }
+
+    for issue in &report.issues {
+        let prefix = match issue.level {
+            ValidationLevel::Error => "[ERROR]",
+            ValidationLevel::Warn => "[WARN]",
+            ValidationLevel::Info => "[INFO]",
+        };
+        writeln!(writer, "{} {}", prefix, issue.message).unwrap();
+    }
+    writeln!(writer, "\nSummary: {} errors, {} warnings, {} info",
+        report.error_count, report.warn_count, report.info_count).unwrap();
+}
+
+fn print_validation_json(writer: &mut impl Write, doc: &Document) {
+    let report = validate_pdf(doc);
+
+    let issues: Vec<Value> = report.issues.iter().map(|i| {
+        json!({
+            "level": match i.level {
+                ValidationLevel::Error => "error",
+                ValidationLevel::Warn => "warning",
+                ValidationLevel::Info => "info",
+            },
+            "message": i.message,
+        })
+    }).collect();
+
+    let output = json!({
+        "error_count": report.error_count,
+        "warning_count": report.warn_count,
+        "info_count": report.info_count,
+        "issues": issues,
+    });
+    writeln!(writer, "{}", serde_json::to_string_pretty(&output).unwrap()).unwrap();
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1496,6 +2194,7 @@ mod tests {
             decode_streams: false,
             truncate_binary_streams: false,
             json: false,
+            hex: false,
         }
     }
 
@@ -1695,7 +2394,7 @@ mod tests {
         let doc = empty_doc();
         let visited = BTreeSet::new();
         let mut child_refs = BTreeSet::new();
-        let config = DumpConfig { decode_streams: true, truncate_binary_streams: false, json: false };
+        let config = DumpConfig { decode_streams: true, truncate_binary_streams: false, json: false, hex: false };
         let out = output_of(|w| {
             print_object(w, &Object::Stream(stream), &doc, &visited, 1, &config, false, &mut child_refs);
         });
@@ -1757,7 +2456,7 @@ mod tests {
     fn print_content_data_binary_truncated() {
         // 200 bytes of binary data (contains 0x80 so is_binary_stream = true)
         let content: Vec<u8> = (0..200).map(|i| (i as u8).wrapping_add(0x80)).collect();
-        let config = DumpConfig { decode_streams: false, truncate_binary_streams: true, json: false };
+        let config = DumpConfig { decode_streams: false, truncate_binary_streams: true, json: false, hex: false };
         let out = output_of(|w| {
             print_content_data(w, &content, "raw", "", &config, false);
         });
@@ -2020,7 +2719,7 @@ mod tests {
         let doc = empty_doc();
         let visited = BTreeSet::new();
         let mut child_refs = BTreeSet::new();
-        let config = DumpConfig { decode_streams: true, truncate_binary_streams: false, json: false };
+        let config = DumpConfig { decode_streams: true, truncate_binary_streams: false, json: false, hex: false };
         let out = output_of(|w| {
             print_object(w, &Object::Stream(stream), &doc, &visited, 1, &config, false, &mut child_refs);
         });
@@ -2094,7 +2793,7 @@ mod tests {
     fn print_content_data_binary_short_with_truncation_enabled() {
         // Binary content < 100 bytes with truncation enabled → no truncation applied
         let content: Vec<u8> = vec![0x80; 50];
-        let config = DumpConfig { decode_streams: false, truncate_binary_streams: true, json: false };
+        let config = DumpConfig { decode_streams: false, truncate_binary_streams: true, json: false, hex: false };
         let out = output_of(|w| {
             print_content_data(w, &content, "raw", "", &config, false);
         });
@@ -2106,7 +2805,7 @@ mod tests {
     fn print_content_data_binary_exactly_100_bytes_with_truncation() {
         // Exactly 100 bytes of binary → no truncation (only truncates > 100)
         let content: Vec<u8> = vec![0x80; 100];
-        let config = DumpConfig { decode_streams: false, truncate_binary_streams: true, json: false };
+        let config = DumpConfig { decode_streams: false, truncate_binary_streams: true, json: false, hex: false };
         let out = output_of(|w| {
             print_content_data(w, &content, "raw", "", &config, false);
         });
@@ -2118,7 +2817,7 @@ mod tests {
     fn print_content_data_binary_101_bytes_with_truncation() {
         // 101 bytes of binary → should truncate
         let content: Vec<u8> = vec![0x80; 101];
-        let config = DumpConfig { decode_streams: false, truncate_binary_streams: true, json: false };
+        let config = DumpConfig { decode_streams: false, truncate_binary_streams: true, json: false, hex: false };
         let out = output_of(|w| {
             print_content_data(w, &content, "raw", "", &config, false);
         });
@@ -2146,7 +2845,7 @@ mod tests {
     fn print_content_data_ascii_not_truncated_even_when_flag_set() {
         // ASCII content >100 bytes with truncation flag → no truncation (not binary)
         let content = b"abcdefghij".repeat(20); // 200 bytes of ASCII
-        let config = DumpConfig { decode_streams: false, truncate_binary_streams: true, json: false };
+        let config = DumpConfig { decode_streams: false, truncate_binary_streams: true, json: false, hex: false };
         let out = output_of(|w| {
             print_content_data(w, &content, "raw", "", &config, false);
         });
@@ -2187,7 +2886,7 @@ mod tests {
         // Large binary stream with truncation enabled
         let content: Vec<u8> = vec![0x80; 200];
         let stream = make_stream(None, content);
-        let config = DumpConfig { decode_streams: false, truncate_binary_streams: true, json: false };
+        let config = DumpConfig { decode_streams: false, truncate_binary_streams: true, json: false, hex: false };
         let out = output_of(|w| {
             print_stream_content(w, &stream, "", &config, false);
         });
@@ -2289,7 +2988,7 @@ mod tests {
         doc.objects.insert((1, 0), Object::Stream(stream));
 
         let mut visited = BTreeSet::new();
-        let config = DumpConfig { decode_streams: true, truncate_binary_streams: false, json: false };
+        let config = DumpConfig { decode_streams: true, truncate_binary_streams: false, json: false, hex: false };
         let out = output_of(|w| {
             dump_object_and_children(w, (1, 0), &doc, &mut visited, &config, false);
         });
@@ -2310,7 +3009,7 @@ mod tests {
         doc.objects.insert((2, 0), Object::Stream(stream));
 
         let mut visited = BTreeSet::new();
-        let config = DumpConfig { decode_streams: true, truncate_binary_streams: false, json: false };
+        let config = DumpConfig { decode_streams: true, truncate_binary_streams: false, json: false, hex: false };
         let out = output_of(|w| {
             dump_object_and_children(w, (1, 0), &doc, &mut visited, &config, false);
         });
@@ -2643,7 +3342,7 @@ mod tests {
         doc.objects.insert((1, 0), Object::Stream(stream));
 
         let mut visited = BTreeSet::new();
-        let config = DumpConfig { decode_streams: true, truncate_binary_streams: false, json: false };
+        let config = DumpConfig { decode_streams: true, truncate_binary_streams: false, json: false, hex: false };
         let out = output_of(|w| {
             dump_object_and_children(w, (1, 0), &doc, &mut visited, &config, true);
         });
@@ -2659,7 +3358,7 @@ mod tests {
         doc.objects.insert((1, 0), Object::Stream(stream));
 
         let mut visited = BTreeSet::new();
-        let config = DumpConfig { decode_streams: true, truncate_binary_streams: true, json: false };
+        let config = DumpConfig { decode_streams: true, truncate_binary_streams: true, json: false, hex: false };
         let out = output_of(|w| {
             dump_object_and_children(w, (1, 0), &doc, &mut visited, &config, false);
         });
@@ -2814,7 +3513,7 @@ mod tests {
         let mut doc = Document::new();
         let stream = make_stream(None, b"visible data".to_vec());
         doc.objects.insert((1, 0), Object::Stream(stream));
-        let config = DumpConfig { decode_streams: true, truncate_binary_streams: false, json: false };
+        let config = DumpConfig { decode_streams: true, truncate_binary_streams: false, json: false, hex: false };
         let out = output_of(|w| {
             print_single_object(w, &doc, 1, &config);
         });
@@ -2967,7 +3666,7 @@ mod tests {
     #[test]
     fn dump_page_confines_to_target_page() {
         let doc = build_two_page_doc();
-        let config = DumpConfig { decode_streams: true, truncate_binary_streams: false, json: false };
+        let config = DumpConfig { decode_streams: true, truncate_binary_streams: false, json: false, hex: false };
         let out = output_of(|w| {
             dump_page(w, &doc, 1, &config);
         });
@@ -2979,7 +3678,7 @@ mod tests {
     #[test]
     fn dump_page_two_shows_only_page_two() {
         let doc = build_two_page_doc();
-        let config = DumpConfig { decode_streams: true, truncate_binary_streams: false, json: false };
+        let config = DumpConfig { decode_streams: true, truncate_binary_streams: false, json: false, hex: false };
         let out = output_of(|w| {
             dump_page(w, &doc, 2, &config);
         });
@@ -3054,7 +3753,7 @@ mod tests {
     // ── object_to_json ──────────────────────────────────────────────
 
     fn json_config() -> DumpConfig {
-        DumpConfig { decode_streams: false, truncate_binary_streams: false, json: true }
+        DumpConfig { decode_streams: false, truncate_binary_streams: false, json: true, hex: false }
     }
 
     #[test]
@@ -3133,7 +3832,7 @@ mod tests {
     #[test]
     fn object_to_json_stream_with_decode() {
         let stream = make_stream(None, b"text content".to_vec());
-        let config = DumpConfig { decode_streams: true, truncate_binary_streams: false, json: true };
+        let config = DumpConfig { decode_streams: true, truncate_binary_streams: false, json: true, hex: false };
         let val = object_to_json(&Object::Stream(stream), &empty_doc(), &config);
         assert_eq!(val["content"], "text content");
     }
@@ -3681,7 +4380,7 @@ mod tests {
 
     #[test]
     fn extract_text_td_uppercase() {
-        // TD operator should also produce newline when ty != 0
+        // TD operator should also produce newline when ty < 0
         let mut doc = Document::new();
         let content = b"BT\n0 -14 TD\n(Line1) Tj\nET";
         let stream = Stream::new(Dictionary::new(), content.to_vec());
@@ -3690,7 +4389,7 @@ mod tests {
         page.set("Contents", Object::Reference(c_id));
         let p_id = doc.add_object(Object::Dictionary(page));
         let text = extract_text_from_page(&doc, p_id);
-        assert!(text.contains('\n'), "TD with non-zero ty should produce newline");
+        assert!(text.contains('\n'), "TD with negative ty should produce newline");
         assert!(text.contains("Line1"));
     }
 
@@ -3711,8 +4410,41 @@ mod tests {
     }
 
     #[test]
+    fn extract_text_td_positive_ty_no_newline() {
+        // Td with positive ty (e.g. superscript) should NOT produce a newline
+        let mut doc = Document::new();
+        let content = b"BT\n(Base) Tj\n5 4 Td\n(Super) Tj\nET";
+        let stream = Stream::new(Dictionary::new(), content.to_vec());
+        let c_id = doc.add_object(Object::Stream(stream));
+        let mut page = Dictionary::new();
+        page.set("Contents", Object::Reference(c_id));
+        let p_id = doc.add_object(Object::Dictionary(page));
+        let text = extract_text_from_page(&doc, p_id);
+        assert!(text.contains("Base"));
+        assert!(text.contains("Super"));
+        // Positive ty should not insert a newline between Base and Super
+        assert!(!text.contains("Base\nSuper"), "Positive ty should not produce newline, got: {:?}", text);
+    }
+
+    #[test]
+    fn extract_text_td_positive_real_ty_no_newline() {
+        // Td with positive Real ty should NOT produce a newline
+        let mut doc = Document::new();
+        let content = b"BT\n(Base) Tj\n5 4.5 Td\n(Super) Tj\nET";
+        let stream = Stream::new(Dictionary::new(), content.to_vec());
+        let c_id = doc.add_object(Object::Stream(stream));
+        let mut page = Dictionary::new();
+        page.set("Contents", Object::Reference(c_id));
+        let p_id = doc.add_object(Object::Dictionary(page));
+        let text = extract_text_from_page(&doc, p_id);
+        assert!(text.contains("Base"));
+        assert!(text.contains("Super"));
+        assert!(!text.contains("Base\nSuper"), "Positive Real ty should not produce newline, got: {:?}", text);
+    }
+
+    #[test]
     fn extract_text_td_real_operand() {
-        // Td with Real operands
+        // Td with negative Real ty should produce newline
         let mut doc = Document::new();
         let content = b"BT\n0 -14.5 Td\n(RealTd) Tj\nET";
         let stream = Stream::new(Dictionary::new(), content.to_vec());
@@ -3721,7 +4453,7 @@ mod tests {
         page.set("Contents", Object::Reference(c_id));
         let p_id = doc.add_object(Object::Dictionary(page));
         let text = extract_text_from_page(&doc, p_id);
-        assert!(text.contains('\n'), "Td with non-zero Real ty should produce newline");
+        assert!(text.contains('\n'), "Td with negative Real ty should produce newline");
         assert!(text.contains("RealTd"));
     }
 
@@ -3883,6 +4615,43 @@ mod tests {
         assert_eq!(val, "[[/X] 3]");
     }
 
+    // ── format_operation ──────────────────────────────────────────────
+
+    #[test]
+    fn format_operation_no_operands() {
+        let op = lopdf::content::Operation::new("BT", vec![]);
+        assert_eq!(format_operation(&op), "BT");
+    }
+
+    #[test]
+    fn format_operation_string_tj() {
+        let op = lopdf::content::Operation::new("Tj", vec![Object::String(b"Hello".to_vec(), StringFormat::Literal)]);
+        assert_eq!(format_operation(&op), "(Hello) Tj");
+    }
+
+    #[test]
+    fn format_operation_name_and_int() {
+        let op = lopdf::content::Operation::new("Tf", vec![Object::Name(b"F1".to_vec()), Object::Integer(12)]);
+        assert_eq!(format_operation(&op), "/F1 12 Tf");
+    }
+
+    #[test]
+    fn format_operation_tj_array() {
+        let arr = Object::Array(vec![
+            Object::String(b"H".to_vec(), StringFormat::Literal),
+            Object::Integer(-20),
+            Object::String(b"ello".to_vec(), StringFormat::Literal),
+        ]);
+        let op = lopdf::content::Operation::new("TJ", vec![arr]);
+        assert_eq!(format_operation(&op), "[(H) -20 (ello)] TJ");
+    }
+
+    #[test]
+    fn format_operation_reference() {
+        let op = lopdf::content::Operation::new("Do", vec![Object::Name(b"Im0".to_vec())]);
+        assert_eq!(format_operation(&op), "/Im0 Do");
+    }
+
     // ── compare_metadata ─────────────────────────────────────────────
 
     #[test]
@@ -4010,6 +4779,9 @@ mod tests {
         let p_id = doc.add_object(Object::Dictionary(page));
         let ops = get_content_ops(&doc, p_id);
         assert!(!ops.is_empty(), "Should have operations");
+        assert!(ops.contains(&"BT".to_string()), "Should contain BT, got: {:?}", ops);
+        assert!(ops.contains(&"(Hello) Tj".to_string()), "Should contain readable Tj, got: {:?}", ops);
+        assert!(ops.contains(&"ET".to_string()), "Should contain ET, got: {:?}", ops);
     }
 
     #[test]
@@ -4173,6 +4945,88 @@ mod tests {
         assert!(!pd.dict_diffs.is_empty());
     }
 
+    #[test]
+    fn compare_page_xobject_resource_diff() {
+        let mut doc1 = Document::new();
+        let mut res1 = Dictionary::new();
+        let mut xobj1 = Dictionary::new();
+        xobj1.set("Im0", Object::Null);
+        res1.set("XObject", Object::Dictionary(xobj1));
+        let mut page1 = Dictionary::new();
+        page1.set("Type", Object::Name(b"Page".to_vec()));
+        page1.set("Resources", Object::Dictionary(res1));
+        let p1_id = doc1.add_object(Object::Dictionary(page1));
+
+        let mut doc2 = Document::new();
+        let mut res2 = Dictionary::new();
+        let mut xobj2 = Dictionary::new();
+        xobj2.set("Im0", Object::Null);
+        xobj2.set("Im1", Object::Null);
+        res2.set("XObject", Object::Dictionary(xobj2));
+        let mut page2 = Dictionary::new();
+        page2.set("Type", Object::Name(b"Page".to_vec()));
+        page2.set("Resources", Object::Dictionary(res2));
+        let p2_id = doc2.add_object(Object::Dictionary(page2));
+
+        let pd = compare_page(&doc1, &doc2, p1_id, p2_id, 1);
+        assert!(!pd.identical);
+        assert!(pd.resource_diffs.iter().any(|d| d.contains("XObject") && d.contains("Im1") && d.contains("second")),
+            "Should detect XObject Im1 only in second file, got: {:?}", pd.resource_diffs);
+    }
+
+    #[test]
+    fn compare_page_extgstate_resource_diff() {
+        let mut doc1 = Document::new();
+        let mut res1 = Dictionary::new();
+        let mut gs1 = Dictionary::new();
+        gs1.set("GS0", Object::Null);
+        res1.set("ExtGState", Object::Dictionary(gs1));
+        let mut page1 = Dictionary::new();
+        page1.set("Type", Object::Name(b"Page".to_vec()));
+        page1.set("Resources", Object::Dictionary(res1));
+        let p1_id = doc1.add_object(Object::Dictionary(page1));
+
+        let mut doc2 = Document::new();
+        let mut page2 = Dictionary::new();
+        page2.set("Type", Object::Name(b"Page".to_vec()));
+        let p2_id = doc2.add_object(Object::Dictionary(page2));
+
+        let pd = compare_page(&doc1, &doc2, p1_id, p2_id, 1);
+        assert!(!pd.identical);
+        assert!(pd.resource_diffs.iter().any(|d| d.contains("ExtGState") && d.contains("GS0") && d.contains("first")),
+            "Should detect ExtGState GS0 only in first file, got: {:?}", pd.resource_diffs);
+    }
+
+    #[test]
+    fn compare_page_colorspace_resource_diff() {
+        let mut doc1 = Document::new();
+        let mut res1 = Dictionary::new();
+        let mut cs1 = Dictionary::new();
+        cs1.set("CS0", Object::Null);
+        res1.set("ColorSpace", Object::Dictionary(cs1));
+        let mut page1 = Dictionary::new();
+        page1.set("Type", Object::Name(b"Page".to_vec()));
+        page1.set("Resources", Object::Dictionary(res1));
+        let p1_id = doc1.add_object(Object::Dictionary(page1));
+
+        let mut doc2 = Document::new();
+        let mut res2 = Dictionary::new();
+        let mut cs2 = Dictionary::new();
+        cs2.set("CS1", Object::Null);
+        res2.set("ColorSpace", Object::Dictionary(cs2));
+        let mut page2 = Dictionary::new();
+        page2.set("Type", Object::Name(b"Page".to_vec()));
+        page2.set("Resources", Object::Dictionary(res2));
+        let p2_id = doc2.add_object(Object::Dictionary(page2));
+
+        let pd = compare_page(&doc1, &doc2, p1_id, p2_id, 1);
+        assert!(!pd.identical);
+        assert!(pd.resource_diffs.iter().any(|d| d.contains("ColorSpace") && d.contains("CS0") && d.contains("first")),
+            "Should detect CS0 only in first, got: {:?}", pd.resource_diffs);
+        assert!(pd.resource_diffs.iter().any(|d| d.contains("ColorSpace") && d.contains("CS1") && d.contains("second")),
+            "Should detect CS1 only in second, got: {:?}", pd.resource_diffs);
+    }
+
     // ── compare_pdfs: page filter edge cases ─────────────────────────
 
     #[test]
@@ -4310,7 +5164,7 @@ mod tests {
     fn object_to_json_stream_with_decode_binary() {
         let binary_content: Vec<u8> = vec![0x80; 200];
         let stream = make_stream(None, binary_content);
-        let config = DumpConfig { decode_streams: true, truncate_binary_streams: false, json: true };
+        let config = DumpConfig { decode_streams: true, truncate_binary_streams: false, json: true, hex: false };
         let val = object_to_json(&Object::Stream(stream), &empty_doc(), &config);
         assert_eq!(val["type"], "stream");
         assert!(val.get("content_binary").is_some(), "Binary stream should have content_binary field");
@@ -4320,7 +5174,7 @@ mod tests {
     fn object_to_json_stream_with_decode_binary_truncated() {
         let binary_content: Vec<u8> = vec![0x80; 200];
         let stream = make_stream(None, binary_content);
-        let config = DumpConfig { decode_streams: true, truncate_binary_streams: true, json: true };
+        let config = DumpConfig { decode_streams: true, truncate_binary_streams: true, json: true, hex: false };
         let val = object_to_json(&Object::Stream(stream), &empty_doc(), &config);
         assert_eq!(val["type"], "stream");
         assert!(val.get("content_truncated").is_some(), "Truncated binary should have content_truncated field");
@@ -4329,7 +5183,7 @@ mod tests {
     #[test]
     fn object_to_json_stream_no_decode() {
         let stream = make_stream(None, b"text data".to_vec());
-        let config = DumpConfig { decode_streams: false, truncate_binary_streams: false, json: true };
+        let config = DumpConfig { decode_streams: false, truncate_binary_streams: false, json: true, hex: false };
         let val = object_to_json(&Object::Stream(stream), &empty_doc(), &config);
         assert_eq!(val["type"], "stream");
         assert!(val.get("content").is_none(), "No content when decode_streams=false");
@@ -4588,5 +5442,669 @@ mod tests {
         let parsed: Value = serde_json::from_str(&out).unwrap();
         assert_eq!(parsed["match_count"], 0);
         assert!(parsed["matches"].as_array().unwrap().is_empty());
+    }
+
+    // ── format_hex_dump ─────────────────────────────────────────────
+
+    #[test]
+    fn format_hex_dump_empty() {
+        assert_eq!(format_hex_dump(&[]), "");
+    }
+
+    #[test]
+    fn format_hex_dump_partial_line() {
+        let data = b"Hello";
+        let result = format_hex_dump(data);
+        assert!(result.starts_with("00000000  "));
+        assert!(result.contains("|Hello|"));
+    }
+
+    #[test]
+    fn format_hex_dump_full_line() {
+        let data: Vec<u8> = (0..16).collect();
+        let result = format_hex_dump(&data);
+        assert!(result.starts_with("00000000  "));
+        // First 8 bytes, then space, then next 8 bytes
+        assert!(result.contains("00 01 02 03 04 05 06 07  08 09 0a 0b 0c 0d 0e 0f"));
+    }
+
+    #[test]
+    fn format_hex_dump_multi_line() {
+        let data: Vec<u8> = (0..20).collect();
+        let result = format_hex_dump(&data);
+        let lines: Vec<&str> = result.lines().collect();
+        assert_eq!(lines.len(), 2);
+        assert!(lines[0].starts_with("00000000  "));
+        assert!(lines[1].starts_with("00000010  "));
+    }
+
+    #[test]
+    fn format_hex_dump_ascii_repr() {
+        let data = b"AB\x00\xff";
+        let result = format_hex_dump(data);
+        assert!(result.contains("|AB..|"));
+    }
+
+    #[test]
+    fn hex_mode_binary_stream() {
+        let mut doc = Document::new();
+        let binary_content: Vec<u8> = (0..32).collect();
+        let stream = Stream::new(Dictionary::new(), binary_content);
+        doc.objects.insert((1, 0), Object::Stream(stream));
+        let config = DumpConfig { decode_streams: true, truncate_binary_streams: false, json: false, hex: true };
+        let out = output_of(|w| print_single_object(w, &doc, 1, &config));
+        assert!(out.contains("00000000  "));
+        assert!(!out.contains("---"));
+    }
+
+    #[test]
+    fn hex_mode_text_stream_unaffected() {
+        let mut doc = Document::new();
+        let text_content = b"Hello world".to_vec();
+        let stream = Stream::new(Dictionary::new(), text_content);
+        doc.objects.insert((1, 0), Object::Stream(stream));
+        let config = DumpConfig { decode_streams: true, truncate_binary_streams: false, json: false, hex: true };
+        let out = output_of(|w| print_single_object(w, &doc, 1, &config));
+        // Text streams still use --- delimiters
+        assert!(out.contains("---"));
+    }
+
+    #[test]
+    fn hex_mode_json_shows_content_hex() {
+        let mut doc = Document::new();
+        let binary_content: Vec<u8> = (0..32).collect();
+        let stream = Stream::new(Dictionary::new(), binary_content);
+        doc.objects.insert((1, 0), Object::Stream(stream));
+        let config = DumpConfig { decode_streams: true, truncate_binary_streams: false, json: true, hex: true };
+        let out = output_of(|w| print_single_object_json(w, &doc, 1, &config));
+        let parsed: Value = serde_json::from_str(&out).unwrap();
+        assert!(parsed["object"]["content_hex"].is_string());
+    }
+
+    // ── collect_references_in_object ──────────────────────────────────
+
+    #[test]
+    fn collect_refs_direct_reference() {
+        let target = (5, 0);
+        let obj = Object::Reference(target);
+        let paths = collect_references_in_object(&obj, target, "");
+        assert_eq!(paths.len(), 1);
+        assert_eq!(paths[0], "");
+    }
+
+    #[test]
+    fn collect_refs_in_dict() {
+        let target = (5, 0);
+        let mut dict = Dictionary::new();
+        dict.set(b"Font", Object::Reference(target));
+        let obj = Object::Dictionary(dict);
+        let paths = collect_references_in_object(&obj, target, "");
+        assert_eq!(paths.len(), 1);
+        assert_eq!(paths[0], "/Font");
+    }
+
+    #[test]
+    fn collect_refs_in_array() {
+        let target = (5, 0);
+        let obj = Object::Array(vec![
+            Object::Integer(1),
+            Object::Reference(target),
+        ]);
+        let paths = collect_references_in_object(&obj, target, "");
+        assert_eq!(paths.len(), 1);
+        assert_eq!(paths[0], "[1]");
+    }
+
+    #[test]
+    fn collect_refs_nested_dict() {
+        let target = (5, 0);
+        let mut inner = Dictionary::new();
+        inner.set(b"Ref", Object::Reference(target));
+        let mut outer = Dictionary::new();
+        outer.set(b"Resources", Object::Dictionary(inner));
+        let obj = Object::Dictionary(outer);
+        let paths = collect_references_in_object(&obj, target, "");
+        assert_eq!(paths.len(), 1);
+        assert_eq!(paths[0], "/Resources/Ref");
+    }
+
+    #[test]
+    fn collect_refs_in_stream_dict() {
+        let target = (5, 0);
+        let mut dict = Dictionary::new();
+        dict.set(b"Font", Object::Reference(target));
+        let stream = Stream::new(dict, vec![]);
+        let obj = Object::Stream(stream);
+        let paths = collect_references_in_object(&obj, target, "");
+        assert_eq!(paths.len(), 1);
+        assert_eq!(paths[0], "/Font");
+    }
+
+    #[test]
+    fn collect_refs_no_match() {
+        let target = (5, 0);
+        let obj = Object::Reference((99, 0));
+        let paths = collect_references_in_object(&obj, target, "");
+        assert!(paths.is_empty());
+    }
+
+    #[test]
+    fn print_refs_to_finds_referencing_objects() {
+        let mut doc = Document::new();
+        let target_id: ObjectId = (5, 0);
+        doc.objects.insert(target_id, Object::Integer(42));
+
+        let mut dict = Dictionary::new();
+        dict.set(b"Font", Object::Reference(target_id));
+        doc.objects.insert((1, 0), Object::Dictionary(dict));
+
+        let out = output_of(|w| print_refs_to(w, &doc, 5));
+        assert!(out.contains("Found 1 objects referencing 5 0 R."));
+        assert!(out.contains("/Font"));
+    }
+
+    #[test]
+    fn print_refs_to_no_references() {
+        let mut doc = Document::new();
+        doc.objects.insert((5, 0), Object::Integer(42));
+        let out = output_of(|w| print_refs_to(w, &doc, 5));
+        assert!(out.contains("Found 0 objects referencing 5 0 R."));
+    }
+
+    #[test]
+    fn print_refs_to_json_produces_valid_json() {
+        let mut doc = Document::new();
+        let target_id: ObjectId = (5, 0);
+        doc.objects.insert(target_id, Object::Integer(42));
+
+        let mut dict = Dictionary::new();
+        dict.set(b"Font", Object::Reference(target_id));
+        doc.objects.insert((1, 0), Object::Dictionary(dict));
+
+        let out = output_of(|w| print_refs_to_json(w, &doc, 5));
+        let parsed: Value = serde_json::from_str(&out).unwrap();
+        assert_eq!(parsed["target_object"], 5);
+        assert_eq!(parsed["reference_count"], 1);
+        assert!(parsed["references"].is_array());
+    }
+
+    // ── collect_fonts / print_fonts ──────────────────────────────────
+
+    #[test]
+    fn collect_fonts_finds_typed_font() {
+        let mut doc = Document::new();
+        let mut dict = Dictionary::new();
+        dict.set(b"Type", Object::Name(b"Font".to_vec()));
+        dict.set(b"Subtype", Object::Name(b"Type1".to_vec()));
+        dict.set(b"BaseFont", Object::Name(b"Helvetica".to_vec()));
+        dict.set(b"Encoding", Object::Name(b"WinAnsiEncoding".to_vec()));
+        doc.objects.insert((1, 0), Object::Dictionary(dict));
+
+        let fonts = collect_fonts(&doc);
+        assert_eq!(fonts.len(), 1);
+        assert_eq!(fonts[0].base_font, "Helvetica");
+        assert_eq!(fonts[0].subtype, "Type1");
+        assert_eq!(fonts[0].encoding, "WinAnsiEncoding");
+        assert!(fonts[0].embedded.is_none());
+    }
+
+    #[test]
+    fn collect_fonts_by_subtype_only() {
+        let mut doc = Document::new();
+        let mut dict = Dictionary::new();
+        // No /Type=Font, but has a font subtype
+        dict.set(b"Subtype", Object::Name(b"TrueType".to_vec()));
+        dict.set(b"BaseFont", Object::Name(b"Arial".to_vec()));
+        doc.objects.insert((1, 0), Object::Dictionary(dict));
+
+        let fonts = collect_fonts(&doc);
+        assert_eq!(fonts.len(), 1);
+        assert_eq!(fonts[0].subtype, "TrueType");
+    }
+
+    #[test]
+    fn collect_fonts_detects_embedded() {
+        let mut doc = Document::new();
+        // FontFile stream
+        let ff_stream = Stream::new(Dictionary::new(), vec![0, 1, 2]);
+        doc.objects.insert((3, 0), Object::Stream(ff_stream));
+
+        // FontDescriptor with FontFile2 reference
+        let mut fd_dict = Dictionary::new();
+        fd_dict.set(b"FontFile2", Object::Reference((3, 0)));
+        doc.objects.insert((2, 0), Object::Dictionary(fd_dict));
+
+        // Font
+        let mut font_dict = Dictionary::new();
+        font_dict.set(b"Type", Object::Name(b"Font".to_vec()));
+        font_dict.set(b"Subtype", Object::Name(b"TrueType".to_vec()));
+        font_dict.set(b"BaseFont", Object::Name(b"MyFont".to_vec()));
+        font_dict.set(b"FontDescriptor", Object::Reference((2, 0)));
+        doc.objects.insert((1, 0), Object::Dictionary(font_dict));
+
+        let fonts = collect_fonts(&doc);
+        assert_eq!(fonts.len(), 1);
+        assert_eq!(fonts[0].embedded, Some((3, 0)));
+    }
+
+    #[test]
+    fn collect_fonts_without_basefont() {
+        let mut doc = Document::new();
+        let mut dict = Dictionary::new();
+        dict.set(b"Type", Object::Name(b"Font".to_vec()));
+        dict.set(b"Subtype", Object::Name(b"Type3".to_vec()));
+        doc.objects.insert((1, 0), Object::Dictionary(dict));
+
+        let fonts = collect_fonts(&doc);
+        assert_eq!(fonts.len(), 1);
+        assert_eq!(fonts[0].base_font, "-");
+    }
+
+    #[test]
+    fn collect_fonts_no_fonts_in_doc() {
+        let mut doc = Document::new();
+        doc.objects.insert((1, 0), Object::Integer(42));
+        let fonts = collect_fonts(&doc);
+        assert!(fonts.is_empty());
+    }
+
+    #[test]
+    fn print_fonts_text_output() {
+        let mut doc = Document::new();
+        let mut dict = Dictionary::new();
+        dict.set(b"Type", Object::Name(b"Font".to_vec()));
+        dict.set(b"Subtype", Object::Name(b"Type1".to_vec()));
+        dict.set(b"BaseFont", Object::Name(b"Helvetica".to_vec()));
+        dict.set(b"Encoding", Object::Name(b"WinAnsiEncoding".to_vec()));
+        doc.objects.insert((1, 0), Object::Dictionary(dict));
+
+        let out = output_of(|w| print_fonts(w, &doc));
+        assert!(out.contains("1 fonts found"));
+        assert!(out.contains("Helvetica"));
+        assert!(out.contains("Type1"));
+    }
+
+    #[test]
+    fn print_fonts_json_produces_valid_json() {
+        let mut doc = Document::new();
+        let mut dict = Dictionary::new();
+        dict.set(b"Type", Object::Name(b"Font".to_vec()));
+        dict.set(b"Subtype", Object::Name(b"Type1".to_vec()));
+        dict.set(b"BaseFont", Object::Name(b"Helvetica".to_vec()));
+        doc.objects.insert((1, 0), Object::Dictionary(dict));
+
+        let out = output_of(|w| print_fonts_json(w, &doc));
+        let parsed: Value = serde_json::from_str(&out).unwrap();
+        assert_eq!(parsed["font_count"], 1);
+        assert_eq!(parsed["fonts"][0]["base_font"], "Helvetica");
+    }
+
+    // ── collect_images / print_images ────────────────────────────────
+
+    #[test]
+    fn collect_images_finds_image_stream() {
+        let mut doc = Document::new();
+        let mut dict = Dictionary::new();
+        dict.set(b"Subtype", Object::Name(b"Image".to_vec()));
+        dict.set(b"Width", Object::Integer(100));
+        dict.set(b"Height", Object::Integer(200));
+        dict.set(b"ColorSpace", Object::Name(b"DeviceRGB".to_vec()));
+        dict.set(b"BitsPerComponent", Object::Integer(8));
+        dict.set(b"Filter", Object::Name(b"FlateDecode".to_vec()));
+        let stream = Stream::new(dict, vec![0; 500]);
+        doc.objects.insert((1, 0), Object::Stream(stream));
+
+        let images = collect_images(&doc);
+        assert_eq!(images.len(), 1);
+        assert_eq!(images[0].width, 100);
+        assert_eq!(images[0].height, 200);
+        assert_eq!(images[0].color_space, "DeviceRGB");
+        assert_eq!(images[0].bits_per_component, 8);
+        assert_eq!(images[0].filter, "FlateDecode");
+        assert_eq!(images[0].size, 500);
+    }
+
+    #[test]
+    fn collect_images_dict_not_stream() {
+        let mut doc = Document::new();
+        let mut dict = Dictionary::new();
+        dict.set(b"Subtype", Object::Name(b"Image".to_vec()));
+        // Dictionary, not Stream — should not match
+        doc.objects.insert((1, 0), Object::Dictionary(dict));
+
+        let images = collect_images(&doc);
+        assert!(images.is_empty());
+    }
+
+    #[test]
+    fn collect_images_icc_color_space() {
+        let mut doc = Document::new();
+        let mut dict = Dictionary::new();
+        dict.set(b"Subtype", Object::Name(b"Image".to_vec()));
+        dict.set(b"Width", Object::Integer(50));
+        dict.set(b"Height", Object::Integer(50));
+        dict.set(b"ColorSpace", Object::Array(vec![
+            Object::Name(b"ICCBased".to_vec()),
+            Object::Reference((2, 0)),
+        ]));
+        dict.set(b"BitsPerComponent", Object::Integer(8));
+        let stream = Stream::new(dict, vec![0; 100]);
+        doc.objects.insert((1, 0), Object::Stream(stream));
+
+        let images = collect_images(&doc);
+        assert_eq!(images.len(), 1);
+        assert!(images[0].color_space.contains("ICCBased"));
+    }
+
+    #[test]
+    fn collect_images_filter_array() {
+        let mut doc = Document::new();
+        let mut dict = Dictionary::new();
+        dict.set(b"Subtype", Object::Name(b"Image".to_vec()));
+        dict.set(b"Width", Object::Integer(10));
+        dict.set(b"Height", Object::Integer(10));
+        dict.set(b"Filter", Object::Array(vec![
+            Object::Name(b"FlateDecode".to_vec()),
+            Object::Name(b"DCTDecode".to_vec()),
+        ]));
+        let stream = Stream::new(dict, vec![0; 50]);
+        doc.objects.insert((1, 0), Object::Stream(stream));
+
+        let images = collect_images(&doc);
+        assert_eq!(images.len(), 1);
+        assert!(images[0].filter.contains("FlateDecode"));
+        assert!(images[0].filter.contains("DCTDecode"));
+    }
+
+    #[test]
+    fn collect_images_no_images() {
+        let mut doc = Document::new();
+        doc.objects.insert((1, 0), Object::Integer(42));
+        let images = collect_images(&doc);
+        assert!(images.is_empty());
+    }
+
+    #[test]
+    fn print_images_text_output() {
+        let mut doc = Document::new();
+        let mut dict = Dictionary::new();
+        dict.set(b"Subtype", Object::Name(b"Image".to_vec()));
+        dict.set(b"Width", Object::Integer(640));
+        dict.set(b"Height", Object::Integer(480));
+        dict.set(b"ColorSpace", Object::Name(b"DeviceRGB".to_vec()));
+        dict.set(b"BitsPerComponent", Object::Integer(8));
+        let stream = Stream::new(dict, vec![0; 1000]);
+        doc.objects.insert((1, 0), Object::Stream(stream));
+
+        let out = output_of(|w| print_images(w, &doc));
+        assert!(out.contains("1 images found"));
+        assert!(out.contains("640"));
+        assert!(out.contains("480"));
+    }
+
+    #[test]
+    fn print_images_json_produces_valid_json() {
+        let mut doc = Document::new();
+        let mut dict = Dictionary::new();
+        dict.set(b"Subtype", Object::Name(b"Image".to_vec()));
+        dict.set(b"Width", Object::Integer(100));
+        dict.set(b"Height", Object::Integer(200));
+        let stream = Stream::new(dict, vec![0; 300]);
+        doc.objects.insert((1, 0), Object::Stream(stream));
+
+        let out = output_of(|w| print_images_json(w, &doc));
+        let parsed: Value = serde_json::from_str(&out).unwrap();
+        assert_eq!(parsed["image_count"], 1);
+        assert_eq!(parsed["images"][0]["width"], 100);
+        assert_eq!(parsed["images"][0]["height"], 200);
+    }
+
+    // ── format_color_space / format_filter ────────────────────────────
+
+    #[test]
+    fn format_color_space_name() {
+        let doc = Document::new();
+        let obj = Object::Name(b"DeviceGray".to_vec());
+        assert_eq!(format_color_space(&obj, &doc), "DeviceGray");
+    }
+
+    #[test]
+    fn format_color_space_array() {
+        let doc = Document::new();
+        let obj = Object::Array(vec![
+            Object::Name(b"ICCBased".to_vec()),
+            Object::Integer(5),
+        ]);
+        assert_eq!(format_color_space(&obj, &doc), "[ICCBased 5]");
+    }
+
+    #[test]
+    fn format_filter_name() {
+        let obj = Object::Name(b"DCTDecode".to_vec());
+        assert_eq!(format_filter(&obj), "DCTDecode");
+    }
+
+    #[test]
+    fn format_filter_array() {
+        let obj = Object::Array(vec![
+            Object::Name(b"FlateDecode".to_vec()),
+            Object::Name(b"ASCII85Decode".to_vec()),
+        ]);
+        assert_eq!(format_filter(&obj), "FlateDecode, ASCII85Decode");
+    }
+
+    // ── validate_pdf / check functions ────────────────────────────────
+
+    #[test]
+    fn validate_empty_doc_reports_missing_root() {
+        let doc = Document::new();
+        let report = validate_pdf(&doc);
+        assert!(report.issues.iter().any(|i|
+            i.level == ValidationLevel::Error && i.message.contains("Trailer missing /Root")));
+    }
+
+    #[test]
+    fn check_broken_references_detects_broken() {
+        let mut doc = Document::new();
+        let mut dict = Dictionary::new();
+        dict.set(b"Ref", Object::Reference((99, 0)));
+        doc.objects.insert((1, 0), Object::Dictionary(dict));
+
+        let mut issues = Vec::new();
+        check_broken_references(&doc, &mut issues);
+        assert_eq!(issues.len(), 1);
+        assert!(issues[0].message.contains("99"));
+    }
+
+    #[test]
+    fn check_broken_references_valid() {
+        let mut doc = Document::new();
+        doc.objects.insert((2, 0), Object::Integer(42));
+        let mut dict = Dictionary::new();
+        dict.set(b"Ref", Object::Reference((2, 0)));
+        doc.objects.insert((1, 0), Object::Dictionary(dict));
+
+        let mut issues = Vec::new();
+        check_broken_references(&doc, &mut issues);
+        assert!(issues.is_empty());
+    }
+
+    #[test]
+    fn collect_broken_refs_in_array() {
+        let mut doc = Document::new();
+        let obj = Object::Array(vec![Object::Reference((99, 0))]);
+        doc.objects.insert((1, 0), obj.clone());
+
+        let broken = collect_broken_refs(&obj, &doc);
+        assert_eq!(broken.len(), 1);
+    }
+
+    #[test]
+    fn collect_broken_refs_in_stream_dict() {
+        let mut doc = Document::new();
+        let mut dict = Dictionary::new();
+        dict.set(b"Ref", Object::Reference((99, 0)));
+        let stream = Stream::new(dict, vec![]);
+        let obj = Object::Stream(stream);
+        doc.objects.insert((1, 0), obj.clone());
+
+        let broken = collect_broken_refs(&obj, &doc);
+        assert_eq!(broken.len(), 1);
+    }
+
+    #[test]
+    fn collect_reachable_ids_from_trailer() {
+        let mut doc = Document::new();
+        doc.objects.insert((1, 0), Object::Integer(42));
+        doc.objects.insert((2, 0), Object::Integer(99)); // unreachable
+        doc.trailer.set(b"Root", Object::Reference((1, 0)));
+
+        let reachable = collect_reachable_ids(&doc);
+        assert!(reachable.contains(&(1, 0)));
+        assert!(!reachable.contains(&(2, 0)));
+    }
+
+    #[test]
+    fn check_unreachable_objects_finds_orphans() {
+        let mut doc = Document::new();
+        doc.objects.insert((1, 0), Object::Integer(42));
+        doc.objects.insert((2, 0), Object::Integer(99));
+        doc.trailer.set(b"Root", Object::Reference((1, 0)));
+
+        let mut issues = Vec::new();
+        check_unreachable_objects(&doc, &mut issues);
+        assert_eq!(issues.len(), 1);
+        assert!(issues[0].message.contains("2 0"));
+    }
+
+    #[test]
+    fn check_stream_lengths_mismatch() {
+        let mut doc = Document::new();
+        let mut stream = Stream::new(Dictionary::new(), vec![0; 10]);
+        // Override /Length after construction to simulate a mismatch
+        stream.dict.set(b"Length", Object::Integer(999));
+        doc.objects.insert((1, 0), Object::Stream(stream));
+
+        let mut issues = Vec::new();
+        check_stream_lengths(&doc, &mut issues);
+        assert_eq!(issues.len(), 1);
+        assert!(issues[0].message.contains("999"));
+        assert!(issues[0].message.contains("10"));
+    }
+
+    #[test]
+    fn check_stream_lengths_correct() {
+        let mut doc = Document::new();
+        let mut dict = Dictionary::new();
+        dict.set(b"Length", Object::Integer(10));
+        let stream = Stream::new(dict, vec![0; 10]);
+        doc.objects.insert((1, 0), Object::Stream(stream));
+
+        let mut issues = Vec::new();
+        check_stream_lengths(&doc, &mut issues);
+        assert!(issues.is_empty());
+    }
+
+    #[test]
+    fn page_has_media_box_direct() {
+        let mut doc = Document::new();
+        let mut page_dict = Dictionary::new();
+        page_dict.set(b"MediaBox", Object::Array(vec![
+            Object::Integer(0), Object::Integer(0),
+            Object::Integer(612), Object::Integer(792),
+        ]));
+        doc.objects.insert((1, 0), Object::Dictionary(page_dict));
+
+        assert!(page_has_media_box(&doc, (1, 0)));
+    }
+
+    #[test]
+    fn page_has_media_box_inherited() {
+        let mut doc = Document::new();
+        // Parent has MediaBox
+        let mut parent = Dictionary::new();
+        parent.set(b"Type", Object::Name(b"Pages".to_vec()));
+        parent.set(b"MediaBox", Object::Array(vec![
+            Object::Integer(0), Object::Integer(0),
+            Object::Integer(612), Object::Integer(792),
+        ]));
+        doc.objects.insert((2, 0), Object::Dictionary(parent));
+
+        // Page without MediaBox, has Parent
+        let mut page = Dictionary::new();
+        page.set(b"Type", Object::Name(b"Page".to_vec()));
+        page.set(b"Parent", Object::Reference((2, 0)));
+        doc.objects.insert((1, 0), Object::Dictionary(page));
+
+        assert!(page_has_media_box(&doc, (1, 0)));
+    }
+
+    #[test]
+    fn page_has_media_box_missing() {
+        let mut doc = Document::new();
+        let mut page = Dictionary::new();
+        page.set(b"Type", Object::Name(b"Page".to_vec()));
+        doc.objects.insert((1, 0), Object::Dictionary(page));
+
+        assert!(!page_has_media_box(&doc, (1, 0)));
+    }
+
+    #[test]
+    fn print_validation_no_issues() {
+        // Build a minimal valid PDF
+        let mut doc = Document::new();
+        let mut catalog = Dictionary::new();
+        let mut pages = Dictionary::new();
+        pages.set(b"Type", Object::Name(b"Pages".to_vec()));
+        pages.set(b"Count", Object::Integer(0));
+        pages.set(b"Kids", Object::Array(vec![]));
+        doc.objects.insert((2, 0), Object::Dictionary(pages));
+        catalog.set(b"Type", Object::Name(b"Catalog".to_vec()));
+        catalog.set(b"Pages", Object::Reference((2, 0)));
+        doc.objects.insert((1, 0), Object::Dictionary(catalog));
+        doc.trailer.set(b"Root", Object::Reference((1, 0)));
+
+        let out = output_of(|w| print_validation(w, &doc));
+        assert!(out.contains("[OK]"));
+    }
+
+    #[test]
+    fn print_validation_json_produces_valid_json() {
+        let doc = Document::new();
+        let out = output_of(|w| print_validation_json(w, &doc));
+        let parsed: Value = serde_json::from_str(&out).unwrap();
+        assert!(parsed["error_count"].is_number());
+        assert!(parsed["warning_count"].is_number());
+        assert!(parsed["issues"].is_array());
+    }
+
+    #[test]
+    fn print_validation_shows_errors_and_summary() {
+        let doc = Document::new();
+        let out = output_of(|w| print_validation(w, &doc));
+        assert!(out.contains("[ERROR]"));
+        assert!(out.contains("Summary:"));
+    }
+
+    #[test]
+    fn check_page_tree_count_mismatch() {
+        let mut doc = Document::new();
+        // Pages says Count=5 but no actual pages
+        let mut pages_dict = Dictionary::new();
+        pages_dict.set(b"Type", Object::Name(b"Pages".to_vec()));
+        pages_dict.set(b"Count", Object::Integer(5));
+        pages_dict.set(b"Kids", Object::Array(vec![]));
+        doc.objects.insert((2, 0), Object::Dictionary(pages_dict));
+
+        let mut catalog = Dictionary::new();
+        catalog.set(b"Type", Object::Name(b"Catalog".to_vec()));
+        catalog.set(b"Pages", Object::Reference((2, 0)));
+        doc.objects.insert((1, 0), Object::Dictionary(catalog));
+        doc.trailer.set(b"Root", Object::Reference((1, 0)));
+
+        let mut issues = Vec::new();
+        check_page_tree(&doc, &mut issues);
+        assert_eq!(issues.len(), 1);
+        assert!(issues[0].message.contains("/Pages /Count is 5"));
     }
 }
