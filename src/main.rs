@@ -133,6 +133,10 @@ struct Args {
     #[arg(long)]
     raw: bool,
 
+    /// Show bidirectional reference context (use with --object)
+    #[arg(long)]
+    context: bool,
+
     /// Show encryption and permission details
     #[arg(long)]
     security: bool,
@@ -156,6 +160,10 @@ struct Args {
     /// Show tagged PDF logical structure tree
     #[arg(long)]
     structure: bool,
+
+    /// Show a human-readable explanation of an object's role
+    #[arg(long)]
+    info: Option<u32>,
 }
 
 #[derive(Clone, Copy)]
@@ -272,6 +280,7 @@ fn main() {
         args.links && args.page.is_none(),
         args.layers,
         args.structure,
+        args.info.is_some(),
     ].iter().filter(|&&b| b).count();
     if mode_count > 1 {
         eprintln!("Error: Only one mode flag may be used at a time.");
@@ -288,6 +297,13 @@ fn main() {
             eprintln!("Error: --raw and --decode-streams cannot be used together.");
             std::process::exit(1);
         }
+    }
+
+    // --context validation: requires --object
+    if args.context
+        && args.object.is_none() {
+        eprintln!("Error: --context requires --object.");
+        std::process::exit(1);
     }
 
     // --diff validation: only works with default mode, --page, and --json
@@ -315,7 +331,8 @@ fn main() {
             || args.page_labels
             || args.links
             || args.layers
-            || args.structure;
+            || args.structure
+            || args.info.is_some();
         if incompatible {
             eprintln!("Error: --diff can only be combined with --page and --json.");
             std::process::exit(1);
@@ -442,6 +459,13 @@ fn main() {
         } else {
             print_forms(&mut out, &doc);
         }
+    } else if let Some(info_num) = args.info {
+        let mut out = io::stdout().lock();
+        if config.json {
+            print_info_json(&mut out, &doc, info_num);
+        } else {
+            print_info(&mut out, &doc, info_num);
+        }
     } else if let Some(target) = args.refs_to {
         let mut out = io::stdout().lock();
         if config.json {
@@ -551,7 +575,13 @@ fn main() {
         }
     } else if let Some(ref nums) = object_nums {
         let mut out = io::stdout().lock();
-        if config.json {
+        if args.context {
+            if config.json {
+                print_object_context_json(&mut out, &doc, nums, &config);
+            } else {
+                print_object_context(&mut out, &doc, nums, &config);
+            }
+        } else if config.json {
             print_objects_json(&mut out, &doc, nums, &config);
         } else {
             print_objects(&mut out, &doc, nums, &config);
@@ -1099,6 +1129,127 @@ fn print_objects_json(writer: &mut impl Write, doc: &Document, nums: &[u32], con
         let output = json!({"objects": items});
         writeln!(writer, "{}", serde_json::to_string_pretty(&output).unwrap()).unwrap();
     }
+}
+
+// ── Object context (--object N --context) ────────────────────────────
+
+fn print_object_context(writer: &mut impl Write, doc: &Document, nums: &[u32], config: &DumpConfig) {
+    for (i, &obj_num) in nums.iter().enumerate() {
+        if i > 0 { writeln!(writer, "\n================================\n").unwrap(); }
+        print_single_object_context(writer, doc, obj_num, config);
+    }
+}
+
+fn print_single_object_context(writer: &mut impl Write, doc: &Document, obj_num: u32, config: &DumpConfig) {
+    let obj_id = (obj_num, 0);
+    let object = match doc.get_object(obj_id) {
+        Ok(obj) => obj,
+        Err(_) => {
+            eprintln!("Error: Object {} not found in the document.", obj_num);
+            std::process::exit(1);
+        }
+    };
+
+    // Section 1: The object itself
+    writeln!(writer, "Object {} 0:", obj_num).unwrap();
+    let visited = BTreeSet::new();
+    let mut child_refs = BTreeSet::new();
+    print_object(writer, object, doc, &visited, 1, config, false, &mut child_refs);
+    writeln!(writer).unwrap();
+
+    // Section 2: Forward references (what this object references)
+    let forward_refs = collect_refs_with_paths(object);
+    writeln!(writer, "\nReferences from this object:").unwrap();
+    if forward_refs.is_empty() {
+        writeln!(writer, "  (none)").unwrap();
+    } else {
+        for (path, ref_id) in &forward_refs {
+            let summary = if let Ok(resolved) = doc.get_object(*ref_id) {
+                deref_summary(resolved, doc)
+            } else {
+                "(not found)".to_string()
+            };
+            writeln!(writer, "  {} -> {} {} R  {}", path, ref_id.0, ref_id.1, summary).unwrap();
+        }
+    }
+
+    // Section 3: Reverse references (what references this object)
+    let target_id = (obj_num, 0);
+    writeln!(writer, "\nReferenced by:").unwrap();
+    let mut rev_count = 0;
+    for (&(src_num, src_gen), src_object) in &doc.objects {
+        let paths = collect_references_in_object(src_object, target_id, "");
+        if !paths.is_empty() {
+            rev_count += 1;
+            let kind = src_object.enum_variant();
+            let type_label = object_type_label(src_object);
+            let via = paths.join(", ");
+            writeln!(writer, "  {:>4}  {:>3}  {:<13} {:<14} via {}", src_num, src_gen, kind, type_label, via).unwrap();
+        }
+    }
+    if rev_count == 0 {
+        writeln!(writer, "  (none)").unwrap();
+    }
+}
+
+fn print_object_context_json(writer: &mut impl Write, doc: &Document, nums: &[u32], config: &DumpConfig) {
+    if nums.len() == 1 {
+        let val = single_object_context_json(doc, nums[0], config);
+        writeln!(writer, "{}", serde_json::to_string_pretty(&val).unwrap()).unwrap();
+    } else {
+        let items: Vec<Value> = nums.iter().map(|&n| single_object_context_json(doc, n, config)).collect();
+        let output = json!({"objects": items});
+        writeln!(writer, "{}", serde_json::to_string_pretty(&output).unwrap()).unwrap();
+    }
+}
+
+fn single_object_context_json(doc: &Document, obj_num: u32, config: &DumpConfig) -> Value {
+    let obj_id = (obj_num, 0);
+    let object = match doc.get_object(obj_id) {
+        Ok(obj) => obj,
+        Err(_) => {
+            return json!({
+                "object_number": obj_num,
+                "generation": 0,
+                "error": "not found",
+            });
+        }
+    };
+
+    let forward_refs = collect_refs_with_paths(object);
+    let refs_to: Vec<Value> = forward_refs.iter().map(|(path, ref_id)| {
+        let mut entry = json!({
+            "path": path,
+            "object_number": ref_id.0,
+            "generation": ref_id.1,
+        });
+        if let Ok(resolved) = doc.get_object(*ref_id) {
+            entry["summary"] = json!(deref_summary(resolved, doc));
+        }
+        entry
+    }).collect();
+
+    let target_id = (obj_num, 0);
+    let mut referenced_by = Vec::new();
+    for (&(src_num, src_gen), src_object) in &doc.objects {
+        let paths = collect_references_in_object(src_object, target_id, "");
+        if !paths.is_empty() {
+            referenced_by.push(json!({
+                "object_number": src_num,
+                "generation": src_gen,
+                "type": object_type_label(src_object),
+                "via_keys": paths,
+            }));
+        }
+    }
+
+    json!({
+        "object_number": obj_num,
+        "generation": 0,
+        "object": object_to_json(object, doc, config),
+        "references_to": refs_to,
+        "referenced_by": referenced_by,
+    })
 }
 
 fn print_summary(writer: &mut impl Write, doc: &Document) {
@@ -5793,6 +5944,409 @@ fn struct_elem_to_json(elem: &StructElemInfo, depth: usize, config: &DumpConfig)
         obj["children"] = json!(children);
     }
     obj
+}
+
+// ── Info mode (--info N) ─────────────────────────────────────────────
+
+fn classify_object(doc: &Document, obj_num: u32, object: &Object) -> (String, String, Vec<(String, String)>) {
+    let dict = match object {
+        Object::Dictionary(d) => Some(d),
+        Object::Stream(s) => Some(&s.dict),
+        _ => None,
+    };
+
+    if let Some(dict) = dict {
+        let type_name = dict.get_type().ok().map(|t| String::from_utf8_lossy(t).into_owned());
+        let subtype = dict.get(b"Subtype").ok()
+            .and_then(|v| v.as_name().ok().map(|n| String::from_utf8_lossy(n).into_owned()));
+
+        match type_name.as_deref() {
+            Some("Catalog") => {
+                let page_count = dict.get(b"Pages").ok()
+                    .and_then(|p| p.as_reference().ok())
+                    .and_then(|r| doc.get_object(r).ok())
+                    .and_then(|o| match o {
+                        Object::Dictionary(d) => d.get(b"Count").ok().and_then(|c| c.as_i64().ok()),
+                        _ => None,
+                    });
+                let mut details = Vec::new();
+                if let Some(count) = page_count {
+                    details.push(("Pages".to_string(), count.to_string()));
+                }
+                return ("Catalog".to_string(), format!("Object {} is the document catalog (root object).", obj_num), details);
+            }
+            Some("Pages") => {
+                let count = dict.get(b"Count").ok().and_then(|c| c.as_i64().ok());
+                let mut details = Vec::new();
+                if let Some(c) = count {
+                    details.push(("Count".to_string(), c.to_string()));
+                }
+                return ("Page Tree".to_string(), format!("Object {} is a page tree node.", obj_num), details);
+            }
+            Some("Page") => {
+                let pages = doc.get_pages();
+                let page_num = pages.iter().find(|(_, id)| **id == (obj_num, 0)).map(|(n, _)| *n);
+                let mut details = Vec::new();
+                if let Some(n) = page_num {
+                    details.push(("Page Number".to_string(), n.to_string()));
+                }
+                if let Ok(mb) = dict.get(b"MediaBox") {
+                    details.push(("MediaBox".to_string(), format_dict_value(mb)));
+                }
+                let desc = if let Some(n) = page_num {
+                    format!("Object {} is page {}.", obj_num, n)
+                } else {
+                    format!("Object {} is a page.", obj_num)
+                };
+                return ("Page".to_string(), desc, details);
+            }
+            Some("Font") => {
+                return classify_font(obj_num, dict);
+            }
+            Some("Annot") => {
+                let sub = subtype.as_deref().unwrap_or("unknown");
+                let mut details = vec![("Subtype".to_string(), sub.to_string())];
+                if let Ok(rect) = dict.get(b"Rect") {
+                    details.push(("Rect".to_string(), format_dict_value(rect)));
+                }
+                return ("Annotation".to_string(), format!("Object {} is a {} annotation.", obj_num, sub), details);
+            }
+            Some("Action") => {
+                let action_type = dict.get(b"S").ok()
+                    .and_then(|v| v.as_name().ok().map(|n| String::from_utf8_lossy(n).into_owned()))
+                    .unwrap_or_else(|| "unknown".to_string());
+                let details = vec![("Action Type".to_string(), action_type.clone())];
+                return ("Action".to_string(), format!("Object {} is a {} action.", obj_num, action_type), details);
+            }
+            Some("FontDescriptor") => {
+                let font_name = dict.get(b"FontName").ok()
+                    .and_then(|v| v.as_name().ok().map(|n| String::from_utf8_lossy(n).into_owned()))
+                    .unwrap_or_else(|| "-".to_string());
+                let mut details = vec![("FontName".to_string(), font_name.clone())];
+                for key in [b"FontFile".as_slice(), b"FontFile2", b"FontFile3"] {
+                    if let Ok(v) = dict.get(key) {
+                        details.push(("Embedded".to_string(), format!("{} ({})", format_dict_value(v), String::from_utf8_lossy(key))));
+                    }
+                }
+                return ("Font Descriptor".to_string(), format!("Object {} is a font descriptor for {}.", obj_num, font_name), details);
+            }
+            Some("Encoding") => {
+                let base = dict.get(b"BaseEncoding").ok()
+                    .and_then(|v| v.as_name().ok().map(|n| String::from_utf8_lossy(n).into_owned()))
+                    .unwrap_or_else(|| "-".to_string());
+                let has_diffs = dict.get(b"Differences").is_ok();
+                let mut details = vec![("BaseEncoding".to_string(), base.clone())];
+                if has_diffs { details.push(("Differences".to_string(), "yes".to_string())); }
+                return ("Encoding".to_string(), format!("Object {} is a font encoding ({}).", obj_num, base), details);
+            }
+            Some("ExtGState") => {
+                let keys: Vec<String> = dict.iter()
+                    .map(|(k, _)| format!("/{}", String::from_utf8_lossy(k)))
+                    .collect();
+                let details = vec![("Keys".to_string(), keys.join(", "))];
+                return ("Graphics State".to_string(), format!("Object {} is an extended graphics state.", obj_num), details);
+            }
+            Some("XRef") => {
+                return ("XRef Stream".to_string(), format!("Object {} is a cross-reference stream.", obj_num), vec![]);
+            }
+            Some("ObjStm") => {
+                return ("Object Stream".to_string(), format!("Object {} is an object stream.", obj_num), vec![]);
+            }
+            _ => {}
+        }
+
+        // Check subtype for things without /Type
+        if let Some(ref sub) = subtype {
+            match sub.as_str() {
+                "Image" => {
+                    return classify_image(obj_num, dict, doc, object);
+                }
+                "Form" => {
+                    let mut details = Vec::new();
+                    if let Ok(bbox) = dict.get(b"BBox") {
+                        details.push(("BBox".to_string(), format_dict_value(bbox)));
+                    }
+                    return ("Form XObject".to_string(), format!("Object {} is a form XObject.", obj_num), details);
+                }
+                "Type1" | "TrueType" | "Type0" | "CIDFontType0" | "CIDFontType2" | "MMType1" | "Type3" => {
+                    return classify_font(obj_num, dict);
+                }
+                _ => {}
+            }
+        }
+
+        // Generic dictionary/stream
+        let kind = if matches!(object, Object::Stream(_)) { "stream" } else { "dictionary" };
+        let key_count = dict.len();
+        let mut details = vec![("Keys".to_string(), key_count.to_string())];
+        if let Some(ref t) = type_name {
+            details.insert(0, ("Type".to_string(), t.clone()));
+        }
+        if let Some(ref s) = subtype {
+            details.insert(if type_name.is_some() { 1 } else { 0 }, ("Subtype".to_string(), s.clone()));
+        }
+        if let Object::Stream(stream) = object {
+            details.push(("Stream Size".to_string(), format!("{} bytes", stream.content.len())));
+        }
+        return ("Generic".to_string(), format!("Object {} is a {} with {} keys.", obj_num, kind, key_count), details);
+    }
+
+    // Primitive types
+    let (role, desc) = match object {
+        Object::Integer(i) => ("Integer".to_string(), format!("Object {} is an integer: {}.", obj_num, i)),
+        Object::Real(r) => ("Real".to_string(), format!("Object {} is a real number: {}.", obj_num, r)),
+        Object::Boolean(b) => ("Boolean".to_string(), format!("Object {} is a boolean: {}.", obj_num, b)),
+        Object::String(bytes, _) => ("String".to_string(), format!("Object {} is a string: ({}).", obj_num, String::from_utf8_lossy(bytes))),
+        Object::Name(n) => ("Name".to_string(), format!("Object {} is a name: /{}.", obj_num, String::from_utf8_lossy(n))),
+        Object::Array(arr) => ("Array".to_string(), format!("Object {} is an array with {} items.", obj_num, arr.len())),
+        Object::Null => ("Null".to_string(), format!("Object {} is null.", obj_num)),
+        Object::Reference(id) => ("Reference".to_string(), format!("Object {} is a reference to {} {} R.", obj_num, id.0, id.1)),
+        _ => ("Unknown".to_string(), format!("Object {} has an unknown type.", obj_num)),
+    };
+    (role, desc, vec![])
+}
+
+fn classify_font(obj_num: u32, dict: &lopdf::Dictionary) -> (String, String, Vec<(String, String)>) {
+    let base_font = dict.get(b"BaseFont").ok()
+        .and_then(|v| v.as_name().ok().map(|n| String::from_utf8_lossy(n).into_owned()))
+        .unwrap_or_else(|| "-".to_string());
+    let subtype = dict.get(b"Subtype").ok()
+        .and_then(|v| v.as_name().ok().map(|n| String::from_utf8_lossy(n).into_owned()))
+        .unwrap_or_else(|| "-".to_string());
+    let encoding = dict.get(b"Encoding").ok()
+        .map(|v| match v {
+            Object::Name(n) => String::from_utf8_lossy(n).into_owned(),
+            Object::Reference(id) => format!("{} {} R", id.0, id.1),
+            _ => format_dict_value(v),
+        })
+        .unwrap_or_else(|| "-".to_string());
+
+    let has_descriptor = dict.get(b"FontDescriptor").is_ok();
+    let embedded = if has_descriptor {
+        if let Ok(Object::Reference(desc_ref)) = dict.get(b"FontDescriptor") {
+            // We can't resolve the reference here easily, so just note it exists
+            format!("FontDescriptor at {} {} R", desc_ref.0, desc_ref.1)
+        } else {
+            "has FontDescriptor".to_string()
+        }
+    } else {
+        "no FontDescriptor".to_string()
+    };
+
+    let has_tounicode = dict.get(b"ToUnicode").is_ok();
+
+    let mut details = vec![
+        ("BaseFont".to_string(), base_font.clone()),
+        ("Subtype".to_string(), subtype.clone()),
+        ("Encoding".to_string(), encoding),
+        ("FontDescriptor".to_string(), embedded),
+        ("ToUnicode".to_string(), if has_tounicode { "yes" } else { "no" }.to_string()),
+    ];
+
+    if let Ok(fc) = dict.get(b"FirstChar").and_then(|v| v.as_i64()) {
+        details.push(("FirstChar".to_string(), fc.to_string()));
+    }
+    if let Ok(lc) = dict.get(b"LastChar").and_then(|v| v.as_i64()) {
+        details.push(("LastChar".to_string(), lc.to_string()));
+    }
+
+    let desc = format!("Object {} is a {} font ({}).", obj_num, subtype, base_font);
+    ("Font".to_string(), desc, details)
+}
+
+fn classify_image(obj_num: u32, dict: &lopdf::Dictionary, doc: &Document, object: &Object) -> (String, String, Vec<(String, String)>) {
+    let width = dict.get(b"Width").ok().and_then(|v| v.as_i64().ok());
+    let height = dict.get(b"Height").ok().and_then(|v| v.as_i64().ok());
+    let bpc = dict.get(b"BitsPerComponent").ok().and_then(|v| v.as_i64().ok());
+    let cs = dict.get(b"ColorSpace").ok().map(|v| format_color_space(v, doc));
+    let filter = dict.get(b"Filter").ok().map(format_filter);
+    let stream_size = if let Object::Stream(s) = object { Some(s.content.len()) } else { None };
+
+    let mut details = Vec::new();
+    let mut dim_parts = Vec::new();
+    if let Some(w) = width {
+        details.push(("Width".to_string(), w.to_string()));
+        dim_parts.push(w.to_string());
+    }
+    if let Some(h) = height {
+        details.push(("Height".to_string(), h.to_string()));
+        dim_parts.push(h.to_string());
+    }
+    if let Some(ref c) = cs {
+        details.push(("ColorSpace".to_string(), c.clone()));
+    }
+    if let Some(b) = bpc {
+        details.push(("BitsPerComponent".to_string(), b.to_string()));
+    }
+    if let Some(ref f) = filter {
+        details.push(("Filter".to_string(), f.clone()));
+    }
+    if let Some(size) = stream_size {
+        details.push(("Stream Size".to_string(), format!("{} bytes", size)));
+    }
+
+    let dims = if dim_parts.len() == 2 { format!(" ({}x{})", dim_parts[0], dim_parts[1]) } else { String::new() };
+    let cs_str = cs.as_deref().unwrap_or("");
+    let desc = format!("Object {} is an image{}{}.", obj_num, dims,
+        if !cs_str.is_empty() { format!(", {}", cs_str) } else { String::new() });
+    ("Image".to_string(), desc, details)
+}
+
+fn find_page_associations(doc: &Document, obj_num: u32) -> Vec<u32> {
+    let target_id: ObjectId = (obj_num, 0);
+    let pages = doc.get_pages();
+    let mut result = Vec::new();
+
+    for (&page_num, &page_id) in &pages {
+        if let Ok(page_obj) = doc.get_object(page_id) {
+            // Check direct references in page dict
+            let paths = collect_references_in_object(page_obj, target_id, "");
+            if !paths.is_empty() {
+                result.push(page_num);
+                continue;
+            }
+            // Check one level into /Resources
+            let dict = match page_obj {
+                Object::Dictionary(d) => d,
+                Object::Stream(s) => &s.dict,
+                _ => continue,
+            };
+            if let Ok(Object::Reference(res_ref)) = dict.get(b"Resources")
+                && let Ok(res_obj) = doc.get_object(*res_ref) {
+                let res_paths = collect_references_in_object(res_obj, target_id, "");
+                if !res_paths.is_empty() {
+                    result.push(page_num);
+                }
+            }
+        }
+    }
+
+    result.sort();
+    result
+}
+
+fn print_info(writer: &mut impl Write, doc: &Document, obj_num: u32) {
+    let obj_id = (obj_num, 0);
+    let object = match doc.get_object(obj_id) {
+        Ok(obj) => obj,
+        Err(_) => {
+            eprintln!("Error: Object {} not found in the document.", obj_num);
+            std::process::exit(1);
+        }
+    };
+
+    let (role, description, details) = classify_object(doc, obj_num, object);
+
+    writeln!(writer, "{}", description).unwrap();
+    writeln!(writer, "\nRole: {}", role).unwrap();
+    writeln!(writer, "Kind: {}", object.enum_variant()).unwrap();
+
+    if !details.is_empty() {
+        writeln!(writer, "\nDetails:").unwrap();
+        for (key, value) in &details {
+            writeln!(writer, "  {}: {}", key, value).unwrap();
+        }
+    }
+
+    // Page associations
+    let page_assoc = find_page_associations(doc, obj_num);
+    if !page_assoc.is_empty() {
+        let pages_str: Vec<String> = page_assoc.iter().map(|p| p.to_string()).collect();
+        writeln!(writer, "\nReferenced by pages: {}", pages_str.join(", ")).unwrap();
+    }
+
+    // Forward references
+    let forward_refs = collect_refs_with_paths(object);
+    if !forward_refs.is_empty() {
+        writeln!(writer, "\nReferences from this object:").unwrap();
+        for (path, ref_id) in &forward_refs {
+            let summary = if let Ok(resolved) = doc.get_object(*ref_id) {
+                deref_summary(resolved, doc)
+            } else {
+                "(not found)".to_string()
+            };
+            writeln!(writer, "  {} -> {} {} R  {}", path, ref_id.0, ref_id.1, summary).unwrap();
+        }
+    }
+
+    // Reverse references
+    let target_id = (obj_num, 0);
+    let mut rev_entries = Vec::new();
+    for (&(src_num, src_gen), src_object) in &doc.objects {
+        let paths = collect_references_in_object(src_object, target_id, "");
+        if !paths.is_empty() {
+            rev_entries.push((src_num, src_gen, object_type_label(src_object), paths));
+        }
+    }
+    if !rev_entries.is_empty() {
+        writeln!(writer, "\nReferenced by:").unwrap();
+        for (src_num, src_gen, type_label, paths) in &rev_entries {
+            writeln!(writer, "  {} {} ({}) via {}", src_num, src_gen, type_label, paths.join(", ")).unwrap();
+        }
+    }
+}
+
+fn print_info_json(writer: &mut impl Write, doc: &Document, obj_num: u32) {
+    let obj_id = (obj_num, 0);
+    let object = match doc.get_object(obj_id) {
+        Ok(obj) => obj,
+        Err(_) => {
+            let output = json!({
+                "object_number": obj_num,
+                "error": "not found",
+            });
+            writeln!(writer, "{}", serde_json::to_string_pretty(&output).unwrap()).unwrap();
+            return;
+        }
+    };
+
+    let (role, description, details) = classify_object(doc, obj_num, object);
+
+    let forward_refs = collect_refs_with_paths(object);
+    let refs_to: Vec<Value> = forward_refs.iter().map(|(path, ref_id)| {
+        let mut entry = json!({
+            "path": path,
+            "object_number": ref_id.0,
+            "generation": ref_id.1,
+        });
+        if let Ok(resolved) = doc.get_object(*ref_id) {
+            entry["summary"] = json!(deref_summary(resolved, doc));
+        }
+        entry
+    }).collect();
+
+    let target_id = (obj_num, 0);
+    let mut referenced_by = Vec::new();
+    for (&(src_num, src_gen), src_object) in &doc.objects {
+        let paths = collect_references_in_object(src_object, target_id, "");
+        if !paths.is_empty() {
+            referenced_by.push(json!({
+                "object_number": src_num,
+                "generation": src_gen,
+                "type": object_type_label(src_object),
+                "via_keys": paths,
+            }));
+        }
+    }
+
+    let page_assoc = find_page_associations(doc, obj_num);
+
+    let details_map: serde_json::Map<String, Value> = details.into_iter()
+        .map(|(k, v)| (k, json!(v)))
+        .collect();
+
+    let output = json!({
+        "object_number": obj_num,
+        "generation": 0,
+        "role": role,
+        "description": description,
+        "kind": format!("{}", object.enum_variant()),
+        "details": details_map,
+        "page_associations": page_assoc,
+        "references": refs_to,
+        "referenced_by": referenced_by,
+    });
+    writeln!(writer, "{}", serde_json::to_string_pretty(&output).unwrap()).unwrap();
 }
 
 #[cfg(test)]
@@ -15840,5 +16394,706 @@ mod tests {
         assert_eq!(tree.len(), 2);
         assert_eq!(tree[0].role, "P");
         assert_eq!(tree[1].role, "Span");
+    }
+
+    // ── Object context (--object N --context) ────────────────────────
+
+    #[test]
+    fn context_shows_object_and_forward_refs() {
+        let mut doc = Document::new();
+        doc.objects.insert((5, 0), Object::Integer(99));
+        let mut dict = Dictionary::new();
+        dict.set("Ref", Object::Reference((5, 0)));
+        doc.objects.insert((1, 0), Object::Dictionary(dict));
+
+        let config = default_config();
+        let out = output_of(|w| print_object_context(w, &doc, &[1], &config));
+        assert!(out.contains("Object 1 0:"));
+        assert!(out.contains("References from this object:"));
+        assert!(out.contains("/Ref -> 5 0 R"));
+        assert!(out.contains("Referenced by:"));
+    }
+
+    #[test]
+    fn context_shows_reverse_refs() {
+        let mut doc = Document::new();
+        doc.objects.insert((5, 0), Object::Integer(99));
+        let mut dict = Dictionary::new();
+        dict.set("Target", Object::Reference((5, 0)));
+        doc.objects.insert((1, 0), Object::Dictionary(dict));
+
+        let config = default_config();
+        let out = output_of(|w| print_object_context(w, &doc, &[5], &config));
+        assert!(out.contains("Object 5 0:"));
+        assert!(out.contains("References from this object:"));
+        assert!(out.contains("(none)"));
+        assert!(out.contains("Referenced by:"));
+        assert!(out.contains("via /Target"));
+    }
+
+    #[test]
+    fn context_no_refs_shows_none() {
+        let mut doc = Document::new();
+        doc.objects.insert((5, 0), Object::Integer(42));
+
+        let config = default_config();
+        let out = output_of(|w| print_object_context(w, &doc, &[5], &config));
+        assert!(out.contains("References from this object:"));
+        assert!(out.contains("Referenced by:"));
+        // Both sections should show (none)
+        assert_eq!(out.matches("(none)").count(), 2);
+    }
+
+    #[test]
+    fn context_multiple_objects() {
+        let mut doc = Document::new();
+        doc.objects.insert((1, 0), Object::Integer(10));
+        doc.objects.insert((2, 0), Object::Integer(20));
+
+        let config = default_config();
+        let out = output_of(|w| print_object_context(w, &doc, &[1, 2], &config));
+        assert!(out.contains("Object 1 0:"));
+        assert!(out.contains("Object 2 0:"));
+        assert!(out.contains("================================"));
+    }
+
+    #[test]
+    fn context_json_single() {
+        let mut doc = Document::new();
+        doc.objects.insert((5, 0), Object::Integer(42));
+        let mut dict = Dictionary::new();
+        dict.set("Ref", Object::Reference((5, 0)));
+        doc.objects.insert((1, 0), Object::Dictionary(dict));
+
+        let config = default_config();
+        let out = output_of(|w| print_object_context_json(w, &doc, &[1], &config));
+        let val: Value = serde_json::from_str(&out).unwrap();
+        assert_eq!(val["object_number"], 1);
+        assert!(val["object"].is_object());
+        assert!(val["references_to"].is_array());
+        assert!(val["referenced_by"].is_array());
+    }
+
+    #[test]
+    fn context_json_multiple() {
+        let mut doc = Document::new();
+        doc.objects.insert((1, 0), Object::Integer(10));
+        doc.objects.insert((2, 0), Object::Integer(20));
+
+        let config = default_config();
+        let out = output_of(|w| print_object_context_json(w, &doc, &[1, 2], &config));
+        let val: Value = serde_json::from_str(&out).unwrap();
+        assert!(val["objects"].is_array());
+        assert_eq!(val["objects"].as_array().unwrap().len(), 2);
+    }
+
+    #[test]
+    fn context_json_forward_ref_has_summary() {
+        let mut doc = Document::new();
+        doc.objects.insert((5, 0), Object::Integer(99));
+        let mut dict = Dictionary::new();
+        dict.set("MyRef", Object::Reference((5, 0)));
+        doc.objects.insert((1, 0), Object::Dictionary(dict));
+
+        let config = default_config();
+        let out = output_of(|w| print_object_context_json(w, &doc, &[1], &config));
+        let val: Value = serde_json::from_str(&out).unwrap();
+        let refs = val["references_to"].as_array().unwrap();
+        assert_eq!(refs.len(), 1);
+        assert_eq!(refs[0]["path"], "/MyRef");
+        assert_eq!(refs[0]["object_number"], 5);
+        assert!(refs[0]["summary"].is_string());
+    }
+
+    #[test]
+    fn context_json_reverse_ref_has_via_keys() {
+        let mut doc = Document::new();
+        doc.objects.insert((5, 0), Object::Integer(42));
+        let mut dict = Dictionary::new();
+        dict.set("Target", Object::Reference((5, 0)));
+        doc.objects.insert((1, 0), Object::Dictionary(dict));
+
+        let config = default_config();
+        let out = output_of(|w| print_object_context_json(w, &doc, &[5], &config));
+        let val: Value = serde_json::from_str(&out).unwrap();
+        let rev = val["referenced_by"].as_array().unwrap();
+        assert_eq!(rev.len(), 1);
+        assert_eq!(rev[0]["object_number"], 1);
+        let via = rev[0]["via_keys"].as_array().unwrap();
+        assert!(via.iter().any(|v| v.as_str().unwrap().contains("Target")));
+    }
+
+    // ── Info mode (--info N) ─────────────────────────────────────────
+
+    #[test]
+    fn classify_object_catalog() {
+        let mut doc = Document::new();
+        let mut pages = Dictionary::new();
+        pages.set("Type", Object::Name(b"Pages".to_vec()));
+        pages.set("Count", Object::Integer(3));
+        doc.objects.insert((2, 0), Object::Dictionary(pages));
+
+        let mut catalog = Dictionary::new();
+        catalog.set("Type", Object::Name(b"Catalog".to_vec()));
+        catalog.set("Pages", Object::Reference((2, 0)));
+        doc.objects.insert((1, 0), Object::Dictionary(catalog.clone()));
+
+        let obj = Object::Dictionary(catalog);
+        let (role, desc, details) = classify_object(&doc, 1, &obj);
+        assert_eq!(role, "Catalog");
+        assert!(desc.contains("document catalog"));
+        assert!(details.iter().any(|(k, v)| k == "Pages" && v == "3"));
+    }
+
+    #[test]
+    fn classify_object_font() {
+        let doc = Document::new();
+        let mut dict = Dictionary::new();
+        dict.set("Type", Object::Name(b"Font".to_vec()));
+        dict.set("Subtype", Object::Name(b"Type1".to_vec()));
+        dict.set("BaseFont", Object::Name(b"Helvetica".to_vec()));
+        dict.set("Encoding", Object::Name(b"WinAnsiEncoding".to_vec()));
+        let obj = Object::Dictionary(dict);
+
+        let (role, desc, details) = classify_object(&doc, 10, &obj);
+        assert_eq!(role, "Font");
+        assert!(desc.contains("Type1"));
+        assert!(desc.contains("Helvetica"));
+        assert!(details.iter().any(|(k, v)| k == "BaseFont" && v == "Helvetica"));
+        assert!(details.iter().any(|(k, v)| k == "Encoding" && v == "WinAnsiEncoding"));
+    }
+
+    #[test]
+    fn classify_object_page() {
+        let mut doc = Document::new();
+        let mut page_tree = Dictionary::new();
+        page_tree.set("Type", Object::Name(b"Pages".to_vec()));
+        page_tree.set("Kids", Object::Array(vec![Object::Reference((3, 0))]));
+        page_tree.set("Count", Object::Integer(1));
+        doc.objects.insert((2, 0), Object::Dictionary(page_tree));
+
+        let mut page = Dictionary::new();
+        page.set("Type", Object::Name(b"Page".to_vec()));
+        page.set("Parent", Object::Reference((2, 0)));
+        page.set("MediaBox", Object::Array(vec![
+            Object::Integer(0), Object::Integer(0),
+            Object::Integer(612), Object::Integer(792),
+        ]));
+        doc.objects.insert((3, 0), Object::Dictionary(page.clone()));
+
+        let mut catalog = Dictionary::new();
+        catalog.set("Type", Object::Name(b"Catalog".to_vec()));
+        catalog.set("Pages", Object::Reference((2, 0)));
+        doc.objects.insert((1, 0), Object::Dictionary(catalog));
+        doc.trailer.set("Root", Object::Reference((1, 0)));
+
+        let obj = Object::Dictionary(page);
+        let (role, desc, details) = classify_object(&doc, 3, &obj);
+        assert_eq!(role, "Page");
+        assert!(desc.contains("page 1") || desc.contains("page"));
+        assert!(details.iter().any(|(k, _)| k == "MediaBox"));
+    }
+
+    #[test]
+    fn classify_object_image() {
+        let doc = Document::new();
+        let mut dict = Dictionary::new();
+        dict.set("Subtype", Object::Name(b"Image".to_vec()));
+        dict.set("Width", Object::Integer(100));
+        dict.set("Height", Object::Integer(200));
+        dict.set("ColorSpace", Object::Name(b"DeviceRGB".to_vec()));
+        dict.set("BitsPerComponent", Object::Integer(8));
+        let stream = Stream::new(dict, vec![0u8; 50]);
+        let obj = Object::Stream(stream);
+
+        let (role, desc, details) = classify_object(&doc, 7, &obj);
+        assert_eq!(role, "Image");
+        assert!(desc.contains("100x200"));
+        assert!(details.iter().any(|(k, v)| k == "Width" && v == "100"));
+        assert!(details.iter().any(|(k, v)| k == "Height" && v == "200"));
+    }
+
+    #[test]
+    fn classify_object_annotation() {
+        let doc = Document::new();
+        let mut dict = Dictionary::new();
+        dict.set("Type", Object::Name(b"Annot".to_vec()));
+        dict.set("Subtype", Object::Name(b"Link".to_vec()));
+        dict.set("Rect", Object::Array(vec![
+            Object::Integer(0), Object::Integer(0),
+            Object::Integer(100), Object::Integer(50),
+        ]));
+        let obj = Object::Dictionary(dict);
+
+        let (role, desc, _) = classify_object(&doc, 8, &obj);
+        assert_eq!(role, "Annotation");
+        assert!(desc.contains("Link"));
+    }
+
+    #[test]
+    fn classify_object_action() {
+        let doc = Document::new();
+        let mut dict = Dictionary::new();
+        dict.set("Type", Object::Name(b"Action".to_vec()));
+        dict.set("S", Object::Name(b"URI".to_vec()));
+        let obj = Object::Dictionary(dict);
+
+        let (role, desc, details) = classify_object(&doc, 9, &obj);
+        assert_eq!(role, "Action");
+        assert!(desc.contains("URI"));
+        assert!(details.iter().any(|(k, v)| k == "Action Type" && v == "URI"));
+    }
+
+    #[test]
+    fn classify_object_integer() {
+        let doc = Document::new();
+        let obj = Object::Integer(42);
+        let (role, desc, _) = classify_object(&doc, 5, &obj);
+        assert_eq!(role, "Integer");
+        assert!(desc.contains("42"));
+    }
+
+    #[test]
+    fn classify_object_string() {
+        let doc = Document::new();
+        let obj = Object::String(b"hello".to_vec(), StringFormat::Literal);
+        let (role, desc, _) = classify_object(&doc, 5, &obj);
+        assert_eq!(role, "String");
+        assert!(desc.contains("hello"));
+    }
+
+    #[test]
+    fn classify_object_array() {
+        let doc = Document::new();
+        let obj = Object::Array(vec![Object::Integer(1), Object::Integer(2)]);
+        let (role, desc, _) = classify_object(&doc, 5, &obj);
+        assert_eq!(role, "Array");
+        assert!(desc.contains("2 items"));
+    }
+
+    #[test]
+    fn classify_object_generic_dict() {
+        let doc = Document::new();
+        let mut dict = Dictionary::new();
+        dict.set("Foo", Object::Integer(1));
+        dict.set("Bar", Object::Integer(2));
+        let obj = Object::Dictionary(dict);
+
+        let (role, desc, details) = classify_object(&doc, 5, &obj);
+        assert_eq!(role, "Generic");
+        assert!(desc.contains("dictionary"));
+        assert!(details.iter().any(|(k, _)| k == "Keys"));
+    }
+
+    #[test]
+    fn classify_object_font_descriptor() {
+        let doc = Document::new();
+        let mut dict = Dictionary::new();
+        dict.set("Type", Object::Name(b"FontDescriptor".to_vec()));
+        dict.set("FontName", Object::Name(b"Helvetica".to_vec()));
+        let obj = Object::Dictionary(dict);
+
+        let (role, desc, _) = classify_object(&doc, 5, &obj);
+        assert_eq!(role, "Font Descriptor");
+        assert!(desc.contains("Helvetica"));
+    }
+
+    #[test]
+    fn classify_object_encoding() {
+        let doc = Document::new();
+        let mut dict = Dictionary::new();
+        dict.set("Type", Object::Name(b"Encoding".to_vec()));
+        dict.set("BaseEncoding", Object::Name(b"WinAnsiEncoding".to_vec()));
+        let obj = Object::Dictionary(dict);
+
+        let (role, desc, _) = classify_object(&doc, 5, &obj);
+        assert_eq!(role, "Encoding");
+        assert!(desc.contains("WinAnsiEncoding"));
+    }
+
+    #[test]
+    fn classify_object_ext_gstate() {
+        let doc = Document::new();
+        let mut dict = Dictionary::new();
+        dict.set("Type", Object::Name(b"ExtGState".to_vec()));
+        dict.set("CA", Object::Real(0.5));
+        let obj = Object::Dictionary(dict);
+
+        let (role, desc, _) = classify_object(&doc, 5, &obj);
+        assert_eq!(role, "Graphics State");
+        assert!(desc.contains("extended graphics state"));
+    }
+
+    #[test]
+    fn classify_object_form_xobject() {
+        let doc = Document::new();
+        let mut dict = Dictionary::new();
+        dict.set("Subtype", Object::Name(b"Form".to_vec()));
+        dict.set("BBox", Object::Array(vec![
+            Object::Integer(0), Object::Integer(0),
+            Object::Integer(100), Object::Integer(100),
+        ]));
+        let obj = Object::Dictionary(dict);
+
+        let (role, desc, details) = classify_object(&doc, 5, &obj);
+        assert_eq!(role, "Form XObject");
+        assert!(desc.contains("form XObject"));
+        assert!(details.iter().any(|(k, _)| k == "BBox"));
+    }
+
+    #[test]
+    fn classify_object_pages_tree() {
+        let doc = Document::new();
+        let mut dict = Dictionary::new();
+        dict.set("Type", Object::Name(b"Pages".to_vec()));
+        dict.set("Count", Object::Integer(5));
+        let obj = Object::Dictionary(dict);
+
+        let (role, _, details) = classify_object(&doc, 2, &obj);
+        assert_eq!(role, "Page Tree");
+        assert!(details.iter().any(|(k, v)| k == "Count" && v == "5"));
+    }
+
+    #[test]
+    fn find_page_associations_finds_direct_ref() {
+        let mut doc = Document::new();
+
+        // Font object
+        let mut font = Dictionary::new();
+        font.set("Type", Object::Name(b"Font".to_vec()));
+        font.set("BaseFont", Object::Name(b"Helvetica".to_vec()));
+        doc.objects.insert((5, 0), Object::Dictionary(font));
+
+        // Page that references the font
+        let mut page = Dictionary::new();
+        page.set("Type", Object::Name(b"Page".to_vec()));
+        page.set("Parent", Object::Reference((2, 0)));
+        let mut res = Dictionary::new();
+        let mut font_dict = Dictionary::new();
+        font_dict.set("F1", Object::Reference((5, 0)));
+        res.set("Font", Object::Dictionary(font_dict));
+        page.set("Resources", Object::Dictionary(res));
+        doc.objects.insert((3, 0), Object::Dictionary(page));
+
+        // Page tree
+        let mut pages_dict = Dictionary::new();
+        pages_dict.set("Type", Object::Name(b"Pages".to_vec()));
+        pages_dict.set("Kids", Object::Array(vec![Object::Reference((3, 0))]));
+        pages_dict.set("Count", Object::Integer(1));
+        doc.objects.insert((2, 0), Object::Dictionary(pages_dict));
+
+        let mut catalog = Dictionary::new();
+        catalog.set("Type", Object::Name(b"Catalog".to_vec()));
+        catalog.set("Pages", Object::Reference((2, 0)));
+        doc.objects.insert((1, 0), Object::Dictionary(catalog));
+        doc.trailer.set("Root", Object::Reference((1, 0)));
+
+        let assoc = find_page_associations(&doc, 5);
+        assert_eq!(assoc, vec![1]);
+    }
+
+    #[test]
+    fn find_page_associations_no_association() {
+        let mut doc = Document::new();
+        doc.objects.insert((5, 0), Object::Integer(42));
+
+        let mut page = Dictionary::new();
+        page.set("Type", Object::Name(b"Page".to_vec()));
+        page.set("Parent", Object::Reference((2, 0)));
+        doc.objects.insert((3, 0), Object::Dictionary(page));
+
+        let mut pages_dict = Dictionary::new();
+        pages_dict.set("Type", Object::Name(b"Pages".to_vec()));
+        pages_dict.set("Kids", Object::Array(vec![Object::Reference((3, 0))]));
+        pages_dict.set("Count", Object::Integer(1));
+        doc.objects.insert((2, 0), Object::Dictionary(pages_dict));
+
+        let mut catalog = Dictionary::new();
+        catalog.set("Type", Object::Name(b"Catalog".to_vec()));
+        catalog.set("Pages", Object::Reference((2, 0)));
+        doc.objects.insert((1, 0), Object::Dictionary(catalog));
+        doc.trailer.set("Root", Object::Reference((1, 0)));
+
+        let assoc = find_page_associations(&doc, 5);
+        assert!(assoc.is_empty());
+    }
+
+    #[test]
+    fn print_info_shows_role_and_details() {
+        let mut doc = Document::new();
+        let mut font = Dictionary::new();
+        font.set("Type", Object::Name(b"Font".to_vec()));
+        font.set("Subtype", Object::Name(b"Type1".to_vec()));
+        font.set("BaseFont", Object::Name(b"Courier".to_vec()));
+        doc.objects.insert((5, 0), Object::Dictionary(font));
+
+        let out = output_of(|w| print_info(w, &doc, 5));
+        assert!(out.contains("Type1 font (Courier)"));
+        assert!(out.contains("Role: Font"));
+        assert!(out.contains("Kind: Dictionary"));
+        assert!(out.contains("BaseFont: Courier"));
+    }
+
+    #[test]
+    fn print_info_shows_reverse_refs() {
+        let mut doc = Document::new();
+        doc.objects.insert((5, 0), Object::Integer(42));
+        let mut dict = Dictionary::new();
+        dict.set("Value", Object::Reference((5, 0)));
+        doc.objects.insert((1, 0), Object::Dictionary(dict));
+
+        let out = output_of(|w| print_info(w, &doc, 5));
+        assert!(out.contains("Referenced by:"));
+        assert!(out.contains("1 0"));
+    }
+
+    #[test]
+    fn print_info_json_valid() {
+        let mut doc = Document::new();
+        let mut font = Dictionary::new();
+        font.set("Type", Object::Name(b"Font".to_vec()));
+        font.set("Subtype", Object::Name(b"TrueType".to_vec()));
+        font.set("BaseFont", Object::Name(b"Arial".to_vec()));
+        doc.objects.insert((10, 0), Object::Dictionary(font));
+
+        let out = output_of(|w| print_info_json(w, &doc, 10));
+        let val: Value = serde_json::from_str(&out).unwrap();
+        assert_eq!(val["object_number"], 10);
+        assert_eq!(val["role"], "Font");
+        assert!(val["description"].as_str().unwrap().contains("Arial"));
+        assert!(val["details"].is_object());
+        assert!(val["page_associations"].is_array());
+        assert!(val["references"].is_array());
+        assert!(val["referenced_by"].is_array());
+    }
+
+    #[test]
+    fn print_info_json_with_page_associations() {
+        let mut doc = Document::new();
+
+        let mut font = Dictionary::new();
+        font.set("Type", Object::Name(b"Font".to_vec()));
+        font.set("BaseFont", Object::Name(b"Helvetica".to_vec()));
+        doc.objects.insert((5, 0), Object::Dictionary(font));
+
+        let mut page = Dictionary::new();
+        page.set("Type", Object::Name(b"Page".to_vec()));
+        page.set("Parent", Object::Reference((2, 0)));
+        let mut res = Dictionary::new();
+        let mut font_dict = Dictionary::new();
+        font_dict.set("F1", Object::Reference((5, 0)));
+        res.set("Font", Object::Dictionary(font_dict));
+        page.set("Resources", Object::Dictionary(res));
+        doc.objects.insert((3, 0), Object::Dictionary(page));
+
+        let mut pages_dict = Dictionary::new();
+        pages_dict.set("Type", Object::Name(b"Pages".to_vec()));
+        pages_dict.set("Kids", Object::Array(vec![Object::Reference((3, 0))]));
+        pages_dict.set("Count", Object::Integer(1));
+        doc.objects.insert((2, 0), Object::Dictionary(pages_dict));
+
+        let mut catalog = Dictionary::new();
+        catalog.set("Type", Object::Name(b"Catalog".to_vec()));
+        catalog.set("Pages", Object::Reference((2, 0)));
+        doc.objects.insert((1, 0), Object::Dictionary(catalog));
+        doc.trailer.set("Root", Object::Reference((1, 0)));
+
+        let out = output_of(|w| print_info_json(w, &doc, 5));
+        let val: Value = serde_json::from_str(&out).unwrap();
+        let pages = val["page_associations"].as_array().unwrap();
+        assert_eq!(pages, &[1]);
+    }
+
+    #[test]
+    fn print_info_integer_object() {
+        let mut doc = Document::new();
+        doc.objects.insert((5, 0), Object::Integer(42));
+
+        let out = output_of(|w| print_info(w, &doc, 5));
+        assert!(out.contains("integer: 42"));
+        assert!(out.contains("Role: Integer"));
+    }
+
+    #[test]
+    fn print_info_json_integer_object() {
+        let mut doc = Document::new();
+        doc.objects.insert((5, 0), Object::Integer(42));
+
+        let out = output_of(|w| print_info_json(w, &doc, 5));
+        let val: Value = serde_json::from_str(&out).unwrap();
+        assert_eq!(val["role"], "Integer");
+        assert_eq!(val["object_number"], 5);
+    }
+
+    #[test]
+    fn context_with_stream_object() {
+        let mut doc = Document::new();
+        let mut dict = Dictionary::new();
+        dict.set("Length", Object::Integer(5));
+        let stream = Stream::new(dict, b"hello".to_vec());
+        doc.objects.insert((5, 0), Object::Stream(stream));
+
+        let config = default_config();
+        let out = output_of(|w| print_object_context(w, &doc, &[5], &config));
+        assert!(out.contains("Object 5 0:"));
+        assert!(out.contains("stream"));
+    }
+
+    #[test]
+    fn classify_object_xref_stream() {
+        let doc = Document::new();
+        let mut dict = Dictionary::new();
+        dict.set("Type", Object::Name(b"XRef".to_vec()));
+        let obj = Object::Dictionary(dict);
+        let (role, desc, _) = classify_object(&doc, 5, &obj);
+        assert_eq!(role, "XRef Stream");
+        assert!(desc.contains("cross-reference stream"));
+    }
+
+    #[test]
+    fn classify_object_obj_stream() {
+        let doc = Document::new();
+        let mut dict = Dictionary::new();
+        dict.set("Type", Object::Name(b"ObjStm".to_vec()));
+        let obj = Object::Dictionary(dict);
+        let (role, desc, _) = classify_object(&doc, 5, &obj);
+        assert_eq!(role, "Object Stream");
+        assert!(desc.contains("object stream"));
+    }
+
+    #[test]
+    fn classify_object_null() {
+        let doc = Document::new();
+        let obj = Object::Null;
+        let (role, _, _) = classify_object(&doc, 5, &obj);
+        assert_eq!(role, "Null");
+    }
+
+    #[test]
+    fn classify_object_boolean() {
+        let doc = Document::new();
+        let obj = Object::Boolean(true);
+        let (role, desc, _) = classify_object(&doc, 5, &obj);
+        assert_eq!(role, "Boolean");
+        assert!(desc.contains("true"));
+    }
+
+    #[test]
+    fn classify_object_real() {
+        let doc = Document::new();
+        let obj = Object::Real(3.14);
+        let (role, desc, _) = classify_object(&doc, 5, &obj);
+        assert_eq!(role, "Real");
+        assert!(desc.contains("3.14"));
+    }
+
+    #[test]
+    fn classify_object_name() {
+        let doc = Document::new();
+        let obj = Object::Name(b"Test".to_vec());
+        let (role, desc, _) = classify_object(&doc, 5, &obj);
+        assert_eq!(role, "Name");
+        assert!(desc.contains("Test"));
+    }
+
+    #[test]
+    fn classify_font_by_subtype_only() {
+        let doc = Document::new();
+        let mut dict = Dictionary::new();
+        dict.set("Subtype", Object::Name(b"TrueType".to_vec()));
+        dict.set("BaseFont", Object::Name(b"TimesNewRoman".to_vec()));
+        let obj = Object::Dictionary(dict);
+
+        let (role, desc, _) = classify_object(&doc, 5, &obj);
+        assert_eq!(role, "Font");
+        assert!(desc.contains("TrueType"));
+        assert!(desc.contains("TimesNewRoman"));
+    }
+
+    #[test]
+    fn print_info_shows_forward_refs() {
+        let mut doc = Document::new();
+        let mut dict = Dictionary::new();
+        dict.set("Font", Object::Reference((10, 0)));
+        doc.objects.insert((5, 0), Object::Dictionary(dict));
+        doc.objects.insert((10, 0), Object::Integer(99));
+
+        let out = output_of(|w| print_info(w, &doc, 5));
+        assert!(out.contains("References from this object:"));
+        assert!(out.contains("/Font -> 10 0 R"));
+    }
+
+    #[test]
+    fn print_info_page_associations_text() {
+        let mut doc = Document::new();
+
+        let mut font = Dictionary::new();
+        font.set("Type", Object::Name(b"Font".to_vec()));
+        font.set("BaseFont", Object::Name(b"Helvetica".to_vec()));
+        doc.objects.insert((5, 0), Object::Dictionary(font));
+
+        let mut page = Dictionary::new();
+        page.set("Type", Object::Name(b"Page".to_vec()));
+        page.set("Parent", Object::Reference((2, 0)));
+        let mut res = Dictionary::new();
+        let mut font_dict = Dictionary::new();
+        font_dict.set("F1", Object::Reference((5, 0)));
+        res.set("Font", Object::Dictionary(font_dict));
+        page.set("Resources", Object::Dictionary(res));
+        doc.objects.insert((3, 0), Object::Dictionary(page));
+
+        let mut pages_dict = Dictionary::new();
+        pages_dict.set("Type", Object::Name(b"Pages".to_vec()));
+        pages_dict.set("Kids", Object::Array(vec![Object::Reference((3, 0))]));
+        pages_dict.set("Count", Object::Integer(1));
+        doc.objects.insert((2, 0), Object::Dictionary(pages_dict));
+
+        let mut catalog = Dictionary::new();
+        catalog.set("Type", Object::Name(b"Catalog".to_vec()));
+        catalog.set("Pages", Object::Reference((2, 0)));
+        doc.objects.insert((1, 0), Object::Dictionary(catalog));
+        doc.trailer.set("Root", Object::Reference((1, 0)));
+
+        let out = output_of(|w| print_info(w, &doc, 5));
+        assert!(out.contains("Referenced by pages: 1"));
+    }
+
+    #[test]
+    fn find_page_associations_via_resource_ref() {
+        let mut doc = Document::new();
+
+        // Font object
+        let mut font = Dictionary::new();
+        font.set("Type", Object::Name(b"Font".to_vec()));
+        doc.objects.insert((5, 0), Object::Dictionary(font));
+
+        // Resources dict as separate object with ref to font
+        let mut res = Dictionary::new();
+        let mut font_dict = Dictionary::new();
+        font_dict.set("F1", Object::Reference((5, 0)));
+        res.set("Font", Object::Dictionary(font_dict));
+        doc.objects.insert((4, 0), Object::Dictionary(res));
+
+        // Page referencing resources by ref
+        let mut page = Dictionary::new();
+        page.set("Type", Object::Name(b"Page".to_vec()));
+        page.set("Parent", Object::Reference((2, 0)));
+        page.set("Resources", Object::Reference((4, 0)));
+        doc.objects.insert((3, 0), Object::Dictionary(page));
+
+        let mut pages_dict = Dictionary::new();
+        pages_dict.set("Type", Object::Name(b"Pages".to_vec()));
+        pages_dict.set("Kids", Object::Array(vec![Object::Reference((3, 0))]));
+        pages_dict.set("Count", Object::Integer(1));
+        doc.objects.insert((2, 0), Object::Dictionary(pages_dict));
+
+        let mut catalog = Dictionary::new();
+        catalog.set("Type", Object::Name(b"Catalog".to_vec()));
+        catalog.set("Pages", Object::Reference((2, 0)));
+        doc.objects.insert((1, 0), Object::Dictionary(catalog));
+        doc.trailer.set("Root", Object::Reference((1, 0)));
+
+        let assoc = find_page_associations(&doc, 5);
+        assert_eq!(assoc, vec![1]);
     }
 }

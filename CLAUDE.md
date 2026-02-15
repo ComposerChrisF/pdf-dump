@@ -18,7 +18,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 The entire tool lives in `src/main.rs` (~5800 lines + ~9800 lines of tests). The flow is:
 
-1. **CLI parsing** — `Args` struct via clap derive. Modes: dump (default), extract, inspect object(s), summary, page, metadata, search, text, operators, resources, forms, refs-to, fonts, images, validate, tree, stats, xref, bookmarks, annotations, layers, structure. Only one mode flag at a time (with exceptions: `--search --summary`, `--text --page`, `--annotations --page`, `--operators --page`, `--resources --page`).
+1. **CLI parsing** — `Args` struct via clap derive. Modes: dump (default), extract, inspect object(s), summary, page, metadata, search, text, operators, resources, forms, info, refs-to, fonts, images, validate, tree, stats, xref, bookmarks, annotations, layers, structure. Only one mode flag at a time (with exceptions: `--search --summary`, `--text --page`, `--annotations --page`, `--operators --page`, `--resources --page`, `--object --context`).
 2. **Dump mode** — Prints the trailer, then traverses the object tree starting from the `/Root` reference. `dump_object_and_children` does a depth-first walk using a `BTreeSet<ObjectId>` to avoid revisiting objects. Each object's references are collected during printing and then recursively followed. Respects `--depth N` to limit traversal.
 3. **Extract mode** — Pulls a single stream object by ID number (generation 0 assumed), decodes it, and writes raw bytes to a file.
 4. **Object mode** (`--object N` or `--object 1,5,10-15`) — Prints one or more objects without following references. Accepts single numbers, comma-separated lists, ranges, or mixed. `--deref` expands references inline.
@@ -42,7 +42,9 @@ The entire tool lives in `src/main.rs` (~5800 lines + ~9800 lines of tests). The
 22. **Annotations mode** (`--annotations`) — Lists all annotations with page number, subtype, rect, and contents. Works with `--page` filter.
 23. **Layers mode** (`--layers` / `--ocg`) — Lists Optional Content Groups (layers) with name, default visibility (ON/OFF), and page references. Reads `/OCProperties` from catalog.
 24. **Structure mode** (`--structure`) — Shows tagged PDF logical structure tree from `/StructTreeRoot`. Displays element roles, page refs, MCIDs, titles, alt text. Supports `--depth N` to limit tree depth. Cycle detection via `BTreeSet<ObjectId>`.
-25. **JSON modifier** (`--json`) — Structured JSON output for all modes. Uses `serde_json`. Each PDF object maps to a JSON type schema. With `--deref`, references gain a `"resolved"` field.
+25. **Info mode** (`--info N`) — Human-readable object role explanation. Classifies the object (Font, Page, Image, Catalog, etc.) with domain-specific details, shows page associations, forward and reverse references. Uses `classify_object()` for role detection and `find_page_associations()` for page context.
+26. **Object context** (`--object N --context`) — Bidirectional reference context. Shows the object itself, what it references (forward refs with key paths and summaries), and what references it (reverse refs with source object info and key paths). Combines `--object` and `--refs-to` in one command.
+27. **JSON modifier** (`--json`) — Structured JSON output for all modes. Uses `serde_json`. Each PDF object maps to a JSON type schema. With `--deref`, references gain a `"resolved"` field.
 24. **`print_object`** — Recursive pretty-printer that handles all `lopdf::Object` variants. Collects `(is_contents, ObjectId)` pairs into `child_refs` for the caller to traverse. When a dictionary key is `/Contents`, the `is_contents` flag propagates so content streams get parsed via `lopdf::content::Content::decode`. With `config.deref`, references show inline summaries.
 25. **`decode_stream`** — Filter pipeline processor. Supports FlateDecode, ASCII85Decode, ASCIIHexDecode, LZWDecode, and RunLengthDecode. Applies filters sequentially. Returns `(Cow<[u8]>, Option<String>)` — decoded data and optional warning on failure or unsupported filter.
 26. **`object_to_json`** — Maps each `lopdf::Object` variant to a `serde_json::Value` with a `type` field + value fields.
@@ -70,6 +72,7 @@ The entire tool lives in `src/main.rs` (~5800 lines + ~9800 lines of tests). The
 - `--annotations` — Show annotations (all pages, or filtered with `--page`)
 - `--layers` / `--ocg` — Show optional content groups (layers) with names, visibility, pages
 - `--structure` — Show tagged PDF logical structure tree (supports `--depth`)
+- `--info N` — Human-readable object role explanation with classification, details, page associations, and references
 - `--extract-object <N> --output <path>` — Extract a stream object to a file
 
 **Modifier flags** (combine with modes):
@@ -82,6 +85,7 @@ The entire tool lives in `src/main.rs` (~5800 lines + ~9800 lines of tests). The
 - `--dot` — Output tree as GraphViz DOT format (use with `--tree`)
 - `--deref` — Inline-expand references to show target summaries (use with `--object` or `--page`)
 - `--raw` — Show raw undecoded stream bytes (use with `--object`, conflicts with `--decode-streams`)
+- `--context` — Show bidirectional reference context (use with `--object`)
 
 **Special combinations:**
 - `--search <expr> --summary` — Search results as one-line table
@@ -105,6 +109,12 @@ The entire tool lives in `src/main.rs` (~5800 lines + ~9800 lines of tests). The
 - `--object N --raw --truncate N` — Truncated raw bytes
 - `--structure --depth N` — Structure tree limited to N levels
 - `--structure --json` — Structure tree as JSON
+- `--object N --context` — Object with bidirectional reference context
+- `--object 1,5 --context` — Multi-object context
+- `--object N --context --json` — Context as JSON
+- `--object N --context --deref` — Context with inline reference expansion
+- `--info N` — Human-readable role explanation for object N
+- `--info N --json` — Role explanation as JSON
 
 ## Rust Edition
 
