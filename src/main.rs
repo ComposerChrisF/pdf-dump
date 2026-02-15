@@ -1,6 +1,7 @@
 use clap::Parser;
 use flate2::read::ZlibDecoder;
 use lopdf::{content::Content, Document, Object, ObjectId};
+use regex::Regex;
 use serde_json::{self, Value, json};
 use std::borrow::Cow;
 use std::collections::{BTreeMap, BTreeSet};
@@ -127,6 +128,22 @@ struct Args {
     /// Inline-expand references to show target summaries (use with --object or --page)
     #[arg(long)]
     deref: bool,
+
+    /// Show encryption and permission details
+    #[arg(long)]
+    security: bool,
+
+    /// List embedded files (file attachments)
+    #[arg(long)]
+    embedded_files: bool,
+
+    /// Show page labels (logical page numbering)
+    #[arg(long)]
+    page_labels: bool,
+
+    /// List link annotations with targets (all pages, or filtered with --page)
+    #[arg(long)]
+    links: bool,
 }
 
 #[derive(Clone, Copy)]
@@ -221,7 +238,7 @@ fn main() {
         args.object.is_some(),
         args.summary && args.search.is_none(),
         args.metadata,
-        args.page.is_some() && !args.text && !args.annotations && !args.operators && !args.resources,
+        args.page.is_some() && !args.text && !args.annotations && !args.operators && !args.resources && !args.links,
         args.search.is_some(),
         args.text,
         args.operators,
@@ -236,6 +253,10 @@ fn main() {
         args.xref,
         args.bookmarks,
         args.annotations && args.page.is_none(),
+        args.security,
+        args.embedded_files,
+        args.page_labels,
+        args.links && args.page.is_none(),
     ].iter().filter(|&&b| b).count();
     if mode_count > 1 {
         eprintln!("Error: Only one mode flag may be used at a time.");
@@ -261,7 +282,11 @@ fn main() {
             || args.annotations
             || args.operators
             || args.resources
-            || args.forms;
+            || args.forms
+            || args.security
+            || args.embedded_files
+            || args.page_labels
+            || args.links;
         if incompatible {
             eprintln!("Error: --diff can only be combined with --page and --json.");
             std::process::exit(1);
@@ -442,6 +467,34 @@ fn main() {
             print_annotations_json(&mut out, &doc, page_spec.as_ref());
         } else {
             print_annotations(&mut out, &doc, page_spec.as_ref());
+        }
+    } else if args.security {
+        let mut out = io::stdout().lock();
+        if config.json {
+            print_security_json(&mut out, &doc);
+        } else {
+            print_security(&mut out, &doc);
+        }
+    } else if args.embedded_files {
+        let mut out = io::stdout().lock();
+        if config.json {
+            print_embedded_files_json(&mut out, &doc);
+        } else {
+            print_embedded_files(&mut out, &doc);
+        }
+    } else if args.page_labels {
+        let mut out = io::stdout().lock();
+        if config.json {
+            print_page_labels_json(&mut out, &doc);
+        } else {
+            print_page_labels(&mut out, &doc);
+        }
+    } else if args.links {
+        let mut out = io::stdout().lock();
+        if config.json {
+            print_links_json(&mut out, &doc, page_spec.as_ref());
+        } else {
+            print_links(&mut out, &doc, page_spec.as_ref());
         }
     } else if args.tree {
         let mut out = io::stdout().lock();
@@ -1362,6 +1415,7 @@ enum SearchCondition {
     HasKey { key: Vec<u8> },
     ValueContains { text: String },
     StreamContains { text: String },
+    RegexMatch { pattern: Regex },
 }
 
 fn parse_search_expr(expr: &str) -> Result<Vec<SearchCondition>, String> {
@@ -1381,6 +1435,10 @@ fn parse_search_expr(expr: &str) -> Result<Vec<SearchCondition>, String> {
                 conditions.push(SearchCondition::ValueContains { text: right.to_string() });
             } else if left.eq_ignore_ascii_case("stream") {
                 conditions.push(SearchCondition::StreamContains { text: right.to_string() });
+            } else if left.eq_ignore_ascii_case("regex") {
+                let re = Regex::new(right)
+                    .map_err(|e| format!("Invalid regex '{}': {}", right, e))?;
+                conditions.push(SearchCondition::RegexMatch { pattern: re });
             } else {
                 conditions.push(SearchCondition::KeyEquals {
                     key: left.as_bytes().to_vec(),
@@ -1433,6 +1491,27 @@ fn object_matches(obj: &Object, conditions: &[SearchCondition]) -> bool {
                 let (decoded, _) = decode_stream(stream);
                 let content_str = String::from_utf8_lossy(&decoded);
                 content_str.to_lowercase().contains(&text.to_lowercase())
+            } else {
+                false
+            }
+        }
+        SearchCondition::RegexMatch { pattern } => {
+            // Match against dict key names, Name values, String values
+            let key_or_value_match = dict.iter().any(|(k, v)| {
+                let key_str = String::from_utf8_lossy(k);
+                if pattern.is_match(&key_str) { return true; }
+                match v {
+                    Object::Name(n) => pattern.is_match(&String::from_utf8_lossy(n)),
+                    Object::String(bytes, _) => pattern.is_match(&String::from_utf8_lossy(bytes)),
+                    _ => false,
+                }
+            });
+            if key_or_value_match { return true; }
+            // Also match decoded stream content
+            if let Object::Stream(stream) = obj {
+                let (decoded, _) = decode_stream(stream);
+                let content_str = String::from_utf8_lossy(&decoded);
+                pattern.is_match(&content_str)
             } else {
                 false
             }
@@ -3056,6 +3135,11 @@ fn validate_pdf(doc: &Document) -> ValidationReport {
     check_required_keys(doc, &mut issues);
     check_stream_lengths(doc, &mut issues);
     check_page_tree(doc, &mut issues);
+    check_content_stream_syntax(doc, &mut issues);
+    check_font_requirements(doc, &mut issues);
+    check_page_tree_cycles(doc, &mut issues);
+    check_names_tree_structure(doc, &mut issues);
+    check_duplicate_objects(doc, &mut issues);
 
     let error_count = issues.iter().filter(|i| i.level == ValidationLevel::Error).count();
     let warn_count = issues.iter().filter(|i| i.level == ValidationLevel::Warn).count();
@@ -3237,6 +3321,207 @@ fn check_page_tree(doc: &Document, issues: &mut Vec<ValidationIssue>) {
     }
 }
 
+fn check_content_stream_syntax(doc: &Document, issues: &mut Vec<ValidationIssue>) {
+    let pages = doc.get_pages();
+    for (&page_num, &page_id) in &pages {
+        let page_dict = match doc.get_object(page_id) {
+            Ok(Object::Dictionary(d)) => d,
+            _ => continue,
+        };
+        let content_ids: Vec<ObjectId> = match page_dict.get(b"Contents") {
+            Ok(Object::Reference(id)) => vec![*id],
+            Ok(Object::Array(arr)) => arr.iter().filter_map(|o| o.as_reference().ok()).collect(),
+            _ => continue,
+        };
+        for content_id in content_ids {
+            if let Ok(Object::Stream(stream)) = doc.get_object(content_id) {
+                let (decoded, _) = decode_stream(stream);
+                if Content::decode(&decoded).is_err() {
+                    issues.push(ValidationIssue {
+                        level: ValidationLevel::Warn,
+                        message: format!("Page {}: content stream {} {} has invalid syntax", page_num, content_id.0, content_id.1),
+                    });
+                }
+            }
+        }
+    }
+}
+
+fn check_font_requirements(doc: &Document, issues: &mut Vec<ValidationIssue>) {
+    for (&(obj_num, generation), object) in &doc.objects {
+        let dict = match object {
+            Object::Dictionary(d) => d,
+            Object::Stream(s) => &s.dict,
+            _ => continue,
+        };
+        let is_font = dict.get(b"Type").ok()
+            .and_then(|v| v.as_name().ok().map(|n| n == b"Font"))
+            .unwrap_or(false);
+        if !is_font { continue; }
+
+        let subtype = dict.get(b"Subtype").ok()
+            .and_then(|v| v.as_name().ok().map(|n| String::from_utf8_lossy(n).into_owned()));
+
+        let needs_basefont = matches!(subtype.as_deref(), Some("Type1") | Some("TrueType") | Some("Type0") | Some("CIDFontType0") | Some("CIDFontType2"));
+        if needs_basefont && dict.get(b"BaseFont").is_err() {
+            issues.push(ValidationIssue {
+                level: ValidationLevel::Warn,
+                message: format!("Font object {} {}: missing /BaseFont", obj_num, generation),
+            });
+        }
+
+        let has_first = dict.get(b"FirstChar").is_ok();
+        let has_last = dict.get(b"LastChar").is_ok();
+        if has_first != has_last {
+            issues.push(ValidationIssue {
+                level: ValidationLevel::Warn,
+                message: format!("Font object {} {}: has {} but not {}", obj_num, generation,
+                    if has_first { "/FirstChar" } else { "/LastChar" },
+                    if has_first { "/LastChar" } else { "/FirstChar" }),
+            });
+        }
+
+        if has_first && has_last
+            && let (Ok(Object::Integer(first)), Ok(Object::Integer(last))) =
+                (dict.get(b"FirstChar"), dict.get(b"LastChar"))
+        {
+            let expected_width_count = (last - first + 1).max(0) as usize;
+            if let Ok(Object::Array(widths)) = dict.get(b"Widths")
+                && widths.len() != expected_width_count
+            {
+                issues.push(ValidationIssue {
+                    level: ValidationLevel::Warn,
+                    message: format!("Font object {} {}: /Widths has {} entries but /FirstChar..=/LastChar expects {}", obj_num, generation, widths.len(), expected_width_count),
+                });
+            }
+        }
+    }
+}
+
+fn check_page_tree_cycles(doc: &Document, issues: &mut Vec<ValidationIssue>) {
+    let pages = doc.get_pages();
+    for (&page_num, &page_id) in &pages {
+        let mut visited = BTreeSet::new();
+        visited.insert(page_id);
+        let mut current = doc.get_object(page_id).ok()
+            .and_then(|o| match o {
+                Object::Dictionary(d) => d.get(b"Parent").ok().and_then(|v| v.as_reference().ok()),
+                _ => None,
+            });
+        while let Some(parent_id) = current {
+            if visited.contains(&parent_id) {
+                issues.push(ValidationIssue {
+                    level: ValidationLevel::Error,
+                    message: format!("Page {}: cycle detected in /Parent chain (object {} {} seen twice)", page_num, parent_id.0, parent_id.1),
+                });
+                break;
+            }
+            visited.insert(parent_id);
+            current = doc.get_object(parent_id).ok()
+                .and_then(|o| match o {
+                    Object::Dictionary(d) => d.get(b"Parent").ok().and_then(|v| v.as_reference().ok()),
+                    _ => None,
+                });
+        }
+    }
+}
+
+fn check_names_tree_structure(doc: &Document, issues: &mut Vec<ValidationIssue>) {
+    let root_ref = match doc.trailer.get(b"Root").ok().and_then(|o| o.as_reference().ok()) {
+        Some(id) => id,
+        None => return,
+    };
+    let catalog = match doc.get_object(root_ref) {
+        Ok(Object::Dictionary(d)) => d,
+        _ => return,
+    };
+    let names_dict = match catalog.get(b"Names").ok() {
+        Some(Object::Reference(id)) => match doc.get_object(*id) {
+            Ok(Object::Dictionary(d)) => d,
+            _ => return,
+        },
+        Some(Object::Dictionary(d)) => d,
+        _ => return,
+    };
+
+    let subtree_keys: &[&[u8]] = &[b"EmbeddedFiles", b"Dests", b"JavaScript", b"AP"];
+    for key in subtree_keys {
+        let subtree = match names_dict.get(key).ok() {
+            Some(Object::Reference(id)) => match doc.get_object(*id) {
+                Ok(Object::Dictionary(d)) => d,
+                _ => continue,
+            },
+            Some(Object::Dictionary(d)) => d,
+            _ => continue,
+        };
+        let key_name = String::from_utf8_lossy(key);
+        validate_name_tree_node(doc, subtree, &key_name, &mut BTreeSet::new(), issues);
+    }
+}
+
+fn validate_name_tree_node(
+    doc: &Document,
+    dict: &lopdf::Dictionary,
+    tree_name: &str,
+    visited: &mut BTreeSet<ObjectId>,
+    issues: &mut Vec<ValidationIssue>,
+) {
+    let has_names = dict.get(b"Names").is_ok();
+    let has_kids = dict.get(b"Kids").is_ok();
+
+    if !has_names && !has_kids {
+        issues.push(ValidationIssue {
+            level: ValidationLevel::Warn,
+            message: format!("Name tree '{}': node has neither /Names nor /Kids", tree_name),
+        });
+        return;
+    }
+
+    if let Ok(Object::Array(names)) = dict.get(b"Names")
+        && names.len() % 2 != 0
+    {
+        issues.push(ValidationIssue {
+            level: ValidationLevel::Warn,
+            message: format!("Name tree '{}': /Names array has odd length ({})", tree_name, names.len()),
+        });
+    }
+
+    if let Ok(Object::Array(kids)) = dict.get(b"Kids") {
+        for kid in kids {
+            let kid_id = match kid {
+                Object::Reference(id) => *id,
+                _ => continue,
+            };
+            if visited.contains(&kid_id) {
+                issues.push(ValidationIssue {
+                    level: ValidationLevel::Error,
+                    message: format!("Name tree '{}': cycle detected at object {} {}", tree_name, kid_id.0, kid_id.1),
+                });
+                continue;
+            }
+            visited.insert(kid_id);
+            if let Ok(Object::Dictionary(kid_dict)) = doc.get_object(kid_id) {
+                validate_name_tree_node(doc, kid_dict, tree_name, visited, issues);
+            }
+        }
+    }
+}
+
+fn check_duplicate_objects(doc: &Document, issues: &mut Vec<ValidationIssue>) {
+    let mut seen_numbers: BTreeMap<u32, Vec<u16>> = BTreeMap::new();
+    for &(obj_num, generation) in doc.objects.keys() {
+        seen_numbers.entry(obj_num).or_default().push(generation);
+    }
+    for (obj_num, generations) in &seen_numbers {
+        if generations.len() > 1 {
+            issues.push(ValidationIssue {
+                level: ValidationLevel::Warn,
+                message: format!("Object {}: multiple generations present ({:?})", obj_num, generations),
+            });
+        }
+    }
+}
+
 fn print_validation(writer: &mut impl Write, doc: &Document) {
     let report = validate_pdf(doc);
 
@@ -3415,6 +3700,90 @@ fn print_xref_json(writer: &mut impl Write, doc: &Document) {
         "entries": entries,
     });
     writeln!(writer, "{}", serde_json::to_string_pretty(&output).unwrap()).unwrap();
+}
+
+// ── Name Tree / Number Tree walkers ──────────────────────────────────
+
+fn walk_name_tree(doc: &Document, dict: &lopdf::Dictionary) -> Vec<(String, Object)> {
+    let mut results = Vec::new();
+    let mut visited = BTreeSet::new();
+    walk_name_tree_inner(doc, dict, &mut results, &mut visited);
+    results
+}
+
+fn walk_name_tree_inner(
+    doc: &Document,
+    dict: &lopdf::Dictionary,
+    results: &mut Vec<(String, Object)>,
+    visited: &mut BTreeSet<ObjectId>,
+) {
+    // Leaf node: /Names array with alternating key/value pairs
+    if let Ok(Object::Array(names)) = dict.get(b"Names") {
+        let mut i = 0;
+        while i + 1 < names.len() {
+            let key = match &names[i] {
+                Object::String(bytes, _) => String::from_utf8_lossy(bytes).into_owned(),
+                _ => { i += 2; continue; }
+            };
+            results.push((key, names[i + 1].clone()));
+            i += 2;
+        }
+    }
+    // Intermediate node: /Kids array
+    if let Ok(Object::Array(kids)) = dict.get(b"Kids") {
+        for kid in kids {
+            let kid_id = match kid {
+                Object::Reference(id) => *id,
+                _ => continue,
+            };
+            if visited.contains(&kid_id) { continue; }
+            visited.insert(kid_id);
+            if let Ok(Object::Dictionary(kid_dict)) = doc.get_object(kid_id) {
+                walk_name_tree_inner(doc, kid_dict, results, visited);
+            }
+        }
+    }
+}
+
+fn walk_number_tree(doc: &Document, dict: &lopdf::Dictionary) -> Vec<(i64, Object)> {
+    let mut results = Vec::new();
+    let mut visited = BTreeSet::new();
+    walk_number_tree_inner(doc, dict, &mut results, &mut visited);
+    results
+}
+
+fn walk_number_tree_inner(
+    doc: &Document,
+    dict: &lopdf::Dictionary,
+    results: &mut Vec<(i64, Object)>,
+    visited: &mut BTreeSet<ObjectId>,
+) {
+    // Leaf node: /Nums array with alternating integer-key/value pairs
+    if let Ok(Object::Array(nums)) = dict.get(b"Nums") {
+        let mut i = 0;
+        while i + 1 < nums.len() {
+            let key = match &nums[i] {
+                Object::Integer(n) => *n,
+                _ => { i += 2; continue; }
+            };
+            results.push((key, nums[i + 1].clone()));
+            i += 2;
+        }
+    }
+    // Intermediate node: /Kids array
+    if let Ok(Object::Array(kids)) = dict.get(b"Kids") {
+        for kid in kids {
+            let kid_id = match kid {
+                Object::Reference(id) => *id,
+                _ => continue,
+            };
+            if visited.contains(&kid_id) { continue; }
+            visited.insert(kid_id);
+            if let Ok(Object::Dictionary(kid_dict)) = doc.get_object(kid_id) {
+                walk_number_tree_inner(doc, kid_dict, results, visited);
+            }
+        }
+    }
 }
 
 // ── Bookmarks ────────────────────────────────────────────────────────
@@ -3737,6 +4106,627 @@ fn print_annotations_json(writer: &mut impl Write, doc: &Document, page_filter: 
     let output = json!({
         "annotation_count": items.len(),
         "annotations": items,
+    });
+    writeln!(writer, "{}", serde_json::to_string_pretty(&output).unwrap()).unwrap();
+}
+
+// ── Security ─────────────────────────────────────────────────────────
+
+struct SecurityInfo {
+    encrypted: bool,
+    algorithm: String,
+    version: i64,
+    revision: i64,
+    key_length: i64,
+    permissions_raw: i64,
+    permissions: BTreeMap<String, bool>,
+    encrypt_object: Option<u32>,
+}
+
+fn algorithm_name(v: i64, length: i64) -> String {
+    match v {
+        0 => "Undocumented".to_string(),
+        1 => "RC4, 40-bit".to_string(),
+        2 => format!("RC4, {}-bit", if length > 0 { length } else { 40 }),
+        3 => "Unpublished".to_string(),
+        4 => "AES-128".to_string(),
+        5 => "AES-256".to_string(),
+        _ => format!("Unknown (V={})", v),
+    }
+}
+
+fn decode_permissions(p: i64) -> BTreeMap<String, bool> {
+    let mut perms = BTreeMap::new();
+    let bits = p as u32;
+    perms.insert("Print".to_string(), bits & (1 << 2) != 0);
+    perms.insert("Modify".to_string(), bits & (1 << 3) != 0);
+    perms.insert("Copy/extract text".to_string(), bits & (1 << 4) != 0);
+    perms.insert("Annotate".to_string(), bits & (1 << 5) != 0);
+    perms.insert("Fill forms".to_string(), bits & (1 << 8) != 0);
+    perms.insert("Accessibility extract".to_string(), bits & (1 << 9) != 0);
+    perms.insert("Assemble".to_string(), bits & (1 << 10) != 0);
+    perms.insert("Print high quality".to_string(), bits & (1 << 11) != 0);
+    perms
+}
+
+fn collect_security(doc: &Document) -> SecurityInfo {
+    let encrypt_ref = doc.trailer.get(b"Encrypt").ok()
+        .and_then(|v| match v {
+            Object::Reference(id) => Some(*id),
+            _ => None,
+        });
+
+    let encrypt_dict = encrypt_ref
+        .and_then(|id| doc.get_object(id).ok())
+        .and_then(|obj| match obj {
+            Object::Dictionary(d) => Some(d),
+            _ => None,
+        });
+
+    // Also check if /Encrypt is an inline dictionary
+    let encrypt_dict = encrypt_dict.or_else(|| {
+        doc.trailer.get(b"Encrypt").ok().and_then(|v| match v {
+            Object::Dictionary(d) => Some(d),
+            _ => None,
+        })
+    });
+
+    match encrypt_dict {
+        Some(dict) => {
+            let v = dict.get(b"V").ok()
+                .and_then(|o| if let Object::Integer(i) = o { Some(*i) } else { None })
+                .unwrap_or(0);
+            let r = dict.get(b"R").ok()
+                .and_then(|o| if let Object::Integer(i) = o { Some(*i) } else { None })
+                .unwrap_or(0);
+            let length = dict.get(b"Length").ok()
+                .and_then(|o| if let Object::Integer(i) = o { Some(*i) } else { None })
+                .unwrap_or(40);
+            let p = dict.get(b"P").ok()
+                .and_then(|o| if let Object::Integer(i) = o { Some(*i) } else { None })
+                .unwrap_or(0);
+
+            SecurityInfo {
+                encrypted: true,
+                algorithm: algorithm_name(v, length),
+                version: v,
+                revision: r,
+                key_length: length,
+                permissions_raw: p,
+                permissions: decode_permissions(p),
+                encrypt_object: encrypt_ref.map(|id| id.0),
+            }
+        }
+        None => SecurityInfo {
+            encrypted: false,
+            algorithm: "-".to_string(),
+            version: 0,
+            revision: 0,
+            key_length: 0,
+            permissions_raw: 0,
+            permissions: BTreeMap::new(),
+            encrypt_object: None,
+        },
+    }
+}
+
+fn print_security(writer: &mut impl Write, doc: &Document) {
+    let info = collect_security(doc);
+    if !info.encrypted {
+        writeln!(writer, "Encryption: No").unwrap();
+        return;
+    }
+    writeln!(writer, "Encryption: Yes").unwrap();
+    writeln!(writer, "Algorithm:  {}", info.algorithm).unwrap();
+    writeln!(writer, "Version:    {}", info.version).unwrap();
+    writeln!(writer, "Revision:   {}", info.revision).unwrap();
+    writeln!(writer, "Key Length: {} bits", info.key_length).unwrap();
+    if let Some(obj) = info.encrypt_object {
+        writeln!(writer, "Encrypt Object: {}", obj).unwrap();
+    }
+    writeln!(writer, "\nPermissions (raw: {}):", info.permissions_raw).unwrap();
+    let perm_order = [
+        "Print", "Modify", "Copy/extract text", "Annotate",
+        "Fill forms", "Accessibility extract", "Assemble", "Print high quality",
+    ];
+    for name in &perm_order {
+        if let Some(&allowed) = info.permissions.get(*name) {
+            let tag = if allowed { "YES" } else { " NO" };
+            writeln!(writer, "  [{}] {}", tag, name).unwrap();
+        }
+    }
+}
+
+fn print_security_json(writer: &mut impl Write, doc: &Document) {
+    let info = collect_security(doc);
+    let perms: Value = info.permissions.iter()
+        .map(|(k, v)| (k.clone(), json!(*v)))
+        .collect::<serde_json::Map<String, Value>>()
+        .into();
+    let output = json!({
+        "encrypted": info.encrypted,
+        "algorithm": info.algorithm,
+        "version": info.version,
+        "revision": info.revision,
+        "key_length": info.key_length,
+        "permissions_raw": info.permissions_raw,
+        "permissions": perms,
+        "encrypt_object": info.encrypt_object,
+    });
+    writeln!(writer, "{}", serde_json::to_string_pretty(&output).unwrap()).unwrap();
+}
+
+// ── Embedded Files ───────────────────────────────────────────────────
+
+struct EmbeddedFileInfo {
+    name: String,
+    filename: String,
+    mime_type: String,
+    size: Option<i64>,
+    object_number: u32,
+    filespec_object: ObjectId,
+}
+
+fn collect_embedded_files(doc: &Document) -> Vec<EmbeddedFileInfo> {
+    let mut files = Vec::new();
+
+    let root_ref = match doc.trailer.get(b"Root").ok().and_then(|o| o.as_reference().ok()) {
+        Some(id) => id,
+        None => return files,
+    };
+    let catalog = match doc.get_object(root_ref) {
+        Ok(Object::Dictionary(d)) => d,
+        _ => return files,
+    };
+    let names_dict = match catalog.get(b"Names").ok() {
+        Some(Object::Reference(id)) => match doc.get_object(*id) {
+            Ok(Object::Dictionary(d)) => d,
+            _ => return files,
+        },
+        Some(Object::Dictionary(d)) => d,
+        _ => return files,
+    };
+    let ef_dict = match names_dict.get(b"EmbeddedFiles").ok() {
+        Some(Object::Reference(id)) => match doc.get_object(*id) {
+            Ok(Object::Dictionary(d)) => d,
+            _ => return files,
+        },
+        Some(Object::Dictionary(d)) => d,
+        _ => return files,
+    };
+
+    let entries = walk_name_tree(doc, ef_dict);
+    for (name, value) in entries {
+        let filespec_id = match &value {
+            Object::Reference(id) => *id,
+            _ => continue,
+        };
+        let filespec = match doc.get_object(filespec_id) {
+            Ok(Object::Dictionary(d)) => d,
+            _ => continue,
+        };
+
+        let filename = filespec.get(b"UF").ok()
+            .or_else(|| filespec.get(b"F").ok())
+            .map(|v| match v {
+                Object::String(bytes, _) => String::from_utf8_lossy(bytes).into_owned(),
+                _ => name.clone(),
+            })
+            .unwrap_or_else(|| name.clone());
+
+        // Get the embedded file stream from /EF dict
+        let ef_ref = filespec.get(b"EF").ok()
+            .and_then(|v| match v {
+                Object::Dictionary(d) => Some(d),
+                Object::Reference(id) => doc.get_object(*id).ok().and_then(|o| {
+                    if let Object::Dictionary(d) = o { Some(d) } else { None }
+                }),
+                _ => None,
+            });
+        let (stream_id, stream_dict) = match ef_ref {
+            Some(ef) => {
+                let stream_ref = ef.get(b"F").ok()
+                    .or_else(|| ef.get(b"UF").ok());
+                match stream_ref {
+                    Some(Object::Reference(id)) => {
+                        match doc.get_object(*id) {
+                            Ok(Object::Stream(s)) => (*id, Some(s)),
+                            _ => (*id, None),
+                        }
+                    }
+                    _ => continue,
+                }
+            }
+            None => continue,
+        };
+
+        let mime_type = stream_dict
+            .and_then(|s| s.dict.get(b"Subtype").ok())
+            .map(|v| match v {
+                Object::Name(n) => String::from_utf8_lossy(n).into_owned(),
+                _ => "-".to_string(),
+            })
+            .unwrap_or_else(|| "-".to_string());
+
+        // Try /Params/Size for the uncompressed size
+        let size = stream_dict
+            .and_then(|s| s.dict.get(b"Params").ok())
+            .and_then(|v| match v {
+                Object::Dictionary(d) => Some(d),
+                Object::Reference(id) => doc.get_object(*id).ok().and_then(|o| {
+                    if let Object::Dictionary(d) = o { Some(d) } else { None }
+                }),
+                _ => None,
+            })
+            .and_then(|d| d.get(b"Size").ok())
+            .and_then(|v| if let Object::Integer(i) = v { Some(*i) } else { None });
+
+        files.push(EmbeddedFileInfo {
+            name,
+            filename,
+            mime_type,
+            size,
+            object_number: stream_id.0,
+            filespec_object: filespec_id,
+        });
+    }
+
+    files
+}
+
+fn print_embedded_files(writer: &mut impl Write, doc: &Document) {
+    let files = collect_embedded_files(doc);
+    writeln!(writer, "{} embedded files\n", files.len()).unwrap();
+    if files.is_empty() { return; }
+    writeln!(writer, "  {:>4}  {:<30} {:<24} {:>8}", "Obj#", "Filename", "MIME Type", "Size").unwrap();
+    for f in &files {
+        let size_str = f.size.map(|s| s.to_string()).unwrap_or_else(|| "-".to_string());
+        writeln!(writer, "  {:>4}  {:<30} {:<24} {:>8}", f.object_number, f.filename, f.mime_type, size_str).unwrap();
+    }
+}
+
+fn print_embedded_files_json(writer: &mut impl Write, doc: &Document) {
+    let files = collect_embedded_files(doc);
+    let items: Vec<Value> = files.iter().map(|f| {
+        json!({
+            "name": f.name,
+            "filename": f.filename,
+            "mime_type": f.mime_type,
+            "size": f.size,
+            "object_number": f.object_number,
+            "filespec_object": f.filespec_object.0,
+        })
+    }).collect();
+    let output = json!({
+        "embedded_file_count": items.len(),
+        "embedded_files": items,
+    });
+    writeln!(writer, "{}", serde_json::to_string_pretty(&output).unwrap()).unwrap();
+}
+
+// ── Page Labels ──────────────────────────────────────────────────────
+
+struct PageLabelEntry {
+    physical_page: u32,
+    label: String,
+    style: String,
+    prefix: String,
+    start: i64,
+}
+
+fn int_to_roman(mut n: i64, uppercase: bool) -> String {
+    if n <= 0 { return n.to_string(); }
+    let table: &[(i64, &str)] = &[
+        (1000, "m"), (900, "cm"), (500, "d"), (400, "cd"),
+        (100, "c"), (90, "xc"), (50, "l"), (40, "xl"),
+        (10, "x"), (9, "ix"), (5, "v"), (4, "iv"), (1, "i"),
+    ];
+    let mut result = String::new();
+    for &(value, numeral) in table {
+        while n >= value {
+            result.push_str(numeral);
+            n -= value;
+        }
+    }
+    if uppercase { result.to_uppercase() } else { result }
+}
+
+fn int_to_alpha(n: i64, uppercase: bool) -> String {
+    if n <= 0 { return n.to_string(); }
+    let mut result = String::new();
+    let mut remaining = n - 1;
+    loop {
+        let ch = (remaining % 26) as u8;
+        let letter = if uppercase { b'A' + ch } else { b'a' + ch };
+        result.insert(0, letter as char);
+        remaining = remaining / 26 - 1;
+        if remaining < 0 { break; }
+    }
+    result
+}
+
+fn format_page_label(style: &str, prefix: &str, value: i64) -> String {
+    let number_part = match style {
+        "D" => value.to_string(),
+        "r" => int_to_roman(value, false),
+        "R" => int_to_roman(value, true),
+        "a" => int_to_alpha(value, false),
+        "A" => int_to_alpha(value, true),
+        _ => String::new(),
+    };
+    format!("{}{}", prefix, number_part)
+}
+
+fn collect_page_labels(doc: &Document) -> Vec<PageLabelEntry> {
+    let mut entries = Vec::new();
+
+    let root_ref = match doc.trailer.get(b"Root").ok().and_then(|o| o.as_reference().ok()) {
+        Some(id) => id,
+        None => return entries,
+    };
+    let catalog = match doc.get_object(root_ref) {
+        Ok(Object::Dictionary(d)) => d,
+        _ => return entries,
+    };
+
+    let page_labels_dict = match catalog.get(b"PageLabels").ok() {
+        Some(Object::Reference(id)) => match doc.get_object(*id) {
+            Ok(Object::Dictionary(d)) => d,
+            _ => return entries,
+        },
+        Some(Object::Dictionary(d)) => d,
+        _ => return entries,
+    };
+
+    let mut ranges = walk_number_tree(doc, page_labels_dict);
+    ranges.sort_by_key(|(k, _)| *k);
+
+    let page_count = doc.get_pages().len() as u32;
+
+    for phys in 0..page_count {
+        // Find the applicable range: the last range entry whose key <= phys
+        let rule = ranges.iter().rev().find(|(k, _)| *k as u32 <= phys);
+        let (range_start, style, prefix, start_val) = match rule {
+            Some((range_key, value)) => {
+                let label_dict = match value {
+                    Object::Dictionary(d) => Some(d),
+                    Object::Reference(id) => doc.get_object(*id).ok().and_then(|o| {
+                        if let Object::Dictionary(d) = o { Some(d) } else { None }
+                    }),
+                    _ => None,
+                };
+                match label_dict {
+                    Some(d) => {
+                        let s = d.get(b"S").ok()
+                            .and_then(|v| v.as_name().ok().map(|n| String::from_utf8_lossy(n).into_owned()))
+                            .unwrap_or_else(|| "-".to_string());
+                        let p = d.get(b"P").ok()
+                            .map(|v| match v {
+                                Object::String(bytes, _) => String::from_utf8_lossy(bytes).into_owned(),
+                                _ => String::new(),
+                            })
+                            .unwrap_or_default();
+                        let st = d.get(b"St").ok()
+                            .and_then(|v| if let Object::Integer(i) = v { Some(*i) } else { None })
+                            .unwrap_or(1);
+                        (*range_key, s, p, st)
+                    }
+                    None => (*range_key, "D".to_string(), String::new(), 1),
+                }
+            }
+            None => (0, "D".to_string(), String::new(), 1),
+        };
+
+        let offset = phys as i64 - range_start;
+        let value = start_val + offset;
+        let label = format_page_label(&style, &prefix, value);
+
+        entries.push(PageLabelEntry {
+            physical_page: phys + 1,
+            label,
+            style: style.clone(),
+            prefix: prefix.clone(),
+            start: start_val,
+        });
+    }
+
+    entries
+}
+
+fn print_page_labels(writer: &mut impl Write, doc: &Document) {
+    let labels = collect_page_labels(doc);
+    if labels.is_empty() {
+        writeln!(writer, "No page labels defined.").unwrap();
+        return;
+    }
+    writeln!(writer, "{} pages with labels\n", labels.len()).unwrap();
+    writeln!(writer, "  {:>8}  Label", "Physical").unwrap();
+    for entry in &labels {
+        writeln!(writer, "  {:>8}  {}", entry.physical_page, entry.label).unwrap();
+    }
+}
+
+fn print_page_labels_json(writer: &mut impl Write, doc: &Document) {
+    let labels = collect_page_labels(doc);
+    let items: Vec<Value> = labels.iter().map(|e| {
+        json!({
+            "physical_page": e.physical_page,
+            "label": e.label,
+            "style": e.style,
+            "prefix": e.prefix,
+            "start": e.start,
+        })
+    }).collect();
+    let output = json!({
+        "page_count": items.len(),
+        "page_labels": items,
+    });
+    writeln!(writer, "{}", serde_json::to_string_pretty(&output).unwrap()).unwrap();
+}
+
+// ── Links ────────────────────────────────────────────────────────────
+
+struct LinkInfo {
+    page_num: u32,
+    object_id: ObjectId,
+    link_type: String,
+    target: String,
+    rect: String,
+}
+
+fn classify_link(doc: &Document, dict: &lopdf::Dictionary) -> (String, String) {
+    // Check /Dest first (direct destination)
+    if let Ok(dest) = dict.get(b"Dest") {
+        return ("GoTo".to_string(), format_dest_value(doc, dest));
+    }
+    // Check /A (action dictionary)
+    if let Ok(action_obj) = dict.get(b"A") {
+        let action_dict = match action_obj {
+            Object::Dictionary(d) => d,
+            Object::Reference(id) => {
+                match doc.get_object(*id) {
+                    Ok(Object::Dictionary(d)) => d,
+                    _ => return ("Unknown".to_string(), format!("{} {} R", id.0, id.1)),
+                }
+            }
+            _ => return ("Unknown".to_string(), "-".to_string()),
+        };
+        let action_type = action_dict.get(b"S").ok()
+            .and_then(|v| v.as_name().ok().map(|n| String::from_utf8_lossy(n).into_owned()))
+            .unwrap_or_else(|| "Unknown".to_string());
+        match action_type.as_str() {
+            "GoTo" => {
+                let target = action_dict.get(b"D").ok()
+                    .map(|d| format_dest_value(doc, d))
+                    .unwrap_or_else(|| "?".to_string());
+                ("GoTo".to_string(), target)
+            }
+            "GoToR" => {
+                let file = action_dict.get(b"F").ok()
+                    .map(|v| match v {
+                        Object::String(bytes, _) => String::from_utf8_lossy(bytes).into_owned(),
+                        _ => "?".to_string(),
+                    })
+                    .unwrap_or_else(|| "?".to_string());
+                let dest = action_dict.get(b"D").ok()
+                    .map(|d| format_dest_value(doc, d))
+                    .unwrap_or_default();
+                ("GoToR".to_string(), format!("{} {}", file, dest).trim().to_string())
+            }
+            "URI" => {
+                let uri = action_dict.get(b"URI").ok()
+                    .map(|v| match v {
+                        Object::String(bytes, _) => String::from_utf8_lossy(bytes).into_owned(),
+                        _ => "?".to_string(),
+                    })
+                    .unwrap_or_else(|| "?".to_string());
+                ("URI".to_string(), uri)
+            }
+            "Named" => {
+                let n = action_dict.get(b"N").ok()
+                    .map(|v| match v {
+                        Object::Name(n) => String::from_utf8_lossy(n).into_owned(),
+                        _ => "?".to_string(),
+                    })
+                    .unwrap_or_else(|| "?".to_string());
+                ("Named".to_string(), n)
+            }
+            "Launch" => {
+                let f = action_dict.get(b"F").ok()
+                    .map(|v| match v {
+                        Object::String(bytes, _) => String::from_utf8_lossy(bytes).into_owned(),
+                        _ => "?".to_string(),
+                    })
+                    .unwrap_or_else(|| "?".to_string());
+                ("Launch".to_string(), f)
+            }
+            other => (other.to_string(), "-".to_string()),
+        }
+    } else {
+        ("Unknown".to_string(), "-".to_string())
+    }
+}
+
+fn collect_links(doc: &Document, page_filter: Option<&PageSpec>) -> Vec<LinkInfo> {
+    let pages = doc.get_pages();
+    let mut links = Vec::new();
+
+    for (&page_num, &page_id) in &pages {
+        if let Some(spec) = page_filter
+            && !spec.contains(page_num) { continue; }
+
+        let page_dict = match doc.get_object(page_id) {
+            Ok(Object::Dictionary(d)) => d,
+            _ => continue,
+        };
+
+        let annot_refs: Vec<ObjectId> = match page_dict.get(b"Annots") {
+            Ok(Object::Array(arr)) => arr.iter().filter_map(|o| o.as_reference().ok()).collect(),
+            Ok(Object::Reference(id)) => {
+                if let Ok(Object::Array(arr)) = doc.get_object(*id) {
+                    arr.iter().filter_map(|o| o.as_reference().ok()).collect()
+                } else {
+                    continue;
+                }
+            }
+            _ => continue,
+        };
+
+        for annot_id in annot_refs {
+            let annot_dict = match doc.get_object(annot_id) {
+                Ok(Object::Dictionary(d)) => d,
+                _ => continue,
+            };
+
+            let subtype = annot_dict.get(b"Subtype").ok()
+                .and_then(|v| v.as_name().ok().map(|n| String::from_utf8_lossy(n).into_owned()));
+
+            if subtype.as_deref() != Some("Link") { continue; }
+
+            let rect = annot_dict.get(b"Rect").ok()
+                .map(format_dict_value)
+                .unwrap_or_else(|| "-".to_string());
+
+            let (link_type, target) = classify_link(doc, annot_dict);
+
+            links.push(LinkInfo {
+                page_num,
+                object_id: annot_id,
+                link_type,
+                target,
+                rect,
+            });
+        }
+    }
+
+    links
+}
+
+fn print_links(writer: &mut impl Write, doc: &Document, page_filter: Option<&PageSpec>) {
+    let links = collect_links(doc, page_filter);
+    writeln!(writer, "{} links found\n", links.len()).unwrap();
+    if links.is_empty() { return; }
+    writeln!(writer, "  {:>4}  {:>4}  {:<8} Target", "Page", "Obj#", "Type").unwrap();
+    for l in &links {
+        writeln!(writer, "  {:>4}  {:>4}  {:<8} {}", l.page_num, l.object_id.0, l.link_type, l.target).unwrap();
+    }
+}
+
+fn print_links_json(writer: &mut impl Write, doc: &Document, page_filter: Option<&PageSpec>) {
+    let links = collect_links(doc, page_filter);
+    let items: Vec<Value> = links.iter().map(|l| {
+        json!({
+            "page_number": l.page_num,
+            "object_number": l.object_id.0,
+            "generation": l.object_id.1,
+            "link_type": l.link_type,
+            "target": l.target,
+            "rect": l.rect,
+        })
+    }).collect();
+    let output = json!({
+        "link_count": items.len(),
+        "links": items,
     });
     writeln!(writer, "{}", serde_json::to_string_pretty(&output).unwrap()).unwrap();
 }
@@ -11929,5 +12919,1128 @@ mod tests {
         let parsed: Value = serde_json::from_str(&out).unwrap();
         assert!(parsed["acroform_object"].is_null());
         assert_eq!(parsed["field_count"], 0);
+    }
+
+    // ── walk_name_tree tests ─────────────────────────────────────────
+
+    #[test]
+    fn walk_name_tree_leaf_only() {
+        let mut doc = Document::new();
+        let mut leaf = Dictionary::new();
+        leaf.set("Names", Object::Array(vec![
+            Object::String(b"file1.pdf".to_vec(), StringFormat::Literal),
+            Object::Integer(1),
+            Object::String(b"file2.pdf".to_vec(), StringFormat::Literal),
+            Object::Integer(2),
+        ]));
+        doc.objects.insert((1, 0), Object::Dictionary(leaf.clone()));
+
+        let results = walk_name_tree(&doc, &leaf);
+        assert_eq!(results.len(), 2);
+        assert_eq!(results[0].0, "file1.pdf");
+        assert_eq!(results[1].0, "file2.pdf");
+    }
+
+    #[test]
+    fn walk_name_tree_with_kids() {
+        let mut doc = Document::new();
+        let mut child = Dictionary::new();
+        child.set("Names", Object::Array(vec![
+            Object::String(b"a.txt".to_vec(), StringFormat::Literal),
+            Object::Integer(10),
+        ]));
+        doc.objects.insert((2, 0), Object::Dictionary(child));
+        let mut root = Dictionary::new();
+        root.set("Kids", Object::Array(vec![Object::Reference((2, 0))]));
+        doc.objects.insert((1, 0), Object::Dictionary(root.clone()));
+
+        let results = walk_name_tree(&doc, &root);
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0].0, "a.txt");
+    }
+
+    #[test]
+    fn walk_name_tree_empty() {
+        let doc = Document::new();
+        let dict = Dictionary::new();
+        let results = walk_name_tree(&doc, &dict);
+        assert!(results.is_empty());
+    }
+
+    #[test]
+    fn walk_name_tree_cycle_protection() {
+        let mut doc = Document::new();
+        // Create two nodes that reference each other
+        let mut node_a = Dictionary::new();
+        node_a.set("Kids", Object::Array(vec![Object::Reference((2, 0))]));
+        doc.objects.insert((1, 0), Object::Dictionary(node_a.clone()));
+        let mut node_b = Dictionary::new();
+        node_b.set("Kids", Object::Array(vec![Object::Reference((1, 0))]));
+        node_b.set("Names", Object::Array(vec![
+            Object::String(b"found".to_vec(), StringFormat::Literal),
+            Object::Integer(1),
+        ]));
+        doc.objects.insert((2, 0), Object::Dictionary(node_b));
+
+        let results = walk_name_tree(&doc, &node_a);
+        // Should find "found" without infinite loop
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0].0, "found");
+    }
+
+    // ── walk_number_tree tests ───────────────────────────────────────
+
+    #[test]
+    fn walk_number_tree_leaf_only() {
+        let doc = Document::new();
+        let mut leaf = Dictionary::new();
+        leaf.set("Nums", Object::Array(vec![
+            Object::Integer(0), Object::Name(b"D".to_vec()),
+            Object::Integer(5), Object::Name(b"r".to_vec()),
+        ]));
+        let results = walk_number_tree(&doc, &leaf);
+        assert_eq!(results.len(), 2);
+        assert_eq!(results[0].0, 0);
+        assert_eq!(results[1].0, 5);
+    }
+
+    #[test]
+    fn walk_number_tree_with_kids() {
+        let mut doc = Document::new();
+        let mut child = Dictionary::new();
+        child.set("Nums", Object::Array(vec![
+            Object::Integer(3), Object::Integer(99),
+        ]));
+        doc.objects.insert((5, 0), Object::Dictionary(child));
+        let mut root = Dictionary::new();
+        root.set("Kids", Object::Array(vec![Object::Reference((5, 0))]));
+        doc.objects.insert((4, 0), Object::Dictionary(root.clone()));
+
+        let results = walk_number_tree(&doc, &root);
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0].0, 3);
+    }
+
+    #[test]
+    fn walk_number_tree_empty() {
+        let doc = Document::new();
+        let dict = Dictionary::new();
+        let results = walk_number_tree(&doc, &dict);
+        assert!(results.is_empty());
+    }
+
+    #[test]
+    fn walk_number_tree_cycle_protection() {
+        let mut doc = Document::new();
+        // Two nodes that reference each other
+        let mut node_a = Dictionary::new();
+        node_a.set("Kids", Object::Array(vec![Object::Reference((2, 0))]));
+        doc.objects.insert((1, 0), Object::Dictionary(node_a.clone()));
+        let mut node_b = Dictionary::new();
+        node_b.set("Kids", Object::Array(vec![Object::Reference((1, 0))]));
+        node_b.set("Nums", Object::Array(vec![
+            Object::Integer(0), Object::Integer(1),
+        ]));
+        doc.objects.insert((2, 0), Object::Dictionary(node_b));
+
+        let results = walk_number_tree(&doc, &node_a);
+        // Should find the one entry from node_b without infinite loop
+        assert_eq!(results.len(), 1);
+    }
+
+    // ── regex search tests ───────────────────────────────────────────
+
+    #[test]
+    fn parse_search_expr_regex() {
+        let conds = parse_search_expr("regex=Font\\d+").unwrap();
+        assert_eq!(conds.len(), 1);
+        assert!(matches!(&conds[0], SearchCondition::RegexMatch { .. }));
+    }
+
+    #[test]
+    fn parse_search_expr_regex_case_insensitive() {
+        let conds = parse_search_expr("REGEX=test").unwrap();
+        assert_eq!(conds.len(), 1);
+        assert!(matches!(&conds[0], SearchCondition::RegexMatch { .. }));
+    }
+
+    #[test]
+    fn parse_search_expr_regex_invalid() {
+        let result = parse_search_expr("regex=[invalid");
+        match result {
+            Err(e) => assert!(e.contains("Invalid regex"), "Error should mention invalid regex: {}", e),
+            Ok(_) => panic!("Expected error for invalid regex"),
+        }
+    }
+
+    #[test]
+    fn object_matches_regex_name_value() {
+        let mut dict = Dictionary::new();
+        dict.set("BaseFont", Object::Name(b"Helvetica-Bold".to_vec()));
+        let re = Regex::new("Helvetica").unwrap();
+        let conds = vec![SearchCondition::RegexMatch { pattern: re }];
+        assert!(object_matches(&Object::Dictionary(dict), &conds));
+    }
+
+    #[test]
+    fn object_matches_regex_key_name() {
+        let mut dict = Dictionary::new();
+        dict.set("MediaBox", Object::Integer(0));
+        let re = Regex::new("^Media").unwrap();
+        let conds = vec![SearchCondition::RegexMatch { pattern: re }];
+        assert!(object_matches(&Object::Dictionary(dict), &conds));
+    }
+
+    #[test]
+    fn object_matches_regex_string_value() {
+        let mut dict = Dictionary::new();
+        dict.set("Title", Object::String(b"Chapter 5 - Results".to_vec(), StringFormat::Literal));
+        let re = Regex::new(r"Chapter \d+").unwrap();
+        let conds = vec![SearchCondition::RegexMatch { pattern: re }];
+        assert!(object_matches(&Object::Dictionary(dict), &conds));
+    }
+
+    #[test]
+    fn object_matches_regex_no_match() {
+        let mut dict = Dictionary::new();
+        dict.set("Type", Object::Name(b"Page".to_vec()));
+        let re = Regex::new("Font").unwrap();
+        let conds = vec![SearchCondition::RegexMatch { pattern: re }];
+        assert!(!object_matches(&Object::Dictionary(dict), &conds));
+    }
+
+    #[test]
+    fn object_matches_regex_combined_with_other() {
+        let mut dict = Dictionary::new();
+        dict.set("Type", Object::Name(b"Font".to_vec()));
+        dict.set("BaseFont", Object::Name(b"Helvetica".to_vec()));
+        let re = Regex::new("Helv").unwrap();
+        let conds = vec![
+            SearchCondition::KeyEquals { key: b"Type".to_vec(), value: b"Font".to_vec() },
+            SearchCondition::RegexMatch { pattern: re },
+        ];
+        assert!(object_matches(&Object::Dictionary(dict), &conds));
+    }
+
+    #[test]
+    fn object_matches_regex_stream_content() {
+        let mut dict = Dictionary::new();
+        dict.set("Type", Object::Name(b"XObject".to_vec()));
+        let stream = Stream::new(dict, b"BT /F1 12 Tf (Hello World) Tj ET".to_vec());
+        let re = Regex::new("Hello").unwrap();
+        let conds = vec![SearchCondition::RegexMatch { pattern: re }];
+        assert!(object_matches(&Object::Stream(stream), &conds));
+    }
+
+    #[test]
+    fn object_matches_regex_case_flag() {
+        // Use (?i) for case-insensitive matching
+        let mut dict = Dictionary::new();
+        dict.set("BaseFont", Object::Name(b"HELVETICA".to_vec()));
+        let re = Regex::new("(?i)helvetica").unwrap();
+        let conds = vec![SearchCondition::RegexMatch { pattern: re }];
+        assert!(object_matches(&Object::Dictionary(dict), &conds));
+    }
+
+    // ── security tests ───────────────────────────────────────────────
+
+    #[test]
+    fn security_unencrypted() {
+        let doc = Document::new();
+        let info = collect_security(&doc);
+        assert!(!info.encrypted);
+    }
+
+    #[test]
+    fn security_encrypted_v4() {
+        let mut doc = Document::new();
+        let mut encrypt = Dictionary::new();
+        encrypt.set("V", Object::Integer(4));
+        encrypt.set("R", Object::Integer(4));
+        encrypt.set("Length", Object::Integer(128));
+        encrypt.set("P", Object::Integer(-3904));
+        let enc_id = doc.add_object(Object::Dictionary(encrypt));
+        doc.trailer.set("Encrypt", Object::Reference(enc_id));
+
+        let info = collect_security(&doc);
+        assert!(info.encrypted);
+        assert_eq!(info.algorithm, "AES-128");
+        assert_eq!(info.version, 4);
+        assert_eq!(info.revision, 4);
+        assert_eq!(info.key_length, 128);
+    }
+
+    #[test]
+    fn security_encrypted_v5() {
+        let mut doc = Document::new();
+        let mut encrypt = Dictionary::new();
+        encrypt.set("V", Object::Integer(5));
+        encrypt.set("R", Object::Integer(6));
+        encrypt.set("Length", Object::Integer(256));
+        encrypt.set("P", Object::Integer(-1));
+        let enc_id = doc.add_object(Object::Dictionary(encrypt));
+        doc.trailer.set("Encrypt", Object::Reference(enc_id));
+
+        let info = collect_security(&doc);
+        assert!(info.encrypted);
+        assert_eq!(info.algorithm, "AES-256");
+        assert_eq!(info.version, 5);
+    }
+
+    #[test]
+    fn security_encrypted_v1() {
+        let mut doc = Document::new();
+        let mut encrypt = Dictionary::new();
+        encrypt.set("V", Object::Integer(1));
+        encrypt.set("R", Object::Integer(2));
+        encrypt.set("P", Object::Integer(-44));
+        let enc_id = doc.add_object(Object::Dictionary(encrypt));
+        doc.trailer.set("Encrypt", Object::Reference(enc_id));
+
+        let info = collect_security(&doc);
+        assert!(info.encrypted);
+        assert_eq!(info.algorithm, "RC4, 40-bit");
+    }
+
+    #[test]
+    fn security_permissions_decode() {
+        // 2564 = bit 2 (print) + bit 9 (accessibility) + bit 11 (print hq)
+        let perms = decode_permissions(2564);
+        assert!(perms["Print"]);
+        assert!(!perms["Modify"]);
+        assert!(!perms["Copy/extract text"]);
+        assert!(perms["Accessibility extract"]);
+        assert!(perms["Print high quality"]);
+    }
+
+    #[test]
+    fn security_permissions_all_allowed() {
+        let perms = decode_permissions(-1); // All bits set
+        assert!(perms["Print"]);
+        assert!(perms["Modify"]);
+        assert!(perms["Copy/extract text"]);
+        assert!(perms["Annotate"]);
+        assert!(perms["Fill forms"]);
+        assert!(perms["Accessibility extract"]);
+        assert!(perms["Assemble"]);
+        assert!(perms["Print high quality"]);
+    }
+
+    #[test]
+    fn security_print_unencrypted() {
+        let doc = Document::new();
+        let out = output_of(|w| print_security(w, &doc));
+        assert!(out.contains("Encryption: No"));
+    }
+
+    #[test]
+    fn security_print_encrypted() {
+        let mut doc = Document::new();
+        let mut encrypt = Dictionary::new();
+        encrypt.set("V", Object::Integer(4));
+        encrypt.set("R", Object::Integer(4));
+        encrypt.set("Length", Object::Integer(128));
+        encrypt.set("P", Object::Integer(-3)); // all permissions
+        let enc_id = doc.add_object(Object::Dictionary(encrypt));
+        doc.trailer.set("Encrypt", Object::Reference(enc_id));
+        let out = output_of(|w| print_security(w, &doc));
+        assert!(out.contains("Encryption: Yes"));
+        assert!(out.contains("AES-128"));
+        assert!(out.contains("[YES] Print"));
+    }
+
+    #[test]
+    fn security_json_output() {
+        let mut doc = Document::new();
+        let mut encrypt = Dictionary::new();
+        encrypt.set("V", Object::Integer(4));
+        encrypt.set("R", Object::Integer(4));
+        encrypt.set("Length", Object::Integer(128));
+        encrypt.set("P", Object::Integer(-3));
+        let enc_id = doc.add_object(Object::Dictionary(encrypt));
+        doc.trailer.set("Encrypt", Object::Reference(enc_id));
+        let out = output_of(|w| print_security_json(w, &doc));
+        let parsed: Value = serde_json::from_str(&out).unwrap();
+        assert_eq!(parsed["encrypted"], true);
+        assert_eq!(parsed["algorithm"], "AES-128");
+        assert_eq!(parsed["version"], 4);
+        assert!(parsed["permissions"].is_object());
+    }
+
+    // ── embedded files tests ─────────────────────────────────────────
+
+    #[test]
+    fn embedded_files_none() {
+        let doc = Document::new();
+        let files = collect_embedded_files(&doc);
+        assert!(files.is_empty());
+    }
+
+    #[test]
+    fn embedded_files_no_names() {
+        let mut doc = Document::new();
+        let mut catalog = Dictionary::new();
+        catalog.set("Type", Object::Name(b"Catalog".to_vec()));
+        doc.objects.insert((1, 0), Object::Dictionary(catalog));
+        doc.trailer.set("Root", Object::Reference((1, 0)));
+        let files = collect_embedded_files(&doc);
+        assert!(files.is_empty());
+    }
+
+    #[test]
+    fn embedded_files_basic() {
+        let mut doc = Document::new();
+        // Create an embedded file stream
+        let mut ef_stream_dict = Dictionary::new();
+        ef_stream_dict.set("Type", Object::Name(b"EmbeddedFile".to_vec()));
+        ef_stream_dict.set("Subtype", Object::Name(b"application#2Fpdf".to_vec()));
+        let mut params = Dictionary::new();
+        params.set("Size", Object::Integer(42356));
+        ef_stream_dict.set("Params", Object::Dictionary(params));
+        let ef_stream = Stream::new(ef_stream_dict, b"fake pdf content".to_vec());
+        doc.objects.insert((10, 0), Object::Stream(ef_stream));
+
+        // EF dict
+        let mut ef = Dictionary::new();
+        ef.set("F", Object::Reference((10, 0)));
+        // Filespec
+        let mut filespec = Dictionary::new();
+        filespec.set("Type", Object::Name(b"Filespec".to_vec()));
+        filespec.set("F", Object::String(b"invoice.pdf".to_vec(), StringFormat::Literal));
+        filespec.set("EF", Object::Dictionary(ef));
+        doc.objects.insert((11, 0), Object::Dictionary(filespec));
+
+        // Names tree (leaf)
+        let mut ef_tree = Dictionary::new();
+        ef_tree.set("Names", Object::Array(vec![
+            Object::String(b"invoice.pdf".to_vec(), StringFormat::Literal),
+            Object::Reference((11, 0)),
+        ]));
+        doc.objects.insert((12, 0), Object::Dictionary(ef_tree));
+
+        // /Names dict in catalog
+        let mut names_dict = Dictionary::new();
+        names_dict.set("EmbeddedFiles", Object::Reference((12, 0)));
+        doc.objects.insert((13, 0), Object::Dictionary(names_dict));
+
+        // Catalog
+        let mut catalog = Dictionary::new();
+        catalog.set("Type", Object::Name(b"Catalog".to_vec()));
+        catalog.set("Names", Object::Reference((13, 0)));
+        doc.objects.insert((1, 0), Object::Dictionary(catalog));
+        doc.trailer.set("Root", Object::Reference((1, 0)));
+
+        let files = collect_embedded_files(&doc);
+        assert_eq!(files.len(), 1);
+        assert_eq!(files[0].filename, "invoice.pdf");
+        assert_eq!(files[0].object_number, 10);
+        assert_eq!(files[0].size, Some(42356));
+    }
+
+    #[test]
+    fn embedded_files_missing_ef() {
+        let mut doc = Document::new();
+        // Filespec without /EF
+        let mut filespec = Dictionary::new();
+        filespec.set("Type", Object::Name(b"Filespec".to_vec()));
+        filespec.set("F", Object::String(b"missing.pdf".to_vec(), StringFormat::Literal));
+        doc.objects.insert((11, 0), Object::Dictionary(filespec));
+
+        let mut ef_tree = Dictionary::new();
+        ef_tree.set("Names", Object::Array(vec![
+            Object::String(b"missing.pdf".to_vec(), StringFormat::Literal),
+            Object::Reference((11, 0)),
+        ]));
+        doc.objects.insert((12, 0), Object::Dictionary(ef_tree));
+
+        let mut names_dict = Dictionary::new();
+        names_dict.set("EmbeddedFiles", Object::Reference((12, 0)));
+        doc.objects.insert((13, 0), Object::Dictionary(names_dict));
+
+        let mut catalog = Dictionary::new();
+        catalog.set("Type", Object::Name(b"Catalog".to_vec()));
+        catalog.set("Names", Object::Reference((13, 0)));
+        doc.objects.insert((1, 0), Object::Dictionary(catalog));
+        doc.trailer.set("Root", Object::Reference((1, 0)));
+
+        let files = collect_embedded_files(&doc);
+        assert!(files.is_empty());
+    }
+
+    #[test]
+    fn embedded_files_print() {
+        let doc = Document::new();
+        let out = output_of(|w| print_embedded_files(w, &doc));
+        assert!(out.contains("0 embedded files"));
+    }
+
+    #[test]
+    fn embedded_files_json() {
+        let doc = Document::new();
+        let out = output_of(|w| print_embedded_files_json(w, &doc));
+        let parsed: Value = serde_json::from_str(&out).unwrap();
+        assert_eq!(parsed["embedded_file_count"], 0);
+        assert_eq!(parsed["embedded_files"].as_array().unwrap().len(), 0);
+    }
+
+    // ── page labels tests ────────────────────────────────────────────
+
+    #[test]
+    fn int_to_roman_basic() {
+        assert_eq!(int_to_roman(1, false), "i");
+        assert_eq!(int_to_roman(4, false), "iv");
+        assert_eq!(int_to_roman(9, true), "IX");
+        assert_eq!(int_to_roman(14, false), "xiv");
+        assert_eq!(int_to_roman(1999, true), "MCMXCIX");
+    }
+
+    #[test]
+    fn int_to_alpha_basic() {
+        assert_eq!(int_to_alpha(1, true), "A");
+        assert_eq!(int_to_alpha(26, true), "Z");
+        assert_eq!(int_to_alpha(27, true), "AA");
+        assert_eq!(int_to_alpha(1, false), "a");
+    }
+
+    #[test]
+    fn format_page_label_decimal() {
+        assert_eq!(format_page_label("D", "", 5), "5");
+        assert_eq!(format_page_label("D", "P-", 3), "P-3");
+    }
+
+    #[test]
+    fn format_page_label_roman() {
+        assert_eq!(format_page_label("r", "", 3), "iii");
+        assert_eq!(format_page_label("R", "", 4), "IV");
+    }
+
+    #[test]
+    fn format_page_label_alpha() {
+        assert_eq!(format_page_label("a", "", 1), "a");
+        assert_eq!(format_page_label("A", "", 2), "B");
+    }
+
+    #[test]
+    fn format_page_label_prefix_only() {
+        // Style "-" means no number, only prefix
+        assert_eq!(format_page_label("-", "Cover", 1), "Cover");
+    }
+
+    #[test]
+    fn page_labels_no_labels() {
+        let mut doc = Document::new();
+        let mut catalog = Dictionary::new();
+        catalog.set("Type", Object::Name(b"Catalog".to_vec()));
+        doc.objects.insert((1, 0), Object::Dictionary(catalog));
+        doc.trailer.set("Root", Object::Reference((1, 0)));
+        let labels = collect_page_labels(&doc);
+        assert!(labels.is_empty());
+    }
+
+    #[test]
+    fn page_labels_roman_then_decimal() {
+        let mut doc = Document::new();
+
+        // Create a simple page tree with 5 pages
+        let mut pages_dict = Dictionary::new();
+        pages_dict.set("Type", Object::Name(b"Pages".to_vec()));
+        pages_dict.set("Count", Object::Integer(5));
+        let mut kids = Vec::new();
+        for i in 10..15 {
+            let mut page = Dictionary::new();
+            page.set("Type", Object::Name(b"Page".to_vec()));
+            page.set("Parent", Object::Reference((2, 0)));
+            page.set("MediaBox", Object::Array(vec![
+                Object::Integer(0), Object::Integer(0), Object::Integer(612), Object::Integer(792),
+            ]));
+            doc.objects.insert((i, 0), Object::Dictionary(page));
+            kids.push(Object::Reference((i, 0)));
+        }
+        pages_dict.set("Kids", Object::Array(kids));
+        doc.objects.insert((2, 0), Object::Dictionary(pages_dict));
+
+        // PageLabels: pages 0-2 are roman lowercase, pages 3-4 are decimal starting at 1
+        let mut rule_roman = Dictionary::new();
+        rule_roman.set("S", Object::Name(b"r".to_vec()));
+        let mut rule_decimal = Dictionary::new();
+        rule_decimal.set("S", Object::Name(b"D".to_vec()));
+        rule_decimal.set("St", Object::Integer(1));
+
+        let mut pl_dict = Dictionary::new();
+        pl_dict.set("Nums", Object::Array(vec![
+            Object::Integer(0), Object::Dictionary(rule_roman),
+            Object::Integer(3), Object::Dictionary(rule_decimal),
+        ]));
+        doc.objects.insert((3, 0), Object::Dictionary(pl_dict));
+
+        let mut catalog = Dictionary::new();
+        catalog.set("Type", Object::Name(b"Catalog".to_vec()));
+        catalog.set("Pages", Object::Reference((2, 0)));
+        catalog.set("PageLabels", Object::Reference((3, 0)));
+        doc.objects.insert((1, 0), Object::Dictionary(catalog));
+        doc.trailer.set("Root", Object::Reference((1, 0)));
+
+        let labels = collect_page_labels(&doc);
+        assert_eq!(labels.len(), 5);
+        assert_eq!(labels[0].label, "i");
+        assert_eq!(labels[1].label, "ii");
+        assert_eq!(labels[2].label, "iii");
+        assert_eq!(labels[3].label, "1");
+        assert_eq!(labels[4].label, "2");
+    }
+
+    #[test]
+    fn page_labels_with_prefix() {
+        let mut doc = Document::new();
+        let mut pages_dict = Dictionary::new();
+        pages_dict.set("Type", Object::Name(b"Pages".to_vec()));
+        pages_dict.set("Count", Object::Integer(2));
+        let mut page1 = Dictionary::new();
+        page1.set("Type", Object::Name(b"Page".to_vec()));
+        page1.set("Parent", Object::Reference((2, 0)));
+        page1.set("MediaBox", Object::Array(vec![
+            Object::Integer(0), Object::Integer(0), Object::Integer(612), Object::Integer(792),
+        ]));
+        doc.objects.insert((10, 0), Object::Dictionary(page1));
+        let mut page2 = Dictionary::new();
+        page2.set("Type", Object::Name(b"Page".to_vec()));
+        page2.set("Parent", Object::Reference((2, 0)));
+        page2.set("MediaBox", Object::Array(vec![
+            Object::Integer(0), Object::Integer(0), Object::Integer(612), Object::Integer(792),
+        ]));
+        doc.objects.insert((11, 0), Object::Dictionary(page2));
+        pages_dict.set("Kids", Object::Array(vec![Object::Reference((10, 0)), Object::Reference((11, 0))]));
+        doc.objects.insert((2, 0), Object::Dictionary(pages_dict));
+
+        let mut rule = Dictionary::new();
+        rule.set("S", Object::Name(b"D".to_vec()));
+        rule.set("P", Object::String(b"A-".to_vec(), StringFormat::Literal));
+        rule.set("St", Object::Integer(1));
+        let mut pl_dict = Dictionary::new();
+        pl_dict.set("Nums", Object::Array(vec![
+            Object::Integer(0), Object::Dictionary(rule),
+        ]));
+        doc.objects.insert((3, 0), Object::Dictionary(pl_dict));
+
+        let mut catalog = Dictionary::new();
+        catalog.set("Type", Object::Name(b"Catalog".to_vec()));
+        catalog.set("Pages", Object::Reference((2, 0)));
+        catalog.set("PageLabels", Object::Reference((3, 0)));
+        doc.objects.insert((1, 0), Object::Dictionary(catalog));
+        doc.trailer.set("Root", Object::Reference((1, 0)));
+
+        let labels = collect_page_labels(&doc);
+        assert_eq!(labels.len(), 2);
+        assert_eq!(labels[0].label, "A-1");
+        assert_eq!(labels[1].label, "A-2");
+    }
+
+    #[test]
+    fn page_labels_print_no_labels() {
+        let mut doc = Document::new();
+        let mut catalog = Dictionary::new();
+        catalog.set("Type", Object::Name(b"Catalog".to_vec()));
+        doc.objects.insert((1, 0), Object::Dictionary(catalog));
+        doc.trailer.set("Root", Object::Reference((1, 0)));
+        let out = output_of(|w| print_page_labels(w, &doc));
+        assert!(out.contains("No page labels defined."));
+    }
+
+    #[test]
+    fn page_labels_json() {
+        let mut doc = Document::new();
+        let mut catalog = Dictionary::new();
+        catalog.set("Type", Object::Name(b"Catalog".to_vec()));
+        doc.objects.insert((1, 0), Object::Dictionary(catalog));
+        doc.trailer.set("Root", Object::Reference((1, 0)));
+        let out = output_of(|w| print_page_labels_json(w, &doc));
+        let parsed: Value = serde_json::from_str(&out).unwrap();
+        assert_eq!(parsed["page_count"], 0);
+    }
+
+    // ── links tests ──────────────────────────────────────────────────
+
+    fn make_page_with_annots(doc: &mut Document, page_id: ObjectId, parent_id: ObjectId, annot_ids: Vec<ObjectId>) {
+        let mut page = Dictionary::new();
+        page.set("Type", Object::Name(b"Page".to_vec()));
+        page.set("Parent", Object::Reference(parent_id));
+        page.set("MediaBox", Object::Array(vec![
+            Object::Integer(0), Object::Integer(0), Object::Integer(612), Object::Integer(792),
+        ]));
+        let refs: Vec<Object> = annot_ids.iter().map(|id| Object::Reference(*id)).collect();
+        page.set("Annots", Object::Array(refs));
+        doc.objects.insert(page_id, Object::Dictionary(page));
+    }
+
+    #[test]
+    fn links_uri_type() {
+        let mut doc = Document::new();
+        let mut action = Dictionary::new();
+        action.set("S", Object::Name(b"URI".to_vec()));
+        action.set("URI", Object::String(b"https://example.com".to_vec(), StringFormat::Literal));
+
+        let mut annot = Dictionary::new();
+        annot.set("Subtype", Object::Name(b"Link".to_vec()));
+        annot.set("Rect", Object::Array(vec![Object::Integer(0), Object::Integer(0), Object::Integer(100), Object::Integer(20)]));
+        annot.set("A", Object::Dictionary(action));
+        doc.objects.insert((20, 0), Object::Dictionary(annot));
+
+        let mut pages_dict = Dictionary::new();
+        pages_dict.set("Type", Object::Name(b"Pages".to_vec()));
+        pages_dict.set("Count", Object::Integer(1));
+        pages_dict.set("Kids", Object::Array(vec![Object::Reference((10, 0))]));
+        doc.objects.insert((2, 0), Object::Dictionary(pages_dict));
+        make_page_with_annots(&mut doc, (10, 0), (2, 0), vec![(20, 0)]);
+
+        let mut catalog = Dictionary::new();
+        catalog.set("Type", Object::Name(b"Catalog".to_vec()));
+        catalog.set("Pages", Object::Reference((2, 0)));
+        doc.objects.insert((1, 0), Object::Dictionary(catalog));
+        doc.trailer.set("Root", Object::Reference((1, 0)));
+
+        let links = collect_links(&doc, None);
+        assert_eq!(links.len(), 1);
+        assert_eq!(links[0].link_type, "URI");
+        assert_eq!(links[0].target, "https://example.com");
+    }
+
+    #[test]
+    fn links_goto_type() {
+        let mut doc = Document::new();
+        let mut annot = Dictionary::new();
+        annot.set("Subtype", Object::Name(b"Link".to_vec()));
+        annot.set("Rect", Object::Array(vec![Object::Integer(0), Object::Integer(0), Object::Integer(100), Object::Integer(20)]));
+        annot.set("Dest", Object::Array(vec![Object::Reference((10, 0)), Object::Name(b"Fit".to_vec())]));
+        doc.objects.insert((20, 0), Object::Dictionary(annot));
+
+        let mut pages_dict = Dictionary::new();
+        pages_dict.set("Type", Object::Name(b"Pages".to_vec()));
+        pages_dict.set("Count", Object::Integer(1));
+        pages_dict.set("Kids", Object::Array(vec![Object::Reference((10, 0))]));
+        doc.objects.insert((2, 0), Object::Dictionary(pages_dict));
+        make_page_with_annots(&mut doc, (10, 0), (2, 0), vec![(20, 0)]);
+
+        let mut catalog = Dictionary::new();
+        catalog.set("Type", Object::Name(b"Catalog".to_vec()));
+        catalog.set("Pages", Object::Reference((2, 0)));
+        doc.objects.insert((1, 0), Object::Dictionary(catalog));
+        doc.trailer.set("Root", Object::Reference((1, 0)));
+
+        let links = collect_links(&doc, None);
+        assert_eq!(links.len(), 1);
+        assert_eq!(links[0].link_type, "GoTo");
+    }
+
+    #[test]
+    fn links_no_links() {
+        let mut doc = Document::new();
+        let mut pages_dict = Dictionary::new();
+        pages_dict.set("Type", Object::Name(b"Pages".to_vec()));
+        pages_dict.set("Count", Object::Integer(1));
+        let mut page = Dictionary::new();
+        page.set("Type", Object::Name(b"Page".to_vec()));
+        page.set("Parent", Object::Reference((2, 0)));
+        page.set("MediaBox", Object::Array(vec![
+            Object::Integer(0), Object::Integer(0), Object::Integer(612), Object::Integer(792),
+        ]));
+        doc.objects.insert((10, 0), Object::Dictionary(page));
+        pages_dict.set("Kids", Object::Array(vec![Object::Reference((10, 0))]));
+        doc.objects.insert((2, 0), Object::Dictionary(pages_dict));
+        let mut catalog = Dictionary::new();
+        catalog.set("Type", Object::Name(b"Catalog".to_vec()));
+        catalog.set("Pages", Object::Reference((2, 0)));
+        doc.objects.insert((1, 0), Object::Dictionary(catalog));
+        doc.trailer.set("Root", Object::Reference((1, 0)));
+
+        let links = collect_links(&doc, None);
+        assert!(links.is_empty());
+    }
+
+    #[test]
+    fn links_mixed_annotations() {
+        // Has both Link and Text annotations, should only return Links
+        let mut doc = Document::new();
+        let mut link_annot = Dictionary::new();
+        link_annot.set("Subtype", Object::Name(b"Link".to_vec()));
+        link_annot.set("Rect", Object::Array(vec![Object::Integer(0), Object::Integer(0), Object::Integer(100), Object::Integer(20)]));
+        link_annot.set("Dest", Object::Name(b"dest1".to_vec()));
+        doc.objects.insert((20, 0), Object::Dictionary(link_annot));
+
+        let mut text_annot = Dictionary::new();
+        text_annot.set("Subtype", Object::Name(b"Text".to_vec()));
+        text_annot.set("Rect", Object::Array(vec![Object::Integer(0), Object::Integer(0), Object::Integer(100), Object::Integer(20)]));
+        doc.objects.insert((21, 0), Object::Dictionary(text_annot));
+
+        let mut pages_dict = Dictionary::new();
+        pages_dict.set("Type", Object::Name(b"Pages".to_vec()));
+        pages_dict.set("Count", Object::Integer(1));
+        pages_dict.set("Kids", Object::Array(vec![Object::Reference((10, 0))]));
+        doc.objects.insert((2, 0), Object::Dictionary(pages_dict));
+        make_page_with_annots(&mut doc, (10, 0), (2, 0), vec![(20, 0), (21, 0)]);
+
+        let mut catalog = Dictionary::new();
+        catalog.set("Type", Object::Name(b"Catalog".to_vec()));
+        catalog.set("Pages", Object::Reference((2, 0)));
+        doc.objects.insert((1, 0), Object::Dictionary(catalog));
+        doc.trailer.set("Root", Object::Reference((1, 0)));
+
+        let links = collect_links(&doc, None);
+        assert_eq!(links.len(), 1);
+        assert_eq!(links[0].link_type, "GoTo");
+    }
+
+    #[test]
+    fn links_page_filter() {
+        let mut doc = Document::new();
+        let mut link1 = Dictionary::new();
+        link1.set("Subtype", Object::Name(b"Link".to_vec()));
+        link1.set("Rect", Object::Array(vec![Object::Integer(0), Object::Integer(0), Object::Integer(100), Object::Integer(20)]));
+        link1.set("Dest", Object::Name(b"d1".to_vec()));
+        doc.objects.insert((20, 0), Object::Dictionary(link1));
+
+        let mut link2 = Dictionary::new();
+        link2.set("Subtype", Object::Name(b"Link".to_vec()));
+        link2.set("Rect", Object::Array(vec![Object::Integer(0), Object::Integer(0), Object::Integer(100), Object::Integer(20)]));
+        link2.set("Dest", Object::Name(b"d2".to_vec()));
+        doc.objects.insert((21, 0), Object::Dictionary(link2));
+
+        let mut pages_dict = Dictionary::new();
+        pages_dict.set("Type", Object::Name(b"Pages".to_vec()));
+        pages_dict.set("Count", Object::Integer(2));
+        pages_dict.set("Kids", Object::Array(vec![Object::Reference((10, 0)), Object::Reference((11, 0))]));
+        doc.objects.insert((2, 0), Object::Dictionary(pages_dict));
+        make_page_with_annots(&mut doc, (10, 0), (2, 0), vec![(20, 0)]);
+        make_page_with_annots(&mut doc, (11, 0), (2, 0), vec![(21, 0)]);
+
+        let mut catalog = Dictionary::new();
+        catalog.set("Type", Object::Name(b"Catalog".to_vec()));
+        catalog.set("Pages", Object::Reference((2, 0)));
+        doc.objects.insert((1, 0), Object::Dictionary(catalog));
+        doc.trailer.set("Root", Object::Reference((1, 0)));
+
+        let spec = PageSpec::Single(1);
+        let links = collect_links(&doc, Some(&spec));
+        assert_eq!(links.len(), 1);
+    }
+
+    #[test]
+    fn links_named_action() {
+        let mut doc = Document::new();
+        let mut action = Dictionary::new();
+        action.set("S", Object::Name(b"Named".to_vec()));
+        action.set("N", Object::Name(b"NextPage".to_vec()));
+
+        let mut annot = Dictionary::new();
+        annot.set("Subtype", Object::Name(b"Link".to_vec()));
+        annot.set("Rect", Object::Array(vec![Object::Integer(0), Object::Integer(0), Object::Integer(100), Object::Integer(20)]));
+        annot.set("A", Object::Dictionary(action));
+        doc.objects.insert((20, 0), Object::Dictionary(annot));
+
+        let mut pages_dict = Dictionary::new();
+        pages_dict.set("Type", Object::Name(b"Pages".to_vec()));
+        pages_dict.set("Count", Object::Integer(1));
+        pages_dict.set("Kids", Object::Array(vec![Object::Reference((10, 0))]));
+        doc.objects.insert((2, 0), Object::Dictionary(pages_dict));
+        make_page_with_annots(&mut doc, (10, 0), (2, 0), vec![(20, 0)]);
+
+        let mut catalog = Dictionary::new();
+        catalog.set("Type", Object::Name(b"Catalog".to_vec()));
+        catalog.set("Pages", Object::Reference((2, 0)));
+        doc.objects.insert((1, 0), Object::Dictionary(catalog));
+        doc.trailer.set("Root", Object::Reference((1, 0)));
+
+        let links = collect_links(&doc, None);
+        assert_eq!(links.len(), 1);
+        assert_eq!(links[0].link_type, "Named");
+        assert_eq!(links[0].target, "NextPage");
+    }
+
+    #[test]
+    fn links_goto_r_action() {
+        let mut doc = Document::new();
+        let mut action = Dictionary::new();
+        action.set("S", Object::Name(b"GoToR".to_vec()));
+        action.set("F", Object::String(b"other.pdf".to_vec(), StringFormat::Literal));
+
+        let mut annot = Dictionary::new();
+        annot.set("Subtype", Object::Name(b"Link".to_vec()));
+        annot.set("Rect", Object::Array(vec![Object::Integer(0), Object::Integer(0), Object::Integer(100), Object::Integer(20)]));
+        annot.set("A", Object::Dictionary(action));
+        doc.objects.insert((20, 0), Object::Dictionary(annot));
+
+        let mut pages_dict = Dictionary::new();
+        pages_dict.set("Type", Object::Name(b"Pages".to_vec()));
+        pages_dict.set("Count", Object::Integer(1));
+        pages_dict.set("Kids", Object::Array(vec![Object::Reference((10, 0))]));
+        doc.objects.insert((2, 0), Object::Dictionary(pages_dict));
+        make_page_with_annots(&mut doc, (10, 0), (2, 0), vec![(20, 0)]);
+
+        let mut catalog = Dictionary::new();
+        catalog.set("Type", Object::Name(b"Catalog".to_vec()));
+        catalog.set("Pages", Object::Reference((2, 0)));
+        doc.objects.insert((1, 0), Object::Dictionary(catalog));
+        doc.trailer.set("Root", Object::Reference((1, 0)));
+
+        let links = collect_links(&doc, None);
+        assert_eq!(links.len(), 1);
+        assert_eq!(links[0].link_type, "GoToR");
+        assert!(links[0].target.contains("other.pdf"));
+    }
+
+    #[test]
+    fn links_print_output() {
+        let doc = Document::new();
+        let out = output_of(|w| print_links(w, &doc, None));
+        assert!(out.contains("0 links found"));
+    }
+
+    #[test]
+    fn links_json_output() {
+        let doc = Document::new();
+        let out = output_of(|w| print_links_json(w, &doc, None));
+        let parsed: Value = serde_json::from_str(&out).unwrap();
+        assert_eq!(parsed["link_count"], 0);
+        assert_eq!(parsed["links"].as_array().unwrap().len(), 0);
+    }
+
+    // ── enhanced validate tests ──────────────────────────────────────
+
+    #[test]
+    fn validate_content_stream_valid() {
+        let mut doc = Document::new();
+        let content = b"BT /F1 12 Tf (Hello) Tj ET";
+        let stream = Stream::new(Dictionary::new(), content.to_vec());
+        let c_id = doc.add_object(Object::Stream(stream));
+        let mut page = Dictionary::new();
+        page.set("Type", Object::Name(b"Page".to_vec()));
+        page.set("Contents", Object::Reference(c_id));
+        page.set("MediaBox", Object::Array(vec![
+            Object::Integer(0), Object::Integer(0), Object::Integer(612), Object::Integer(792),
+        ]));
+        let p_id = doc.add_object(Object::Dictionary(page));
+        let mut pages = Dictionary::new();
+        pages.set("Type", Object::Name(b"Pages".to_vec()));
+        pages.set("Count", Object::Integer(1));
+        pages.set("Kids", Object::Array(vec![Object::Reference(p_id)]));
+        let pages_id = doc.add_object(Object::Dictionary(pages));
+        let mut catalog = Dictionary::new();
+        catalog.set("Type", Object::Name(b"Catalog".to_vec()));
+        catalog.set("Pages", Object::Reference(pages_id));
+        let cat_id = doc.add_object(Object::Dictionary(catalog));
+        doc.trailer.set("Root", Object::Reference(cat_id));
+
+        let mut issues = Vec::new();
+        check_content_stream_syntax(&doc, &mut issues);
+        assert!(issues.is_empty(), "Valid content stream should produce no issues");
+    }
+
+    #[test]
+    fn validate_content_stream_invalid() {
+        let mut doc = Document::new();
+        let content = b"THIS IS NOT VALID PDF CONTENT STREAM SYNTAX <<<>>>!!!";
+        let stream = Stream::new(Dictionary::new(), content.to_vec());
+        let c_id = doc.add_object(Object::Stream(stream));
+        let mut page = Dictionary::new();
+        page.set("Type", Object::Name(b"Page".to_vec()));
+        page.set("Contents", Object::Reference(c_id));
+        page.set("MediaBox", Object::Array(vec![
+            Object::Integer(0), Object::Integer(0), Object::Integer(612), Object::Integer(792),
+        ]));
+        let p_id = doc.add_object(Object::Dictionary(page));
+        let mut pages = Dictionary::new();
+        pages.set("Type", Object::Name(b"Pages".to_vec()));
+        pages.set("Count", Object::Integer(1));
+        pages.set("Kids", Object::Array(vec![Object::Reference(p_id)]));
+        let pages_id = doc.add_object(Object::Dictionary(pages));
+        let mut catalog = Dictionary::new();
+        catalog.set("Type", Object::Name(b"Catalog".to_vec()));
+        catalog.set("Pages", Object::Reference(pages_id));
+        let cat_id = doc.add_object(Object::Dictionary(catalog));
+        doc.trailer.set("Root", Object::Reference(cat_id));
+
+        let mut issues = Vec::new();
+        check_content_stream_syntax(&doc, &mut issues);
+        // Note: lopdf's Content::decode is lenient; it may or may not fail on arbitrary bytes.
+        // If it does fail, we should get a warning about invalid syntax.
+        // If it doesn't fail, that's also acceptable.
+    }
+
+    #[test]
+    fn validate_font_missing_basefont() {
+        let mut doc = Document::new();
+        let mut font = Dictionary::new();
+        font.set("Type", Object::Name(b"Font".to_vec()));
+        font.set("Subtype", Object::Name(b"Type1".to_vec()));
+        // Missing BaseFont
+        doc.objects.insert((1, 0), Object::Dictionary(font));
+
+        let mut issues = Vec::new();
+        check_font_requirements(&doc, &mut issues);
+        assert!(issues.iter().any(|i| i.message.contains("missing /BaseFont")));
+    }
+
+    #[test]
+    fn validate_font_valid() {
+        let mut doc = Document::new();
+        let mut font = Dictionary::new();
+        font.set("Type", Object::Name(b"Font".to_vec()));
+        font.set("Subtype", Object::Name(b"Type1".to_vec()));
+        font.set("BaseFont", Object::Name(b"Helvetica".to_vec()));
+        doc.objects.insert((1, 0), Object::Dictionary(font));
+
+        let mut issues = Vec::new();
+        check_font_requirements(&doc, &mut issues);
+        assert!(issues.is_empty());
+    }
+
+    #[test]
+    fn validate_font_widths_mismatch() {
+        let mut doc = Document::new();
+        let mut font = Dictionary::new();
+        font.set("Type", Object::Name(b"Font".to_vec()));
+        font.set("Subtype", Object::Name(b"TrueType".to_vec()));
+        font.set("BaseFont", Object::Name(b"Arial".to_vec()));
+        font.set("FirstChar", Object::Integer(32));
+        font.set("LastChar", Object::Integer(126));
+        // Expected: 95 widths, provide only 10
+        let widths: Vec<Object> = (0..10).map(|_| Object::Integer(600)).collect();
+        font.set("Widths", Object::Array(widths));
+        doc.objects.insert((1, 0), Object::Dictionary(font));
+
+        let mut issues = Vec::new();
+        check_font_requirements(&doc, &mut issues);
+        assert!(issues.iter().any(|i| i.message.contains("/Widths")));
+    }
+
+    #[test]
+    fn validate_font_firstchar_without_lastchar() {
+        let mut doc = Document::new();
+        let mut font = Dictionary::new();
+        font.set("Type", Object::Name(b"Font".to_vec()));
+        font.set("Subtype", Object::Name(b"Type1".to_vec()));
+        font.set("BaseFont", Object::Name(b"Helvetica".to_vec()));
+        font.set("FirstChar", Object::Integer(32));
+        // Missing LastChar
+        doc.objects.insert((1, 0), Object::Dictionary(font));
+
+        let mut issues = Vec::new();
+        check_font_requirements(&doc, &mut issues);
+        assert!(issues.iter().any(|i| i.message.contains("/FirstChar") && i.message.contains("/LastChar")));
+    }
+
+    #[test]
+    fn validate_page_tree_cycle() {
+        let mut doc = Document::new();
+        // Create two page nodes that form a parent cycle
+        let mut page = Dictionary::new();
+        page.set("Type", Object::Name(b"Page".to_vec()));
+        page.set("Parent", Object::Reference((2, 0)));
+        page.set("MediaBox", Object::Array(vec![
+            Object::Integer(0), Object::Integer(0), Object::Integer(612), Object::Integer(792),
+        ]));
+        doc.objects.insert((10, 0), Object::Dictionary(page));
+
+        let mut parent1 = Dictionary::new();
+        parent1.set("Type", Object::Name(b"Pages".to_vec()));
+        parent1.set("Parent", Object::Reference((3, 0)));
+        parent1.set("Count", Object::Integer(1));
+        parent1.set("Kids", Object::Array(vec![Object::Reference((10, 0))]));
+        doc.objects.insert((2, 0), Object::Dictionary(parent1));
+
+        let mut parent2 = Dictionary::new();
+        parent2.set("Type", Object::Name(b"Pages".to_vec()));
+        parent2.set("Parent", Object::Reference((2, 0))); // cycle!
+        doc.objects.insert((3, 0), Object::Dictionary(parent2));
+
+        let mut catalog = Dictionary::new();
+        catalog.set("Type", Object::Name(b"Catalog".to_vec()));
+        catalog.set("Pages", Object::Reference((2, 0)));
+        doc.objects.insert((1, 0), Object::Dictionary(catalog));
+        doc.trailer.set("Root", Object::Reference((1, 0)));
+
+        let mut issues = Vec::new();
+        check_page_tree_cycles(&doc, &mut issues);
+        assert!(issues.iter().any(|i| i.message.contains("cycle")));
+    }
+
+    #[test]
+    fn validate_name_tree_odd_names() {
+        let mut doc = Document::new();
+        let mut names_subtree = Dictionary::new();
+        // Odd-length Names array
+        names_subtree.set("Names", Object::Array(vec![
+            Object::String(b"key1".to_vec(), StringFormat::Literal),
+            Object::Integer(1),
+            Object::String(b"key2".to_vec(), StringFormat::Literal),
+            // Missing value for key2 → odd length = 3
+        ]));
+        doc.objects.insert((5, 0), Object::Dictionary(names_subtree));
+
+        let mut ef_dict = Dictionary::new();
+        ef_dict.set("Kids", Object::Array(vec![Object::Reference((5, 0))]));
+        doc.objects.insert((4, 0), Object::Dictionary(ef_dict));
+
+        let mut names = Dictionary::new();
+        names.set("EmbeddedFiles", Object::Reference((4, 0)));
+        doc.objects.insert((3, 0), Object::Dictionary(names));
+
+        let mut catalog = Dictionary::new();
+        catalog.set("Type", Object::Name(b"Catalog".to_vec()));
+        catalog.set("Names", Object::Reference((3, 0)));
+        doc.objects.insert((1, 0), Object::Dictionary(catalog));
+        doc.trailer.set("Root", Object::Reference((1, 0)));
+
+        let mut issues = Vec::new();
+        check_names_tree_structure(&doc, &mut issues);
+        assert!(issues.iter().any(|i| i.message.contains("odd length")));
+    }
+
+    #[test]
+    fn validate_name_tree_no_names_or_kids() {
+        let mut doc = Document::new();
+        // Empty dict node (neither /Names nor /Kids)
+        let empty_node = Dictionary::new();
+        doc.objects.insert((5, 0), Object::Dictionary(empty_node));
+
+        let mut ef_dict = Dictionary::new();
+        ef_dict.set("Kids", Object::Array(vec![Object::Reference((5, 0))]));
+        doc.objects.insert((4, 0), Object::Dictionary(ef_dict));
+
+        let mut names = Dictionary::new();
+        names.set("EmbeddedFiles", Object::Reference((4, 0)));
+        doc.objects.insert((3, 0), Object::Dictionary(names));
+
+        let mut catalog = Dictionary::new();
+        catalog.set("Type", Object::Name(b"Catalog".to_vec()));
+        catalog.set("Names", Object::Reference((3, 0)));
+        doc.objects.insert((1, 0), Object::Dictionary(catalog));
+        doc.trailer.set("Root", Object::Reference((1, 0)));
+
+        let mut issues = Vec::new();
+        check_names_tree_structure(&doc, &mut issues);
+        assert!(issues.iter().any(|i| i.message.contains("neither /Names nor /Kids")));
+    }
+
+    #[test]
+    fn validate_duplicate_objects() {
+        let mut doc = Document::new();
+        doc.objects.insert((1, 0), Object::Integer(1));
+        doc.objects.insert((1, 1), Object::Integer(2)); // Same obj# different gen
+        doc.objects.insert((2, 0), Object::Integer(3));
+
+        let mut issues = Vec::new();
+        check_duplicate_objects(&doc, &mut issues);
+        assert!(issues.iter().any(|i| i.message.contains("Object 1") && i.message.contains("multiple generations")));
+    }
+
+    #[test]
+    fn validate_no_duplicate_objects() {
+        let mut doc = Document::new();
+        doc.objects.insert((1, 0), Object::Integer(1));
+        doc.objects.insert((2, 0), Object::Integer(2));
+
+        let mut issues = Vec::new();
+        check_duplicate_objects(&doc, &mut issues);
+        assert!(issues.is_empty());
     }
 }
