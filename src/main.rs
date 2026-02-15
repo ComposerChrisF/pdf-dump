@@ -471,9 +471,9 @@ fn main() {
     } else if args.security {
         let mut out = io::stdout().lock();
         if config.json {
-            print_security_json(&mut out, &doc);
+            print_security_json(&mut out, &doc, &args.file);
         } else {
-            print_security(&mut out, &doc);
+            print_security(&mut out, &doc, &args.file);
         }
     } else if args.embedded_files {
         let mut out = io::stdout().lock();
@@ -4149,7 +4149,8 @@ fn decode_permissions(p: i64) -> BTreeMap<String, bool> {
     perms
 }
 
-fn collect_security(doc: &Document) -> SecurityInfo {
+fn collect_security(doc: &Document, file_path: Option<&std::path::Path>) -> SecurityInfo {
+    // Try trailer first (works for traditional xref tables)
     let encrypt_ref = doc.trailer.get(b"Encrypt").ok()
         .and_then(|v| match v {
             Object::Reference(id) => Some(*id),
@@ -4163,7 +4164,7 @@ fn collect_security(doc: &Document) -> SecurityInfo {
             _ => None,
         });
 
-    // Also check if /Encrypt is an inline dictionary
+    // Also check if /Encrypt is an inline dictionary in the trailer
     let encrypt_dict = encrypt_dict.or_else(|| {
         doc.trailer.get(b"Encrypt").ok().and_then(|v| match v {
             Object::Dictionary(d) => Some(d),
@@ -4171,47 +4172,161 @@ fn collect_security(doc: &Document) -> SecurityInfo {
         })
     });
 
-    match encrypt_dict {
-        Some(dict) => {
-            let v = dict.get(b"V").ok()
-                .and_then(|o| if let Object::Integer(i) = o { Some(*i) } else { None })
-                .unwrap_or(0);
-            let r = dict.get(b"R").ok()
-                .and_then(|o| if let Object::Integer(i) = o { Some(*i) } else { None })
-                .unwrap_or(0);
-            let length = dict.get(b"Length").ok()
-                .and_then(|o| if let Object::Integer(i) = o { Some(*i) } else { None })
-                .unwrap_or(40);
-            let p = dict.get(b"P").ok()
-                .and_then(|o| if let Object::Integer(i) = o { Some(*i) } else { None })
-                .unwrap_or(0);
+    if let Some(dict) = encrypt_dict {
+        return build_security_info(dict, encrypt_ref);
+    }
 
-            SecurityInfo {
-                encrypted: true,
-                algorithm: algorithm_name(v, length),
-                version: v,
-                revision: r,
-                key_length: length,
-                permissions_raw: p,
-                permissions: decode_permissions(p),
-                encrypt_object: encrypt_ref.map(|id| id.0),
+    // Fallback: lopdf consumes /Encrypt from the trailer during loading and
+    // removes the encrypt dict object. For cross-reference stream PDFs, the
+    // XRef stream object still has /Encrypt in its dict. Scan for it.
+    let mut found_encrypt_obj: Option<u32> = None;
+    for object in doc.objects.values() {
+        let stream_dict = match object {
+            Object::Stream(s) => &s.dict,
+            _ => continue,
+        };
+        let is_xref = stream_dict.get(b"Type").ok()
+            .and_then(|v| v.as_name().ok())
+            .is_some_and(|n| n == b"XRef");
+        if !is_xref { continue; }
+
+        let enc_ref = stream_dict.get(b"Encrypt").ok()
+            .and_then(|v| match v {
+                Object::Reference(id) => Some(*id),
+                _ => None,
+            });
+
+        if let Some(ref_id) = enc_ref {
+            // Try to resolve the encrypt dict (usually consumed by lopdf)
+            if let Ok(Object::Dictionary(d)) = doc.get_object(ref_id) {
+                return build_security_info(d, Some(ref_id));
             }
+            found_encrypt_obj = Some(ref_id.0);
+            break;
         }
-        None => SecurityInfo {
-            encrypted: false,
-            algorithm: "-".to_string(),
-            version: 0,
-            revision: 0,
-            key_length: 0,
-            permissions_raw: 0,
-            permissions: BTreeMap::new(),
-            encrypt_object: None,
-        },
+
+        // Check for inline /Encrypt dict
+        if let Ok(Object::Dictionary(d)) = stream_dict.get(b"Encrypt") {
+            return build_security_info(d, None);
+        }
+    }
+
+    // Last resort: read the raw file bytes to find the encrypt dict that
+    // lopdf consumed during loading.
+    if let Some(obj_num) = found_encrypt_obj
+        && let Some(path) = file_path
+        && let Some(info) = parse_encrypt_from_raw_file(path, obj_num)
+    {
+        return info;
+    }
+
+    SecurityInfo {
+        encrypted: false,
+        algorithm: "-".to_string(),
+        version: 0,
+        revision: 0,
+        key_length: 0,
+        permissions_raw: 0,
+        permissions: BTreeMap::new(),
+        encrypt_object: None,
     }
 }
 
-fn print_security(writer: &mut impl Write, doc: &Document) {
-    let info = collect_security(doc);
+fn build_security_info(dict: &lopdf::Dictionary, encrypt_ref: Option<ObjectId>) -> SecurityInfo {
+    let v = dict.get(b"V").ok()
+        .and_then(|o| if let Object::Integer(i) = o { Some(*i) } else { None })
+        .unwrap_or(0);
+    let r = dict.get(b"R").ok()
+        .and_then(|o| if let Object::Integer(i) = o { Some(*i) } else { None })
+        .unwrap_or(0);
+    let length = dict.get(b"Length").ok()
+        .and_then(|o| if let Object::Integer(i) = o { Some(*i) } else { None })
+        .unwrap_or(40);
+    let p = dict.get(b"P").ok()
+        .and_then(|o| if let Object::Integer(i) = o { Some(*i) } else { None })
+        .unwrap_or(0);
+
+    SecurityInfo {
+        encrypted: true,
+        algorithm: algorithm_name(v, length),
+        version: v,
+        revision: r,
+        key_length: length,
+        permissions_raw: p,
+        permissions: decode_permissions(p),
+        encrypt_object: encrypt_ref.map(|id| id.0),
+    }
+}
+
+/// Parse the encrypt dictionary directly from the raw PDF file bytes.
+/// lopdf consumes this object during loading, so we find it by searching
+/// for "{obj_num} 0 obj" and extracting the integer-valued keys we need.
+fn parse_encrypt_from_raw_file(path: &std::path::Path, obj_num: u32) -> Option<SecurityInfo> {
+    let data = fs::read(path).ok()?;
+    let marker = format!("{} 0 obj", obj_num);
+    let marker_bytes = marker.as_bytes();
+
+    // Find the object in the raw bytes
+    let pos = data.windows(marker_bytes.len())
+        .position(|w| w == marker_bytes)?;
+
+    // Extract a window after the marker — encrypt dicts are small
+    let start = pos + marker_bytes.len();
+    let end = (start + 1024).min(data.len());
+    let window = &data[start..end];
+
+    // Find the dictionary start
+    let dict_start = window.windows(2).position(|w| w == b"<<")?;
+    let dict_bytes = &window[dict_start..];
+
+    let v = extract_int_after_key(dict_bytes, b"/V").unwrap_or(0);
+    let r = extract_int_after_key(dict_bytes, b"/R").unwrap_or(0);
+    let length = extract_int_after_key(dict_bytes, b"/Length").unwrap_or(40);
+    let p = extract_int_after_key(dict_bytes, b"/P").unwrap_or(0);
+
+    Some(SecurityInfo {
+        encrypted: true,
+        algorithm: algorithm_name(v, length),
+        version: v,
+        revision: r,
+        key_length: length,
+        permissions_raw: p,
+        permissions: decode_permissions(p),
+        encrypt_object: Some(obj_num),
+    })
+}
+
+/// Find a PDF key name in raw bytes and parse the integer that follows it.
+/// Handles negative integers (e.g. /P -1084).
+fn extract_int_after_key(data: &[u8], key: &[u8]) -> Option<i64> {
+    let pos = data.windows(key.len()).position(|w| w == key)?;
+    let after = &data[pos + key.len()..];
+
+    // Skip whitespace and any non-digit characters (but allow '-')
+    let mut i = 0;
+    while i < after.len() && (after[i] == b' ' || after[i] == b'\r' || after[i] == b'\n') {
+        i += 1;
+    }
+    if i >= after.len() { return None; }
+
+    // Parse the integer (possibly negative)
+    let mut end = i;
+    if after[end] == b'-' || after[end] == b'+' {
+        end += 1;
+    }
+    while end < after.len() && after[end].is_ascii_digit() {
+        end += 1;
+    }
+    if end == i { return None; }
+    // If we only got a sign with no digits, bail
+    if end == i + 1 && (after[i] == b'-' || after[i] == b'+') { return None; }
+
+    let num_str = std::str::from_utf8(&after[i..end]).ok()?;
+    num_str.parse().ok()
+}
+
+fn print_security(writer: &mut impl Write, doc: &Document, file_path: &std::path::Path) {
+    let info = collect_security(doc, Some(file_path));
     if !info.encrypted {
         writeln!(writer, "Encryption: No").unwrap();
         return;
@@ -4237,8 +4352,8 @@ fn print_security(writer: &mut impl Write, doc: &Document) {
     }
 }
 
-fn print_security_json(writer: &mut impl Write, doc: &Document) {
-    let info = collect_security(doc);
+fn print_security_json(writer: &mut impl Write, doc: &Document, file_path: &std::path::Path) {
+    let info = collect_security(doc, Some(file_path));
     let perms: Value = info.permissions.iter()
         .map(|(k, v)| (k.clone(), json!(*v)))
         .collect::<serde_json::Map<String, Value>>()
@@ -13147,7 +13262,7 @@ mod tests {
     #[test]
     fn security_unencrypted() {
         let doc = Document::new();
-        let info = collect_security(&doc);
+        let info = collect_security(&doc, None);
         assert!(!info.encrypted);
     }
 
@@ -13162,7 +13277,7 @@ mod tests {
         let enc_id = doc.add_object(Object::Dictionary(encrypt));
         doc.trailer.set("Encrypt", Object::Reference(enc_id));
 
-        let info = collect_security(&doc);
+        let info = collect_security(&doc, None);
         assert!(info.encrypted);
         assert_eq!(info.algorithm, "AES-128");
         assert_eq!(info.version, 4);
@@ -13181,7 +13296,7 @@ mod tests {
         let enc_id = doc.add_object(Object::Dictionary(encrypt));
         doc.trailer.set("Encrypt", Object::Reference(enc_id));
 
-        let info = collect_security(&doc);
+        let info = collect_security(&doc, None);
         assert!(info.encrypted);
         assert_eq!(info.algorithm, "AES-256");
         assert_eq!(info.version, 5);
@@ -13197,7 +13312,7 @@ mod tests {
         let enc_id = doc.add_object(Object::Dictionary(encrypt));
         doc.trailer.set("Encrypt", Object::Reference(enc_id));
 
-        let info = collect_security(&doc);
+        let info = collect_security(&doc, None);
         assert!(info.encrypted);
         assert_eq!(info.algorithm, "RC4, 40-bit");
     }
@@ -13229,7 +13344,8 @@ mod tests {
     #[test]
     fn security_print_unencrypted() {
         let doc = Document::new();
-        let out = output_of(|w| print_security(w, &doc));
+        let dummy = std::path::Path::new("nonexistent.pdf");
+        let out = output_of(|w| print_security(w, &doc, dummy));
         assert!(out.contains("Encryption: No"));
     }
 
@@ -13243,7 +13359,8 @@ mod tests {
         encrypt.set("P", Object::Integer(-3)); // all permissions
         let enc_id = doc.add_object(Object::Dictionary(encrypt));
         doc.trailer.set("Encrypt", Object::Reference(enc_id));
-        let out = output_of(|w| print_security(w, &doc));
+        let dummy = std::path::Path::new("nonexistent.pdf");
+        let out = output_of(|w| print_security(w, &doc, dummy));
         assert!(out.contains("Encryption: Yes"));
         assert!(out.contains("AES-128"));
         assert!(out.contains("[YES] Print"));
@@ -13259,12 +13376,70 @@ mod tests {
         encrypt.set("P", Object::Integer(-3));
         let enc_id = doc.add_object(Object::Dictionary(encrypt));
         doc.trailer.set("Encrypt", Object::Reference(enc_id));
-        let out = output_of(|w| print_security_json(w, &doc));
+        let dummy = std::path::Path::new("nonexistent.pdf");
+        let out = output_of(|w| print_security_json(w, &doc, dummy));
         let parsed: Value = serde_json::from_str(&out).unwrap();
         assert_eq!(parsed["encrypted"], true);
         assert_eq!(parsed["algorithm"], "AES-128");
         assert_eq!(parsed["version"], 4);
         assert!(parsed["permissions"].is_object());
+    }
+
+    // ── raw encrypt parsing tests ────────────────────────────────────
+
+    #[test]
+    fn extract_int_after_key_basic() {
+        let data = b"<</V 4/R 4/Length 128/P -1084>>";
+        assert_eq!(extract_int_after_key(data, b"/V"), Some(4));
+        assert_eq!(extract_int_after_key(data, b"/R"), Some(4));
+        assert_eq!(extract_int_after_key(data, b"/Length"), Some(128));
+        assert_eq!(extract_int_after_key(data, b"/P"), Some(-1084));
+    }
+
+    #[test]
+    fn extract_int_after_key_with_spaces() {
+        let data = b"<< /V  2  /R  3  /Length  128  /P  -3904 >>";
+        assert_eq!(extract_int_after_key(data, b"/V"), Some(2));
+        assert_eq!(extract_int_after_key(data, b"/P"), Some(-3904));
+    }
+
+    #[test]
+    fn extract_int_after_key_missing() {
+        let data = b"<</V 4/R 4>>";
+        assert_eq!(extract_int_after_key(data, b"/Length"), None);
+    }
+
+    #[test]
+    fn extract_int_after_key_negative() {
+        let data = b"/P -1";
+        assert_eq!(extract_int_after_key(data, b"/P"), Some(-1));
+    }
+
+    #[test]
+    fn parse_encrypt_from_raw_file_with_tempfile() {
+        let content = b"%PDF-1.6\n5 0 obj\n<</Filter/Standard/V 2/R 3/Length 128/P -1084>>\nendobj\n";
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("test.pdf");
+        std::fs::write(&path, content).unwrap();
+
+        let info = parse_encrypt_from_raw_file(&path, 5).unwrap();
+        assert!(info.encrypted);
+        assert_eq!(info.version, 2);
+        assert_eq!(info.revision, 3);
+        assert_eq!(info.key_length, 128);
+        assert_eq!(info.permissions_raw, -1084);
+        assert_eq!(info.encrypt_object, Some(5));
+    }
+
+    #[test]
+    fn parse_encrypt_from_raw_file_not_found() {
+        let content = b"%PDF-1.6\n1 0 obj\n<</Type/Catalog>>\nendobj\n";
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("test.pdf");
+        std::fs::write(&path, content).unwrap();
+
+        let result = parse_encrypt_from_raw_file(&path, 99);
+        assert!(result.is_none());
     }
 
     // ── embedded files tests ─────────────────────────────────────────
