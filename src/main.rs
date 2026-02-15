@@ -129,6 +129,10 @@ struct Args {
     #[arg(long)]
     deref: bool,
 
+    /// Show raw undecoded stream bytes (use with --object)
+    #[arg(long)]
+    raw: bool,
+
     /// Show encryption and permission details
     #[arg(long)]
     security: bool,
@@ -144,6 +148,14 @@ struct Args {
     /// List link annotations with targets (all pages, or filtered with --page)
     #[arg(long)]
     links: bool,
+
+    /// Show optional content groups (layers)
+    #[arg(long, alias = "ocg")]
+    layers: bool,
+
+    /// Show tagged PDF logical structure tree
+    #[arg(long)]
+    structure: bool,
 }
 
 #[derive(Clone, Copy)]
@@ -154,6 +166,7 @@ struct DumpConfig {
     hex: bool,
     depth: Option<usize>,
     deref: bool,
+    raw: bool,
 }
 
 enum PageSpec {
@@ -257,10 +270,24 @@ fn main() {
         args.embedded_files,
         args.page_labels,
         args.links && args.page.is_none(),
+        args.layers,
+        args.structure,
     ].iter().filter(|&&b| b).count();
     if mode_count > 1 {
         eprintln!("Error: Only one mode flag may be used at a time.");
         std::process::exit(1);
+    }
+
+    // --raw validation: requires --object, conflicts with --decode-streams
+    if args.raw {
+        if args.object.is_none() {
+            eprintln!("Error: --raw requires --object.");
+            std::process::exit(1);
+        }
+        if args.decode_streams {
+            eprintln!("Error: --raw and --decode-streams cannot be used together.");
+            std::process::exit(1);
+        }
     }
 
     // --diff validation: only works with default mode, --page, and --json
@@ -286,7 +313,9 @@ fn main() {
             || args.security
             || args.embedded_files
             || args.page_labels
-            || args.links;
+            || args.links
+            || args.layers
+            || args.structure;
         if incompatible {
             eprintln!("Error: --diff can only be combined with --page and --json.");
             std::process::exit(1);
@@ -310,6 +339,7 @@ fn main() {
         hex: args.hex,
         depth: args.depth,
         deref: args.deref,
+        raw: args.raw,
     };
 
     let page_spec = args.page.as_deref().map(|s| {
@@ -495,6 +525,20 @@ fn main() {
             print_links_json(&mut out, &doc, page_spec.as_ref());
         } else {
             print_links(&mut out, &doc, page_spec.as_ref());
+        }
+    } else if args.layers {
+        let mut out = io::stdout().lock();
+        if config.json {
+            print_layers_json(&mut out, &doc);
+        } else {
+            print_layers(&mut out, &doc);
+        }
+    } else if args.structure {
+        let mut out = io::stdout().lock();
+        if config.json {
+            print_structure_json(&mut out, &doc, &config);
+        } else {
+            print_structure(&mut out, &doc, &config);
         }
     } else if args.tree {
         let mut out = io::stdout().lock();
@@ -924,7 +968,9 @@ fn print_object(writer: &mut impl Write, obj: &Object, doc: &Document, visited: 
             }
             write!(writer, "{}>> stream", indent_str).unwrap();
 
-            if config.decode_streams {
+            if config.raw {
+                print_content_data(writer, &stream.content, "raw, undecoded", &indent_str, config, false, None);
+            } else if config.decode_streams {
                 print_stream_content(writer, stream, &indent_str, config, is_contents);
             }
         }
@@ -1120,7 +1166,21 @@ fn object_to_json(obj: &Object, doc: &Document, config: &DumpConfig) -> Value {
                 .map(|(k, v)| (String::from_utf8_lossy(k).into_owned(), object_to_json(v, doc, config)))
                 .collect();
             let mut val = json!({"type": "stream", "dict": entries});
-            if config.decode_streams {
+            if config.raw {
+                let content = &stream.content;
+                if !is_binary_stream(content) {
+                    val["raw_content"] = json!(String::from_utf8_lossy(content));
+                } else if config.hex {
+                    let display_data = if let Some(limit) = config.truncate {
+                        &content[..content.len().min(limit)]
+                    } else {
+                        content.as_slice()
+                    };
+                    val["raw_content_hex"] = json!(format_hex_dump(display_data));
+                } else {
+                    val["raw_content_binary"] = json!(format!("<binary, {} bytes>", content.len()));
+                }
+            } else if config.decode_streams {
                 let (decoded, warning) = decode_stream(stream);
                 if let Some(warn) = &warning {
                     val["decode_warning"] = json!(warn);
@@ -1155,7 +1215,7 @@ fn object_to_json(obj: &Object, doc: &Document, config: &DumpConfig) -> Value {
 }
 
 fn collect_reachable_objects(doc: &Document, max_depth: Option<usize>) -> BTreeMap<String, Value> {
-    let config = DumpConfig { decode_streams: false, truncate: None, json: true, hex: false, depth: None, deref: false };
+    let config = DumpConfig { decode_streams: false, truncate: None, json: true, hex: false, depth: None, deref: false, raw: false };
     let mut result = BTreeMap::new();
     let mut visited = BTreeSet::new();
 
@@ -2879,6 +2939,12 @@ struct FontInfo {
     subtype: String,
     encoding: String,
     embedded: Option<ObjectId>,
+    to_unicode: Option<ObjectId>,
+    first_char: Option<i64>,
+    last_char: Option<i64>,
+    widths_len: Option<usize>,
+    encoding_differences: Option<String>,
+    cid_system_info: Option<String>,
 }
 
 fn collect_fonts(doc: &Document) -> Vec<FontInfo> {
@@ -2940,11 +3006,137 @@ fn collect_fonts(doc: &Document) -> Vec<FontInfo> {
                 None
             });
 
-        fonts.push(FontInfo { object_id: obj_id, base_font, subtype, encoding, embedded });
+        let to_unicode = dict.get(b"ToUnicode").ok()
+            .and_then(|v| v.as_reference().ok());
+
+        let first_char = dict.get(b"FirstChar").ok()
+            .and_then(|v| v.as_i64().ok());
+
+        let last_char = dict.get(b"LastChar").ok()
+            .and_then(|v| v.as_i64().ok());
+
+        let widths_len = dict.get(b"Widths").ok()
+            .and_then(|v| match v {
+                Object::Array(arr) => Some(arr.len()),
+                Object::Reference(id) => doc.get_object(*id).ok().and_then(|o| {
+                    if let Object::Array(arr) = o { Some(arr.len()) } else { None }
+                }),
+                _ => None,
+            });
+
+        let encoding_differences = extract_encoding_differences(doc, dict);
+        let cid_system_info = extract_cid_system_info(doc, dict);
+
+        fonts.push(FontInfo {
+            object_id: obj_id, base_font, subtype, encoding, embedded,
+            to_unicode, first_char, last_char, widths_len,
+            encoding_differences, cid_system_info,
+        });
     }
 
     fonts.sort_by_key(|f| f.object_id);
     fonts
+}
+
+fn extract_encoding_differences(doc: &Document, dict: &lopdf::Dictionary) -> Option<String> {
+    let enc_obj = dict.get(b"Encoding").ok()?;
+    let enc_dict = match enc_obj {
+        Object::Dictionary(d) => d,
+        Object::Reference(id) => match doc.get_object(*id).ok()? {
+            Object::Dictionary(d) => d,
+            _ => return None,
+        },
+        _ => return None,
+    };
+    let diffs = enc_dict.get(b"Differences").ok()?;
+    let diffs_arr;
+    let arr = match diffs {
+        Object::Array(a) => a,
+        Object::Reference(id) => match doc.get_object(*id).ok()? {
+            Object::Array(a) => { diffs_arr = a; diffs_arr }
+            _ => return None,
+        },
+        _ => return None,
+    };
+
+    let mut parts = Vec::new();
+    let mut current_code: Option<i64> = None;
+    let mut total_names = 0usize;
+    for item in arr {
+        match item {
+            Object::Integer(n) => { current_code = Some(*n); }
+            Object::Name(n) => {
+                total_names += 1;
+                if parts.len() < 5 {
+                    let name = String::from_utf8_lossy(n);
+                    if let Some(code) = current_code {
+                        parts.push(format!("{}=/{}", code, name));
+                        current_code = Some(code + 1);
+                    } else {
+                        parts.push(format!("/{}", name));
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+
+    if total_names == 0 {
+        return None;
+    }
+
+    let mut summary = parts.join(", ");
+    if total_names > 5 {
+        summary.push_str(&format!(", ... ({} total)", total_names));
+    }
+    Some(summary)
+}
+
+fn extract_cid_system_info(doc: &Document, dict: &lopdf::Dictionary) -> Option<String> {
+    let descendants = dict.get(b"DescendantFonts").ok()?;
+    let desc_arr;
+    let arr = match descendants {
+        Object::Array(a) => a,
+        Object::Reference(id) => match doc.get_object(*id).ok()? {
+            Object::Array(a) => { desc_arr = a; desc_arr }
+            _ => return None,
+        },
+        _ => return None,
+    };
+
+    let first = arr.first()?;
+    let cid_font_dict = match first {
+        Object::Dictionary(d) => d,
+        Object::Reference(id) => match doc.get_object(*id).ok()? {
+            Object::Dictionary(d) => d,
+            Object::Stream(s) => &s.dict,
+            _ => return None,
+        },
+        _ => return None,
+    };
+
+    let csi = cid_font_dict.get(b"CIDSystemInfo").ok()?;
+    let csi_dict = match csi {
+        Object::Dictionary(d) => d,
+        Object::Reference(id) => match doc.get_object(*id).ok()? {
+            Object::Dictionary(d) => d,
+            _ => return None,
+        },
+        _ => return None,
+    };
+
+    let registry = csi_dict.get(b"Registry").ok()
+        .and_then(|v| if let Object::String(bytes, _) = v { Some(String::from_utf8_lossy(bytes).into_owned()) } else { None })
+        .unwrap_or_else(|| "?".to_string());
+    let ordering = csi_dict.get(b"Ordering").ok()
+        .and_then(|v| if let Object::String(bytes, _) = v { Some(String::from_utf8_lossy(bytes).into_owned()) } else { None })
+        .unwrap_or_else(|| "?".to_string());
+    let supplement = csi_dict.get(b"Supplement").ok()
+        .and_then(|v| v.as_i64().ok())
+        .map(|n| n.to_string())
+        .unwrap_or_else(|| "?".to_string());
+
+    Some(format!("{}-{}-{}", registry, ordering, supplement))
 }
 
 fn print_fonts(writer: &mut impl Write, doc: &Document) {
@@ -2957,6 +3149,22 @@ fn print_fonts(writer: &mut impl Write, doc: &Document) {
             None => "no".to_string(),
         };
         writeln!(writer, "  {:>4}  {:<30} {:<14} {:<18} {}", f.object_id.0, f.base_font, f.subtype, f.encoding, embedded_str).unwrap();
+        // Diagnostic details
+        if let Some(id) = f.to_unicode {
+            writeln!(writer, "          ToUnicode: {} 0 R", id.0).unwrap();
+        }
+        if f.first_char.is_some() || f.last_char.is_some() || f.widths_len.is_some() {
+            let fc = f.first_char.map(|n| n.to_string()).unwrap_or_else(|| "-".to_string());
+            let lc = f.last_char.map(|n| n.to_string()).unwrap_or_else(|| "-".to_string());
+            let wl = f.widths_len.map(|n| n.to_string()).unwrap_or_else(|| "-".to_string());
+            writeln!(writer, "          CharRange: {}-{}, Widths: {}", fc, lc, wl).unwrap();
+        }
+        if let Some(ref diffs) = f.encoding_differences {
+            writeln!(writer, "          Differences: {}", diffs).unwrap();
+        }
+        if let Some(ref csi) = f.cid_system_info {
+            writeln!(writer, "          CIDSystemInfo: {}", csi).unwrap();
+        }
     }
 }
 
@@ -2974,6 +3182,24 @@ fn print_fonts_json(writer: &mut impl Write, doc: &Document) {
             obj["embedded"] = json!({"object_number": id.0, "generation": id.1});
         } else {
             obj["embedded"] = json!(null);
+        }
+        if let Some(id) = f.to_unicode {
+            obj["to_unicode"] = json!({"object_number": id.0, "generation": id.1});
+        }
+        if let Some(fc) = f.first_char {
+            obj["first_char"] = json!(fc);
+        }
+        if let Some(lc) = f.last_char {
+            obj["last_char"] = json!(lc);
+        }
+        if let Some(wl) = f.widths_len {
+            obj["widths_count"] = json!(wl);
+        }
+        if let Some(ref diffs) = f.encoding_differences {
+            obj["encoding_differences"] = json!(diffs);
+        }
+        if let Some(ref csi) = f.cid_system_info {
+            obj["cid_system_info"] = json!(csi);
         }
         obj
     }).collect();
@@ -5098,6 +5324,477 @@ fn emit_dot_node(writer: &mut impl Write, obj_id: ObjectId, doc: &Document, visi
     }
 }
 
+// ── Layers / OCG ─────────────────────────────────────────────────────
+
+struct OcgInfo {
+    object_id: ObjectId,
+    name: String,
+    default_state: String,
+    page_numbers: Vec<u32>,
+}
+
+fn collect_layers(doc: &Document) -> Vec<OcgInfo> {
+    let catalog_id = match doc.trailer.get(b"Root").ok()
+        .and_then(|o| o.as_reference().ok()) {
+        Some(id) => id,
+        None => return Vec::new(),
+    };
+    let catalog = match doc.get_object(catalog_id).ok() {
+        Some(Object::Dictionary(d)) => d,
+        _ => return Vec::new(),
+    };
+
+    let oc_props = match catalog.get(b"OCProperties").ok() {
+        Some(Object::Dictionary(d)) => d.clone(),
+        Some(Object::Reference(id)) => match doc.get_object(*id).ok() {
+            Some(Object::Dictionary(d)) => d.clone(),
+            _ => return Vec::new(),
+        },
+        _ => return Vec::new(),
+    };
+
+    // Get OCGs array
+    let ocgs_arr = match oc_props.get(b"OCGs").ok() {
+        Some(Object::Array(a)) => a.clone(),
+        Some(Object::Reference(id)) => match doc.get_object(*id).ok() {
+            Some(Object::Array(a)) => a.clone(),
+            _ => return Vec::new(),
+        },
+        _ => return Vec::new(),
+    };
+
+    // Get default config /D
+    let d_dict = match oc_props.get(b"D").ok() {
+        Some(Object::Dictionary(d)) => d.clone(),
+        Some(Object::Reference(id)) => match doc.get_object(*id).ok() {
+            Some(Object::Dictionary(d)) => d.clone(),
+            _ => lopdf::Dictionary::new(),
+        },
+        _ => lopdf::Dictionary::new(),
+    };
+
+    let base_state = d_dict.get(b"BaseState").ok()
+        .and_then(|v| v.as_name().ok().map(|n| String::from_utf8_lossy(n).into_owned()))
+        .unwrap_or_else(|| "ON".to_string());
+
+    // Collect ON/OFF override sets
+    let on_set: BTreeSet<ObjectId> = extract_id_set(&d_dict, b"ON");
+    let off_set: BTreeSet<ObjectId> = extract_id_set(&d_dict, b"OFF");
+
+    // Build page_id -> page_num lookup
+    let pages = doc.get_pages();
+    let page_id_to_num: BTreeMap<ObjectId, u32> = pages.into_iter().map(|(num, id)| (id, num)).collect();
+
+    // Scan pages for OCG references in /Properties
+    let mut ocg_pages: BTreeMap<ObjectId, Vec<u32>> = BTreeMap::new();
+    for (&page_id, &page_num) in &page_id_to_num {
+        if let Ok(page_obj) = doc.get_object(page_id) {
+            let page_dict = match page_obj {
+                Object::Dictionary(d) => d,
+                _ => continue,
+            };
+            scan_page_for_ocgs(doc, page_dict, page_num, &mut ocg_pages);
+        }
+    }
+
+    // Build OcgInfo for each OCG
+    let mut layers = Vec::new();
+    for item in &ocgs_arr {
+        let ocg_id = match item {
+            Object::Reference(id) => *id,
+            _ => continue,
+        };
+        let ocg_dict = match doc.get_object(ocg_id).ok() {
+            Some(Object::Dictionary(d)) => d,
+            _ => continue,
+        };
+
+        let name = ocg_dict.get(b"Name").ok()
+            .and_then(|v| if let Object::String(bytes, _) = v { Some(String::from_utf8_lossy(bytes).into_owned()) } else { None })
+            .unwrap_or_else(|| "(unnamed)".to_string());
+
+        let default_state = if off_set.contains(&ocg_id) {
+            "OFF".to_string()
+        } else if on_set.contains(&ocg_id) {
+            "ON".to_string()
+        } else {
+            base_state.clone()
+        };
+
+        let page_numbers = ocg_pages.remove(&ocg_id).unwrap_or_default();
+        layers.push(OcgInfo { object_id: ocg_id, name, default_state, page_numbers });
+    }
+
+    layers
+}
+
+fn extract_id_set(dict: &lopdf::Dictionary, key: &[u8]) -> BTreeSet<ObjectId> {
+    let mut set = BTreeSet::new();
+    if let Ok(Object::Array(arr)) = dict.get(key) {
+        for item in arr {
+            if let Object::Reference(id) = item {
+                set.insert(*id);
+            }
+        }
+    }
+    set
+}
+
+fn scan_page_for_ocgs(doc: &Document, page_dict: &lopdf::Dictionary, page_num: u32, ocg_pages: &mut BTreeMap<ObjectId, Vec<u32>>) {
+    // Look for Resources -> Properties which holds OCG references
+    let resources = match page_dict.get(b"Resources").ok() {
+        Some(Object::Dictionary(d)) => d.clone(),
+        Some(Object::Reference(id)) => match doc.get_object(*id).ok() {
+            Some(Object::Dictionary(d)) => d.clone(),
+            _ => return,
+        },
+        _ => {
+            // Try inheriting from parent
+            if let Ok(Object::Reference(parent_id)) = page_dict.get(b"Parent") {
+                if let Ok(Object::Dictionary(parent)) = doc.get_object(*parent_id) {
+                    match parent.get(b"Resources").ok() {
+                        Some(Object::Dictionary(d)) => d.clone(),
+                        Some(Object::Reference(id)) => match doc.get_object(*id).ok() {
+                            Some(Object::Dictionary(d)) => d.clone(),
+                            _ => return,
+                        },
+                        _ => return,
+                    }
+                } else {
+                    return;
+                }
+            } else {
+                return;
+            }
+        }
+    };
+
+    let props = match resources.get(b"Properties").ok() {
+        Some(Object::Dictionary(d)) => d.clone(),
+        Some(Object::Reference(id)) => match doc.get_object(*id).ok() {
+            Some(Object::Dictionary(d)) => d.clone(),
+            _ => return,
+        },
+        _ => return,
+    };
+
+    for (_, val) in props.iter() {
+        let ocg_id = match val {
+            Object::Reference(id) => *id,
+            _ => continue,
+        };
+        // Verify it's an OCG (has /Type /OCG)
+        if let Ok(obj) = doc.get_object(ocg_id) {
+            let dict = match obj {
+                Object::Dictionary(d) => d,
+                _ => continue,
+            };
+            if dict.get_type().ok().is_some_and(|t| t == b"OCG") {
+                ocg_pages.entry(ocg_id).or_default().push(page_num);
+            }
+        }
+    }
+}
+
+fn print_layers(writer: &mut impl Write, doc: &Document) {
+    let layers = collect_layers(doc);
+    writeln!(writer, "{} layers found\n", layers.len()).unwrap();
+    if layers.is_empty() { return; }
+    writeln!(writer, "  {:>4}  {:<30} {:<8} Pages", "Obj#", "Name", "Default").unwrap();
+    for l in &layers {
+        let pages_str = if l.page_numbers.is_empty() {
+            "-".to_string()
+        } else {
+            l.page_numbers.iter().map(|n| n.to_string()).collect::<Vec<_>>().join(", ")
+        };
+        writeln!(writer, "  {:>4}  {:<30} {:<8} {}", l.object_id.0, l.name, l.default_state, pages_str).unwrap();
+    }
+}
+
+fn print_layers_json(writer: &mut impl Write, doc: &Document) {
+    let layers = collect_layers(doc);
+    let items: Vec<Value> = layers.iter().map(|l| {
+        json!({
+            "object_number": l.object_id.0,
+            "generation": l.object_id.1,
+            "name": l.name,
+            "default_state": l.default_state,
+            "pages": l.page_numbers,
+        })
+    }).collect();
+    let output = json!({
+        "layer_count": items.len(),
+        "layers": items,
+    });
+    writeln!(writer, "{}", serde_json::to_string_pretty(&output).unwrap()).unwrap();
+}
+
+// ── Structure Tree ───────────────────────────────────────────────────
+
+struct StructElemInfo {
+    object_id: ObjectId,
+    role: String,
+    page: Option<u32>,
+    mcid: Option<i64>,
+    title: Option<String>,
+    alt: Option<String>,
+    children: Vec<StructElemInfo>,
+}
+
+fn collect_structure_tree(doc: &Document) -> (bool, Vec<StructElemInfo>) {
+    let catalog_id = match doc.trailer.get(b"Root").ok()
+        .and_then(|o| o.as_reference().ok()) {
+        Some(id) => id,
+        None => return (false, Vec::new()),
+    };
+    let catalog = match doc.get_object(catalog_id).ok() {
+        Some(Object::Dictionary(d)) => d,
+        _ => return (false, Vec::new()),
+    };
+
+    // Check MarkInfo
+    let is_marked = catalog.get(b"MarkInfo").ok()
+        .and_then(|v| match v {
+            Object::Dictionary(d) => d.get(b"Marked").ok()
+                .and_then(|m| if let Object::Boolean(b) = m { Some(*b) } else { None }),
+            Object::Reference(id) => doc.get_object(*id).ok().and_then(|o| {
+                if let Object::Dictionary(d) = o {
+                    d.get(b"Marked").ok()
+                        .and_then(|m| if let Object::Boolean(b) = m { Some(*b) } else { None })
+                } else {
+                    None
+                }
+            }),
+            _ => None,
+        })
+        .unwrap_or(false);
+
+    let struct_tree_root = match catalog.get(b"StructTreeRoot").ok() {
+        Some(Object::Reference(id)) => match doc.get_object(*id).ok() {
+            Some(Object::Dictionary(d)) => d,
+            _ => return (is_marked, Vec::new()),
+        },
+        Some(Object::Dictionary(d)) => d,
+        _ => return (is_marked, Vec::new()),
+    };
+
+    // Build page_id -> page_num lookup
+    let pages = doc.get_pages();
+    let page_lookup: BTreeMap<ObjectId, u32> = pages.into_iter().map(|(num, id)| (id, num)).collect();
+
+    let mut visited = BTreeSet::new();
+    let children = collect_struct_children(doc, struct_tree_root, &page_lookup, &mut visited);
+
+    (is_marked, children)
+}
+
+fn collect_struct_children(doc: &Document, dict: &lopdf::Dictionary, page_lookup: &BTreeMap<ObjectId, u32>, visited: &mut BTreeSet<ObjectId>) -> Vec<StructElemInfo> {
+    let k = match dict.get(b"K").ok() {
+        Some(v) => v.clone(),
+        None => return Vec::new(),
+    };
+
+    let items = match &k {
+        Object::Array(arr) => arr.clone(),
+        _ => vec![k],
+    };
+
+    let mut result = Vec::new();
+    for item in &items {
+        match item {
+            Object::Reference(id) => {
+                if visited.contains(id) { continue; }
+                visited.insert(*id);
+                if let Ok(Object::Dictionary(child_dict)) = doc.get_object(*id)
+                    && let Ok(role_obj) = child_dict.get(b"S") {
+                    let role = if let Object::Name(n) = role_obj {
+                        String::from_utf8_lossy(n).into_owned()
+                    } else {
+                        "-".to_string()
+                    };
+
+                    let page = child_dict.get(b"Pg").ok()
+                        .and_then(|v| v.as_reference().ok())
+                        .and_then(|pg_id| page_lookup.get(&pg_id).copied());
+
+                    let mcid = extract_mcid(child_dict);
+
+                    let title = child_dict.get(b"T").ok()
+                        .and_then(|v| if let Object::String(bytes, _) = v { Some(String::from_utf8_lossy(bytes).into_owned()) } else { None });
+
+                    let alt = child_dict.get(b"Alt").ok()
+                        .and_then(|v| if let Object::String(bytes, _) = v { Some(String::from_utf8_lossy(bytes).into_owned()) } else { None });
+
+                    let children = collect_struct_children(doc, child_dict, page_lookup, visited);
+
+                    result.push(StructElemInfo {
+                        object_id: *id,
+                        role,
+                        page,
+                        mcid,
+                        title,
+                        alt,
+                        children,
+                    });
+                }
+            }
+            Object::Dictionary(d) => {
+                // Inline struct element
+                if let Ok(role_obj) = d.get(b"S") {
+                    let role = if let Object::Name(n) = role_obj {
+                        String::from_utf8_lossy(n).into_owned()
+                    } else {
+                        "-".to_string()
+                    };
+                    let mcid = extract_mcid(d);
+                    result.push(StructElemInfo {
+                        object_id: (0, 0),
+                        role,
+                        page: None,
+                        mcid,
+                        title: None,
+                        alt: None,
+                        children: Vec::new(),
+                    });
+                }
+            }
+            _ => {
+                // Bare MCID integers and other items are captured via extract_mcid on the parent
+            }
+        }
+    }
+    result
+}
+
+fn extract_mcid(dict: &lopdf::Dictionary) -> Option<i64> {
+    // MCID can be in /K as integer, or in /K as dict with /MCID
+    match dict.get(b"K").ok()? {
+        Object::Integer(n) => Some(*n),
+        Object::Dictionary(d) => d.get(b"MCID").ok()?.as_i64().ok(),
+        Object::Array(arr) => {
+            // Find first MCID in array
+            for item in arr {
+                match item {
+                    Object::Integer(n) => return Some(*n),
+                    Object::Dictionary(d) => {
+                        if let Ok(mcid) = d.get(b"MCID")
+                            && let Ok(n) = mcid.as_i64() {
+                            return Some(n);
+                        }
+                    }
+                    _ => {}
+                }
+            }
+            None
+        }
+        _ => None,
+    }
+}
+
+fn count_struct_elems(items: &[StructElemInfo]) -> usize {
+    items.iter().map(|e| 1 + count_struct_elems(&e.children)).sum()
+}
+
+fn print_structure(writer: &mut impl Write, doc: &Document, config: &DumpConfig) {
+    let (is_marked, tree) = collect_structure_tree(doc);
+    writeln!(writer, "Tagged PDF: {}", if is_marked { "yes" } else { "no" }).unwrap();
+    let count = count_struct_elems(&tree);
+    writeln!(writer, "Structure elements: {}\n", count).unwrap();
+    if tree.is_empty() { return; }
+    for elem in &tree {
+        print_struct_elem(writer, elem, 0, config);
+    }
+}
+
+fn print_struct_elem(writer: &mut impl Write, elem: &StructElemInfo, depth: usize, config: &DumpConfig) {
+    if let Some(max_depth) = config.depth
+        && depth > max_depth {
+        return;
+    }
+
+    let indent = "  ".repeat(depth);
+    let mut line = if elem.object_id != (0, 0) {
+        format!("{}[{}] /{}", indent, elem.object_id.0, elem.role)
+    } else {
+        format!("{}/{}", indent, elem.role)
+    };
+
+    if let Some(page) = elem.page {
+        line.push_str(&format!(" (page {})", page));
+    }
+    if let Some(mcid) = elem.mcid {
+        line.push_str(&format!(" MCID={}", mcid));
+    }
+    if let Some(ref title) = elem.title {
+        line.push_str(&format!(" \"{}\"", title));
+    }
+    if let Some(ref alt) = elem.alt {
+        line.push_str(&format!(" alt=\"{}\"", alt));
+    }
+
+    // At depth limit, show children count instead of recursing
+    if let Some(max_depth) = config.depth
+        && depth == max_depth && !elem.children.is_empty() {
+        line.push_str(&format!(" ({} children)", count_struct_elems(&elem.children)));
+    }
+
+    writeln!(writer, "{}", line).unwrap();
+
+    for child in &elem.children {
+        print_struct_elem(writer, child, depth + 1, config);
+    }
+}
+
+fn print_structure_json(writer: &mut impl Write, doc: &Document, config: &DumpConfig) {
+    let (is_marked, tree) = collect_structure_tree(doc);
+    let count = count_struct_elems(&tree);
+    let items: Vec<Value> = tree.iter().map(|e| struct_elem_to_json(e, 0, config)).collect();
+    let output = json!({
+        "tagged": is_marked,
+        "element_count": count,
+        "structure": items,
+    });
+    writeln!(writer, "{}", serde_json::to_string_pretty(&output).unwrap()).unwrap();
+}
+
+fn struct_elem_to_json(elem: &StructElemInfo, depth: usize, config: &DumpConfig) -> Value {
+    let mut obj = json!({
+        "role": elem.role,
+    });
+    if elem.object_id != (0, 0) {
+        obj["object_number"] = json!(elem.object_id.0);
+        obj["generation"] = json!(elem.object_id.1);
+    }
+    if let Some(page) = elem.page {
+        obj["page"] = json!(page);
+    }
+    if let Some(mcid) = elem.mcid {
+        obj["mcid"] = json!(mcid);
+    }
+    if let Some(ref title) = elem.title {
+        obj["title"] = json!(title);
+    }
+    if let Some(ref alt) = elem.alt {
+        obj["alt"] = json!(alt);
+    }
+
+    if let Some(max_depth) = config.depth
+        && depth >= max_depth {
+        if !elem.children.is_empty() {
+            obj["children_count"] = json!(count_struct_elems(&elem.children));
+        }
+        return obj;
+    }
+
+    if !elem.children.is_empty() {
+        let children: Vec<Value> = elem.children.iter()
+            .map(|c| struct_elem_to_json(c, depth + 1, config))
+            .collect();
+        obj["children"] = json!(children);
+    }
+    obj
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -5127,6 +5824,7 @@ mod tests {
             hex: false,
             depth: None,
             deref: false,
+            raw: false,
         }
     }
 
@@ -5536,7 +6234,7 @@ mod tests {
             Some(Object::Name(b"FlateDecode".to_vec())),
             b"corrupt data".to_vec(),
         );
-        let config = DumpConfig { decode_streams: true, truncate: None, json: true, hex: false, depth: None, deref: false };
+        let config = DumpConfig { decode_streams: true, truncate: None, json: true, hex: false, depth: None, deref: false, raw: false };
         let val = object_to_json(&Object::Stream(stream), &empty_doc(), &config);
         assert!(val.get("decode_warning").is_some(), "Corrupt stream should have decode_warning in JSON");
     }
@@ -5544,7 +6242,7 @@ mod tests {
     #[test]
     fn object_to_json_stream_no_decode_warning() {
         let stream = make_stream(None, b"text content".to_vec());
-        let config = DumpConfig { decode_streams: true, truncate: None, json: true, hex: false, depth: None, deref: false };
+        let config = DumpConfig { decode_streams: true, truncate: None, json: true, hex: false, depth: None, deref: false, raw: false };
         let val = object_to_json(&Object::Stream(stream), &empty_doc(), &config);
         assert!(val.get("decode_warning").is_none(), "Valid stream should not have decode_warning");
     }
@@ -5637,7 +6335,7 @@ mod tests {
         let doc = empty_doc();
         let visited = BTreeSet::new();
         let mut child_refs = BTreeSet::new();
-        let config = DumpConfig { decode_streams: true, truncate: None, json: false, hex: false, depth: None, deref: false };
+        let config = DumpConfig { decode_streams: true, truncate: None, json: false, hex: false, depth: None, deref: false, raw: false };
         let out = output_of(|w| {
             print_object(w, &Object::Stream(stream), &doc, &visited, 1, &config, false, &mut child_refs);
         });
@@ -5699,7 +6397,7 @@ mod tests {
     fn print_content_data_binary_truncated() {
         // 200 bytes of binary data (contains 0x80 so is_binary_stream = true)
         let content: Vec<u8> = (0..200).map(|i| (i as u8).wrapping_add(0x80)).collect();
-        let config = DumpConfig { decode_streams: false, truncate: Some(100), json: false, hex: false, depth: None, deref: false };
+        let config = DumpConfig { decode_streams: false, truncate: Some(100), json: false, hex: false, depth: None, deref: false, raw: false };
         let out = output_of(|w| {
             print_content_data(w, &content, "raw", "", &config, false, None);
         });
@@ -5962,7 +6660,7 @@ mod tests {
         let doc = empty_doc();
         let visited = BTreeSet::new();
         let mut child_refs = BTreeSet::new();
-        let config = DumpConfig { decode_streams: true, truncate: None, json: false, hex: false, depth: None, deref: false };
+        let config = DumpConfig { decode_streams: true, truncate: None, json: false, hex: false, depth: None, deref: false, raw: false };
         let out = output_of(|w| {
             print_object(w, &Object::Stream(stream), &doc, &visited, 1, &config, false, &mut child_refs);
         });
@@ -6036,7 +6734,7 @@ mod tests {
     fn print_content_data_binary_short_with_truncation_enabled() {
         // Binary content < 100 bytes with truncation enabled → no truncation applied
         let content: Vec<u8> = vec![0x80; 50];
-        let config = DumpConfig { decode_streams: false, truncate: Some(100), json: false, hex: false, depth: None, deref: false };
+        let config = DumpConfig { decode_streams: false, truncate: Some(100), json: false, hex: false, depth: None, deref: false, raw: false };
         let out = output_of(|w| {
             print_content_data(w, &content, "raw", "", &config, false, None);
         });
@@ -6048,7 +6746,7 @@ mod tests {
     fn print_content_data_binary_exactly_100_bytes_with_truncation() {
         // Exactly 100 bytes of binary → no truncation (only truncates > 100)
         let content: Vec<u8> = vec![0x80; 100];
-        let config = DumpConfig { decode_streams: false, truncate: Some(100), json: false, hex: false, depth: None, deref: false };
+        let config = DumpConfig { decode_streams: false, truncate: Some(100), json: false, hex: false, depth: None, deref: false, raw: false };
         let out = output_of(|w| {
             print_content_data(w, &content, "raw", "", &config, false, None);
         });
@@ -6060,7 +6758,7 @@ mod tests {
     fn print_content_data_binary_101_bytes_with_truncation() {
         // 101 bytes of binary → should truncate
         let content: Vec<u8> = vec![0x80; 101];
-        let config = DumpConfig { decode_streams: false, truncate: Some(100), json: false, hex: false, depth: None, deref: false };
+        let config = DumpConfig { decode_streams: false, truncate: Some(100), json: false, hex: false, depth: None, deref: false, raw: false };
         let out = output_of(|w| {
             print_content_data(w, &content, "raw", "", &config, false, None);
         });
@@ -6070,7 +6768,7 @@ mod tests {
     #[test]
     fn print_content_data_truncate_none_no_truncation() {
         let content: Vec<u8> = vec![0x80; 200];
-        let config = DumpConfig { decode_streams: false, truncate: None, json: false, hex: false, depth: None, deref: false };
+        let config = DumpConfig { decode_streams: false, truncate: None, json: false, hex: false, depth: None, deref: false, raw: false };
         let out = output_of(|w| {
             print_content_data(w, &content, "raw", "", &config, false, None);
         });
@@ -6081,7 +6779,7 @@ mod tests {
     #[test]
     fn print_content_data_truncate_custom_50() {
         let content: Vec<u8> = vec![0x80; 200];
-        let config = DumpConfig { decode_streams: false, truncate: Some(50), json: false, hex: false, depth: None, deref: false };
+        let config = DumpConfig { decode_streams: false, truncate: Some(50), json: false, hex: false, depth: None, deref: false, raw: false };
         let out = output_of(|w| {
             print_content_data(w, &content, "raw", "", &config, false, None);
         });
@@ -6091,7 +6789,7 @@ mod tests {
     #[test]
     fn print_content_data_truncate_larger_than_stream() {
         let content: Vec<u8> = vec![0x80; 50];
-        let config = DumpConfig { decode_streams: false, truncate: Some(500), json: false, hex: false, depth: None, deref: false };
+        let config = DumpConfig { decode_streams: false, truncate: Some(500), json: false, hex: false, depth: None, deref: false, raw: false };
         let out = output_of(|w| {
             print_content_data(w, &content, "raw", "", &config, false, None);
         });
@@ -6120,7 +6818,7 @@ mod tests {
     fn print_content_data_ascii_not_truncated_even_when_flag_set() {
         // ASCII content >100 bytes with truncation flag → no truncation (not binary)
         let content = b"abcdefghij".repeat(20); // 200 bytes of ASCII
-        let config = DumpConfig { decode_streams: false, truncate: Some(100), json: false, hex: false, depth: None, deref: false };
+        let config = DumpConfig { decode_streams: false, truncate: Some(100), json: false, hex: false, depth: None, deref: false, raw: false };
         let out = output_of(|w| {
             print_content_data(w, &content, "raw", "", &config, false, None);
         });
@@ -6161,7 +6859,7 @@ mod tests {
         // Large binary stream with truncation enabled
         let content: Vec<u8> = vec![0x80; 200];
         let stream = make_stream(None, content);
-        let config = DumpConfig { decode_streams: false, truncate: Some(100), json: false, hex: false, depth: None, deref: false };
+        let config = DumpConfig { decode_streams: false, truncate: Some(100), json: false, hex: false, depth: None, deref: false, raw: false };
         let out = output_of(|w| {
             print_stream_content(w, &stream, "", &config, false);
         });
@@ -6263,7 +6961,7 @@ mod tests {
         doc.objects.insert((1, 0), Object::Stream(stream));
 
         let mut visited = BTreeSet::new();
-        let config = DumpConfig { decode_streams: true, truncate: None, json: false, hex: false, depth: None, deref: false };
+        let config = DumpConfig { decode_streams: true, truncate: None, json: false, hex: false, depth: None, deref: false, raw: false };
         let out = output_of(|w| {
             dump_object_and_children(w, (1, 0), &doc, &mut visited, &config, false, 0);
         });
@@ -6284,7 +6982,7 @@ mod tests {
         doc.objects.insert((2, 0), Object::Stream(stream));
 
         let mut visited = BTreeSet::new();
-        let config = DumpConfig { decode_streams: true, truncate: None, json: false, hex: false, depth: None, deref: false };
+        let config = DumpConfig { decode_streams: true, truncate: None, json: false, hex: false, depth: None, deref: false, raw: false };
         let out = output_of(|w| {
             dump_object_and_children(w, (1, 0), &doc, &mut visited, &config, false, 0);
         });
@@ -6617,7 +7315,7 @@ mod tests {
         doc.objects.insert((1, 0), Object::Stream(stream));
 
         let mut visited = BTreeSet::new();
-        let config = DumpConfig { decode_streams: true, truncate: None, json: false, hex: false, depth: None, deref: false };
+        let config = DumpConfig { decode_streams: true, truncate: None, json: false, hex: false, depth: None, deref: false, raw: false };
         let out = output_of(|w| {
             dump_object_and_children(w, (1, 0), &doc, &mut visited, &config, true, 0);
         });
@@ -6633,7 +7331,7 @@ mod tests {
         doc.objects.insert((1, 0), Object::Stream(stream));
 
         let mut visited = BTreeSet::new();
-        let config = DumpConfig { decode_streams: true, truncate: Some(100), json: false, hex: false, depth: None, deref: false };
+        let config = DumpConfig { decode_streams: true, truncate: Some(100), json: false, hex: false, depth: None, deref: false, raw: false };
         let out = output_of(|w| {
             dump_object_and_children(w, (1, 0), &doc, &mut visited, &config, false, 0);
         });
@@ -6703,7 +7401,7 @@ mod tests {
         doc.objects.insert((1, 0), Object::Dictionary(root_dict));
 
         let mut visited = BTreeSet::new();
-        let config = DumpConfig { decode_streams: false, truncate: None, json: false, hex: false, depth: Some(0), deref: false };
+        let config = DumpConfig { decode_streams: false, truncate: None, json: false, hex: false, depth: Some(0), deref: false, raw: false };
         let out = output_of(|w| {
             dump_object_and_children(w, (1, 0), &doc, &mut visited, &config, false, 0);
         });
@@ -6733,7 +7431,7 @@ mod tests {
         doc.objects.insert((1, 0), Object::Dictionary(root_dict));
 
         let mut visited = BTreeSet::new();
-        let config = DumpConfig { decode_streams: false, truncate: None, json: false, hex: false, depth: Some(1), deref: false };
+        let config = DumpConfig { decode_streams: false, truncate: None, json: false, hex: false, depth: Some(1), deref: false, raw: false };
         let out = output_of(|w| {
             dump_object_and_children(w, (1, 0), &doc, &mut visited, &config, false, 0);
         });
@@ -6763,7 +7461,7 @@ mod tests {
         doc.objects.insert((1, 0), Object::Dictionary(root_dict));
 
         let mut visited = BTreeSet::new();
-        let config = DumpConfig { decode_streams: false, truncate: None, json: false, hex: false, depth: None, deref: false };
+        let config = DumpConfig { decode_streams: false, truncate: None, json: false, hex: false, depth: None, deref: false, raw: false };
         let out = output_of(|w| {
             dump_object_and_children(w, (1, 0), &doc, &mut visited, &config, false, 0);
         });
@@ -6788,7 +7486,7 @@ mod tests {
         doc.objects.insert((1, 0), Object::Dictionary(root_dict));
 
         let mut visited = BTreeSet::new();
-        let config = DumpConfig { decode_streams: false, truncate: None, json: false, hex: false, depth: Some(0), deref: false };
+        let config = DumpConfig { decode_streams: false, truncate: None, json: false, hex: false, depth: Some(0), deref: false, raw: false };
         let out = output_of(|w| {
             dump_object_and_children(w, (1, 0), &doc, &mut visited, &config, false, 0);
         });
@@ -6934,7 +7632,7 @@ mod tests {
         let mut doc = Document::new();
         let stream = make_stream(None, b"visible data".to_vec());
         doc.objects.insert((1, 0), Object::Stream(stream));
-        let config = DumpConfig { decode_streams: true, truncate: None, json: false, hex: false, depth: None, deref: false };
+        let config = DumpConfig { decode_streams: true, truncate: None, json: false, hex: false, depth: None, deref: false, raw: false };
         let out = output_of(|w| {
             print_single_object(w, &doc, 1, &config);
         });
@@ -7087,7 +7785,7 @@ mod tests {
     #[test]
     fn dump_page_confines_to_target_page() {
         let doc = build_two_page_doc();
-        let config = DumpConfig { decode_streams: true, truncate: None, json: false, hex: false, depth: None, deref: false };
+        let config = DumpConfig { decode_streams: true, truncate: None, json: false, hex: false, depth: None, deref: false, raw: false };
         let out = output_of(|w| {
             dump_page(w, &doc, &PageSpec::Single(1), &config);
         });
@@ -7099,7 +7797,7 @@ mod tests {
     #[test]
     fn dump_page_two_shows_only_page_two() {
         let doc = build_two_page_doc();
-        let config = DumpConfig { decode_streams: true, truncate: None, json: false, hex: false, depth: None, deref: false };
+        let config = DumpConfig { decode_streams: true, truncate: None, json: false, hex: false, depth: None, deref: false, raw: false };
         let out = output_of(|w| {
             dump_page(w, &doc, &PageSpec::Single(2), &config);
         });
@@ -7174,7 +7872,7 @@ mod tests {
     // ── object_to_json ──────────────────────────────────────────────
 
     fn json_config() -> DumpConfig {
-        DumpConfig { decode_streams: false, truncate: None, json: true, hex: false, depth: None, deref: false }
+        DumpConfig { decode_streams: false, truncate: None, json: true, hex: false, depth: None, deref: false, raw: false }
     }
 
     #[test]
@@ -7253,7 +7951,7 @@ mod tests {
     #[test]
     fn object_to_json_stream_with_decode() {
         let stream = make_stream(None, b"text content".to_vec());
-        let config = DumpConfig { decode_streams: true, truncate: None, json: true, hex: false, depth: None, deref: false };
+        let config = DumpConfig { decode_streams: true, truncate: None, json: true, hex: false, depth: None, deref: false, raw: false };
         let val = object_to_json(&Object::Stream(stream), &empty_doc(), &config);
         assert_eq!(val["content"], "text content");
     }
@@ -8589,7 +9287,7 @@ mod tests {
     fn object_to_json_stream_with_decode_binary() {
         let binary_content: Vec<u8> = vec![0x80; 200];
         let stream = make_stream(None, binary_content);
-        let config = DumpConfig { decode_streams: true, truncate: None, json: true, hex: false, depth: None, deref: false };
+        let config = DumpConfig { decode_streams: true, truncate: None, json: true, hex: false, depth: None, deref: false, raw: false };
         let val = object_to_json(&Object::Stream(stream), &empty_doc(), &config);
         assert_eq!(val["type"], "stream");
         assert!(val.get("content_binary").is_some(), "Binary stream should have content_binary field");
@@ -8599,7 +9297,7 @@ mod tests {
     fn object_to_json_stream_with_decode_binary_truncated() {
         let binary_content: Vec<u8> = vec![0x80; 200];
         let stream = make_stream(None, binary_content);
-        let config = DumpConfig { decode_streams: true, truncate: Some(100), json: true, hex: false, depth: None, deref: false };
+        let config = DumpConfig { decode_streams: true, truncate: Some(100), json: true, hex: false, depth: None, deref: false, raw: false };
         let val = object_to_json(&Object::Stream(stream), &empty_doc(), &config);
         assert_eq!(val["type"], "stream");
         assert!(val.get("content_truncated").is_some(), "Truncated binary should have content_truncated field");
@@ -8608,7 +9306,7 @@ mod tests {
     #[test]
     fn object_to_json_stream_no_decode() {
         let stream = make_stream(None, b"text data".to_vec());
-        let config = DumpConfig { decode_streams: false, truncate: None, json: true, hex: false, depth: None, deref: false };
+        let config = DumpConfig { decode_streams: false, truncate: None, json: true, hex: false, depth: None, deref: false, raw: false };
         let val = object_to_json(&Object::Stream(stream), &empty_doc(), &config);
         assert_eq!(val["type"], "stream");
         assert!(val.get("content").is_none(), "No content when decode_streams=false");
@@ -8919,7 +9617,7 @@ mod tests {
         let binary_content: Vec<u8> = (0..32).collect();
         let stream = Stream::new(Dictionary::new(), binary_content);
         doc.objects.insert((1, 0), Object::Stream(stream));
-        let config = DumpConfig { decode_streams: true, truncate: None, json: false, hex: true, depth: None, deref: false };
+        let config = DumpConfig { decode_streams: true, truncate: None, json: false, hex: true, depth: None, deref: false, raw: false };
         let out = output_of(|w| print_single_object(w, &doc, 1, &config));
         assert!(out.contains("00000000  "));
         assert!(!out.contains("---"));
@@ -8931,7 +9629,7 @@ mod tests {
         let text_content = b"Hello world".to_vec();
         let stream = Stream::new(Dictionary::new(), text_content);
         doc.objects.insert((1, 0), Object::Stream(stream));
-        let config = DumpConfig { decode_streams: true, truncate: None, json: false, hex: true, depth: None, deref: false };
+        let config = DumpConfig { decode_streams: true, truncate: None, json: false, hex: true, depth: None, deref: false, raw: false };
         let out = output_of(|w| print_single_object(w, &doc, 1, &config));
         // Text streams still use --- delimiters
         assert!(out.contains("---"));
@@ -8943,7 +9641,7 @@ mod tests {
         let binary_content: Vec<u8> = (0..32).collect();
         let stream = Stream::new(Dictionary::new(), binary_content);
         doc.objects.insert((1, 0), Object::Stream(stream));
-        let config = DumpConfig { decode_streams: true, truncate: None, json: true, hex: true, depth: None, deref: false };
+        let config = DumpConfig { decode_streams: true, truncate: None, json: true, hex: true, depth: None, deref: false, raw: false };
         let out = output_of(|w| print_single_object_json(w, &doc, 1, &config));
         let parsed: Value = serde_json::from_str(&out).unwrap();
         assert!(parsed["object"]["content_hex"].is_string());
@@ -10636,6 +11334,7 @@ mod tests {
             hex: true,
             depth: None,
             deref: false,
+            raw: false,
         };
         let out = output_of(|w| print_single_object(w, &doc, 1, &config));
         // Should show hex dump but truncated to 100 bytes
@@ -10661,6 +11360,7 @@ mod tests {
             hex: true,
             depth: None,
             deref: false,
+            raw: false,
         };
         let out = output_of(|w| print_single_object(w, &doc, 1, &config));
         assert!(!out.contains("00000000  "));
@@ -10680,6 +11380,7 @@ mod tests {
             hex: true,
             depth: None,
             deref: false,
+            raw: false,
         };
         let out = output_of(|w| print_single_object_json(w, &doc, 1, &config));
         let parsed: Value = serde_json::from_str(&out).unwrap();
@@ -10705,6 +11406,7 @@ mod tests {
             hex: true,
             depth: None,
             deref: false,
+            raw: false,
         };
         let out = output_of(|w| print_single_object_json(w, &doc, 1, &config));
         let parsed: Value = serde_json::from_str(&out).unwrap();
@@ -10727,6 +11429,7 @@ mod tests {
             hex: false,
             depth: None,
             deref: false,
+            raw: false,
         };
         let out = output_of(|w| print_single_object_json(w, &doc, 1, &config));
         let parsed: Value = serde_json::from_str(&out).unwrap();
@@ -10749,6 +11452,7 @@ mod tests {
             hex: false,
             depth: None,
             deref: false,
+            raw: false,
         };
         let out = output_of(|w| print_single_object_json(w, &doc, 1, &config));
         let parsed: Value = serde_json::from_str(&out).unwrap();
@@ -10810,7 +11514,7 @@ mod tests {
         doc.objects.insert((1, 0), Object::Dictionary(catalog));
         doc.trailer.set("Root", Object::Reference((1, 0)));
 
-        let config = DumpConfig { decode_streams: false, truncate: None, json: false, hex: false, depth: None, deref: false };
+        let config = DumpConfig { decode_streams: false, truncate: None, json: false, hex: false, depth: None, deref: false, raw: false };
         let out = output_of(|w| print_tree(w, &doc, &config));
         assert!(out.contains("Reference Tree:"));
         assert!(out.contains("Trailer"));
@@ -10837,7 +11541,7 @@ mod tests {
         doc.trailer.set("A", Object::Reference((1, 0)));
         doc.trailer.set("B", Object::Reference((2, 0)));
 
-        let config = DumpConfig { decode_streams: false, truncate: None, json: false, hex: false, depth: None, deref: false };
+        let config = DumpConfig { decode_streams: false, truncate: None, json: false, hex: false, depth: None, deref: false, raw: false };
         let out = output_of(|w| print_tree(w, &doc, &config));
         // Object 3 should appear once normally and once as visited
         assert!(out.contains("3 0 (Font)"));
@@ -10858,7 +11562,7 @@ mod tests {
         doc.trailer.set("Root", Object::Reference((1, 0)));
 
         // depth=1: trailer -> root (depth 1), child would be depth 2 → limited
-        let config = DumpConfig { decode_streams: false, truncate: None, json: false, hex: false, depth: Some(1), deref: false };
+        let config = DumpConfig { decode_streams: false, truncate: None, json: false, hex: false, depth: Some(1), deref: false, raw: false };
         let out = output_of(|w| print_tree(w, &doc, &config));
         assert!(out.contains("1 0"));
         assert!(out.contains("depth limit reached"));
@@ -10878,7 +11582,7 @@ mod tests {
         doc.objects.insert((1, 0), Object::Dictionary(catalog));
         doc.trailer.set("Root", Object::Reference((1, 0)));
 
-        let config = DumpConfig { decode_streams: false, truncate: None, json: true, hex: false, depth: None, deref: false };
+        let config = DumpConfig { decode_streams: false, truncate: None, json: true, hex: false, depth: None, deref: false, raw: false };
         let out = output_of(|w| print_tree_json(w, &doc, &config));
         let parsed: Value = serde_json::from_str(&out).unwrap();
         assert_eq!(parsed["tree"]["node"], "Trailer");
@@ -10907,7 +11611,7 @@ mod tests {
         doc.trailer.set("A", Object::Reference((1, 0)));
         doc.trailer.set("B", Object::Reference((3, 0)));
 
-        let config = DumpConfig { decode_streams: false, truncate: None, json: true, hex: false, depth: None, deref: false };
+        let config = DumpConfig { decode_streams: false, truncate: None, json: true, hex: false, depth: None, deref: false, raw: false };
         let out = output_of(|w| print_tree_json(w, &doc, &config));
         let parsed: Value = serde_json::from_str(&out).unwrap();
         // Should contain "visited" status somewhere in the tree
@@ -10926,7 +11630,7 @@ mod tests {
         doc.objects.insert((1, 0), Object::Dictionary(root));
         doc.trailer.set("Root", Object::Reference((1, 0)));
 
-        let config = DumpConfig { decode_streams: false, truncate: None, json: true, hex: false, depth: Some(1), deref: false };
+        let config = DumpConfig { decode_streams: false, truncate: None, json: true, hex: false, depth: Some(1), deref: false, raw: false };
         let out = output_of(|w| print_tree_json(w, &doc, &config));
         let parsed: Value = serde_json::from_str(&out).unwrap();
         let tree_str = serde_json::to_string(&parsed).unwrap();
@@ -11083,7 +11787,7 @@ mod tests {
         let mut doc = Document::new();
         doc.trailer.set("Root", Object::Reference((99, 0)));
 
-        let config = DumpConfig { decode_streams: false, truncate: None, json: false, hex: false, depth: None, deref: false };
+        let config = DumpConfig { decode_streams: false, truncate: None, json: false, hex: false, depth: None, deref: false, raw: false };
         let out = output_of(|w| print_tree(w, &doc, &config));
         assert!(out.contains("99 0 (missing)"), "Missing objects should be labeled: {}", out);
     }
@@ -11093,7 +11797,7 @@ mod tests {
         let mut doc = Document::new();
         doc.trailer.set("Root", Object::Reference((99, 0)));
 
-        let config = DumpConfig { decode_streams: false, truncate: None, json: true, hex: false, depth: None, deref: false };
+        let config = DumpConfig { decode_streams: false, truncate: None, json: true, hex: false, depth: None, deref: false, raw: false };
         let out = output_of(|w| print_tree_json(w, &doc, &config));
         let parsed: Value = serde_json::from_str(&out).unwrap();
         let tree_str = serde_json::to_string(&parsed).unwrap();
@@ -11171,7 +11875,7 @@ mod tests {
     fn print_content_data_truncate_zero() {
         // truncate=0 should truncate all binary content to 0 bytes
         let content: Vec<u8> = vec![0x80; 50];
-        let config = DumpConfig { decode_streams: false, truncate: Some(0), json: false, hex: false, depth: None, deref: false };
+        let config = DumpConfig { decode_streams: false, truncate: Some(0), json: false, hex: false, depth: None, deref: false, raw: false };
         let out = output_of(|w| {
             print_content_data(w, &content, "raw", "", &config, false, None);
         });
@@ -11182,7 +11886,7 @@ mod tests {
     fn print_content_data_truncate_one() {
         // truncate=1 should show only 1 byte of binary
         let content: Vec<u8> = vec![0x80; 100];
-        let config = DumpConfig { decode_streams: false, truncate: Some(1), json: false, hex: false, depth: None, deref: false };
+        let config = DumpConfig { decode_streams: false, truncate: Some(1), json: false, hex: false, depth: None, deref: false, raw: false };
         let out = output_of(|w| {
             print_content_data(w, &content, "raw", "", &config, false, None);
         });
@@ -11193,7 +11897,7 @@ mod tests {
     fn print_content_data_hex_with_truncation() {
         // hex mode + truncation: hex dump should be truncated too
         let content: Vec<u8> = (0..200).map(|i| i as u8).collect();
-        let config = DumpConfig { decode_streams: false, truncate: Some(32), json: false, hex: true, depth: None, deref: false };
+        let config = DumpConfig { decode_streams: false, truncate: Some(32), json: false, hex: true, depth: None, deref: false, raw: false };
         let out = output_of(|w| {
             print_content_data(w, &content, "raw", "", &config, false, None);
         });
@@ -11209,7 +11913,7 @@ mod tests {
     fn print_content_data_hex_without_truncation() {
         // hex mode without truncation: full hex dump
         let content: Vec<u8> = (0..48).map(|i| i as u8).collect();
-        let config = DumpConfig { decode_streams: false, truncate: None, json: false, hex: true, depth: None, deref: false };
+        let config = DumpConfig { decode_streams: false, truncate: None, json: false, hex: true, depth: None, deref: false, raw: false };
         let out = output_of(|w| {
             print_content_data(w, &content, "raw", "", &config, false, None);
         });
@@ -11225,7 +11929,7 @@ mod tests {
     fn print_content_data_warning_with_hex_mode() {
         // Warning should appear alongside hex dump output
         let content: Vec<u8> = vec![0x80; 32];
-        let config = DumpConfig { decode_streams: false, truncate: None, json: false, hex: true, depth: None, deref: false };
+        let config = DumpConfig { decode_streams: false, truncate: None, json: false, hex: true, depth: None, deref: false, raw: false };
         let out = output_of(|w| {
             print_content_data(w, &content, "raw", "", &config, false, Some("FlateDecode decompression failed"));
         });
@@ -11237,7 +11941,7 @@ mod tests {
     fn print_content_data_warning_with_truncation() {
         // Warning + truncation should both appear
         let content: Vec<u8> = vec![0x80; 200];
-        let config = DumpConfig { decode_streams: false, truncate: Some(50), json: false, hex: false, depth: None, deref: false };
+        let config = DumpConfig { decode_streams: false, truncate: Some(50), json: false, hex: false, depth: None, deref: false, raw: false };
         let out = output_of(|w| {
             print_content_data(w, &content, "raw", "", &config, false, Some("unsupported filter: DCTDecode"));
         });
@@ -11249,7 +11953,7 @@ mod tests {
     fn print_content_data_warning_with_hex_and_truncation() {
         // All three: warning + hex + truncation
         let content: Vec<u8> = (0..200).map(|i| i as u8).collect();
-        let config = DumpConfig { decode_streams: false, truncate: Some(16), json: false, hex: true, depth: None, deref: false };
+        let config = DumpConfig { decode_streams: false, truncate: Some(16), json: false, hex: true, depth: None, deref: false, raw: false };
         let out = output_of(|w| {
             print_content_data(w, &content, "raw", "", &config, false, Some("LZWDecode: invalid data"));
         });
@@ -11491,7 +12195,7 @@ mod tests {
         doc.objects.insert((1, 0), Object::Dictionary(root));
 
         let mut visited = BTreeSet::new();
-        let config = DumpConfig { decode_streams: false, truncate: None, json: false, hex: false, depth: Some(1), deref: false };
+        let config = DumpConfig { decode_streams: false, truncate: None, json: false, hex: false, depth: Some(1), deref: false, raw: false };
         let out = output_of(|w| {
             dump_object_and_children(w, (1, 0), &doc, &mut visited, &config, false, 0);
         });
@@ -11520,7 +12224,7 @@ mod tests {
         doc.trailer.set("Root", Object::Reference((1, 0)));
 
         // depth=0: Trailer shows, but no children at all (trailer is depth 0)
-        let config = DumpConfig { decode_streams: false, truncate: None, json: false, hex: false, depth: Some(0), deref: false };
+        let config = DumpConfig { decode_streams: false, truncate: None, json: false, hex: false, depth: Some(0), deref: false, raw: false };
         let out = output_of(|w| print_tree(w, &doc, &config));
         assert!(out.contains("Trailer"));
         // /Root -> 1 0 should show as depth limit reached (depth 1 > max_depth 0)
@@ -11547,7 +12251,7 @@ mod tests {
         doc.trailer.set("Root", Object::Reference((1, 0)));
 
         // depth=2: should show Trailer, Root (depth 1), Child (depth 2), but not Grandchild (depth 3)
-        let config = DumpConfig { decode_streams: false, truncate: None, json: false, hex: false, depth: Some(2), deref: false };
+        let config = DumpConfig { decode_streams: false, truncate: None, json: false, hex: false, depth: Some(2), deref: false, raw: false };
         let out = output_of(|w| print_tree(w, &doc, &config));
         assert!(out.contains("Catalog"), "Should show Root/Catalog");
         assert!(out.contains("Child"), "Should show Child at depth 2");
@@ -11603,7 +12307,7 @@ mod tests {
             Some(Object::Name(b"CCITTFaxDecode".to_vec())),
             b"fax data".to_vec(),
         );
-        let config = DumpConfig { decode_streams: true, truncate: None, json: true, hex: false, depth: None, deref: false };
+        let config = DumpConfig { decode_streams: true, truncate: None, json: true, hex: false, depth: None, deref: false, raw: false };
         let val = object_to_json(&Object::Stream(stream), &empty_doc(), &config);
         let warning = val.get("decode_warning");
         assert!(warning.is_some(), "Unsupported filter should produce JSON warning");
@@ -11620,7 +12324,7 @@ mod tests {
             ])),
             b"48656c6c6f>".to_vec(), // hex("Hello"), but "Hello" is not valid zlib
         );
-        let config = DumpConfig { decode_streams: true, truncate: None, json: true, hex: false, depth: None, deref: false };
+        let config = DumpConfig { decode_streams: true, truncate: None, json: true, hex: false, depth: None, deref: false, raw: false };
         let val = object_to_json(&Object::Stream(stream), &empty_doc(), &config);
         let warning = val.get("decode_warning");
         assert!(warning.is_some(), "Pipeline failure should produce JSON warning");
@@ -12315,7 +13019,7 @@ mod tests {
         let root_id = doc.add_object(Object::Dictionary(root));
         doc.trailer.set("Root", Object::Reference(root_id));
 
-        let config = DumpConfig { decode_streams: false, truncate: None, json: false, hex: false, depth: Some(1), deref: false };
+        let config = DumpConfig { decode_streams: false, truncate: None, json: false, hex: false, depth: Some(1), deref: false, raw: false };
         let out = output_of(|w| print_tree_dot(w, &doc, &config));
         // Should include root and child, but not the deep object
         let deep_node = format!("obj_{}_{}", deep.0, deep.1);
@@ -12380,7 +13084,7 @@ mod tests {
     #[test]
     fn dump_page_range() {
         let doc = build_two_page_doc();
-        let config = DumpConfig { decode_streams: true, truncate: None, json: false, hex: false, depth: None, deref: false };
+        let config = DumpConfig { decode_streams: true, truncate: None, json: false, hex: false, depth: None, deref: false, raw: false };
         let out = output_of(|w| {
             dump_page(w, &doc, &PageSpec::Range(1, 2), &config);
         });
@@ -12407,7 +13111,7 @@ mod tests {
         let stream = Stream::new(Dictionary::new(), content_bytes.to_vec());
         doc.objects.insert((1, 0), Object::Stream(stream));
 
-        let config = DumpConfig { decode_streams: true, truncate: None, json: false, hex: false, depth: None, deref: false };
+        let config = DumpConfig { decode_streams: true, truncate: None, json: false, hex: false, depth: None, deref: false, raw: false };
         let out = output_of(|w| print_single_object(w, &doc, 1, &config));
         // Should show clean format, not Debug format with "Operation { operator:"
         assert!(!out.contains("Operation {"), "Should not contain Debug format");
@@ -12463,7 +13167,7 @@ mod tests {
         let mut doc = Document::new();
         doc.objects.insert((1, 0), Object::Integer(42));
         doc.objects.insert((2, 0), Object::Boolean(true));
-        let config = DumpConfig { decode_streams: false, truncate: None, json: true, hex: false, depth: None, deref: false };
+        let config = DumpConfig { decode_streams: false, truncate: None, json: true, hex: false, depth: None, deref: false, raw: false };
         let out = output_of(|w| print_objects_json(w, &doc, &[1, 2], &config));
         let parsed: Value = serde_json::from_str(&out).unwrap();
         assert!(parsed["objects"].is_array());
@@ -12474,7 +13178,7 @@ mod tests {
     fn single_object_json_backward_compat() {
         let mut doc = Document::new();
         doc.objects.insert((1, 0), Object::Integer(42));
-        let config = DumpConfig { decode_streams: false, truncate: None, json: true, hex: false, depth: None, deref: false };
+        let config = DumpConfig { decode_streams: false, truncate: None, json: true, hex: false, depth: None, deref: false, raw: false };
         let out = output_of(|w| print_objects_json(w, &doc, &[1], &config));
         let parsed: Value = serde_json::from_str(&out).unwrap();
         // Single object should NOT wrap in array
@@ -12485,7 +13189,7 @@ mod tests {
     fn multi_object_missing_reports_error_in_json() {
         let mut doc = Document::new();
         doc.objects.insert((1, 0), Object::Integer(42));
-        let config = DumpConfig { decode_streams: false, truncate: None, json: true, hex: false, depth: None, deref: false };
+        let config = DumpConfig { decode_streams: false, truncate: None, json: true, hex: false, depth: None, deref: false, raw: false };
         let out = output_of(|w| print_objects_json(w, &doc, &[1, 99], &config));
         let parsed: Value = serde_json::from_str(&out).unwrap();
         let objs = parsed["objects"].as_array().unwrap();
@@ -12654,7 +13358,7 @@ mod tests {
         target.set("Type", Object::Name(b"Font".to_vec()));
         target.set("BaseFont", Object::Name(b"Helvetica".to_vec()));
         doc.objects.insert((2, 0), Object::Dictionary(target));
-        let config = DumpConfig { decode_streams: false, truncate: None, json: false, hex: false, depth: None, deref: true };
+        let config = DumpConfig { decode_streams: false, truncate: None, json: false, hex: false, depth: None, deref: true, raw: false };
         let out = output_of(|w| print_single_object(w, &doc, 1, &config));
         assert!(out.contains("2 0 R =>"));
         assert!(out.contains("/Type /Font"));
@@ -12667,7 +13371,7 @@ mod tests {
         dict.set("Ref", Object::Reference((2, 0)));
         doc.objects.insert((1, 0), Object::Dictionary(dict));
         doc.objects.insert((2, 0), Object::Integer(42));
-        let config = DumpConfig { decode_streams: false, truncate: None, json: false, hex: false, depth: None, deref: false };
+        let config = DumpConfig { decode_streams: false, truncate: None, json: false, hex: false, depth: None, deref: false, raw: false };
         let out = output_of(|w| print_single_object(w, &doc, 1, &config));
         assert!(out.contains("2 0 R"));
         assert!(!out.contains("=>"));
@@ -12680,7 +13384,7 @@ mod tests {
         dict.set("Ref", Object::Reference((2, 0)));
         doc.objects.insert((1, 0), Object::Dictionary(dict));
         doc.objects.insert((2, 0), Object::Integer(42));
-        let config = DumpConfig { decode_streams: false, truncate: None, json: true, hex: false, depth: None, deref: true };
+        let config = DumpConfig { decode_streams: false, truncate: None, json: true, hex: false, depth: None, deref: true, raw: false };
         let out = output_of(|w| print_single_object_json(w, &doc, 1, &config));
         let parsed: Value = serde_json::from_str(&out).unwrap();
         let ref_obj = &parsed["object"]["entries"]["Ref"];
@@ -12700,7 +13404,7 @@ mod tests {
         inner_dict.set("Inner", Object::Reference((3, 0)));
         doc.objects.insert((2, 0), Object::Dictionary(inner_dict));
         doc.objects.insert((3, 0), Object::Integer(99));
-        let config = DumpConfig { decode_streams: false, truncate: None, json: true, hex: false, depth: None, deref: true };
+        let config = DumpConfig { decode_streams: false, truncate: None, json: true, hex: false, depth: None, deref: true, raw: false };
         let out = output_of(|w| print_single_object_json(w, &doc, 1, &config));
         let parsed: Value = serde_json::from_str(&out).unwrap();
         let resolved = &parsed["object"]["entries"]["Ref"]["resolved"];
@@ -12720,7 +13424,7 @@ mod tests {
         stream_dict.set("Filter", Object::Name(b"FlateDecode".to_vec()));
         let stream = Stream::new(stream_dict, vec![0u8; 100]);
         doc.objects.insert((2, 0), Object::Stream(stream));
-        let config = DumpConfig { decode_streams: false, truncate: None, json: false, hex: false, depth: None, deref: true };
+        let config = DumpConfig { decode_streams: false, truncate: None, json: false, hex: false, depth: None, deref: true, raw: false };
         let out = output_of(|w| print_single_object(w, &doc, 1, &config));
         assert!(out.contains("stream, 100 bytes"));
         assert!(out.contains("FlateDecode"));
@@ -14217,5 +14921,924 @@ mod tests {
         let mut issues = Vec::new();
         check_duplicate_objects(&doc, &mut issues);
         assert!(issues.is_empty());
+    }
+
+    // ── --raw modifier tests ─────────────────────────────────────────
+
+    #[test]
+    fn raw_shows_compressed_bytes() {
+        let mut doc = Document::new();
+        let original = b"Hello, World!";
+        let mut encoder = ZlibEncoder::new(Vec::new(), flate2::Compression::default());
+        encoder.write_all(original).unwrap();
+        let compressed = encoder.finish().unwrap();
+        let compressed_len = compressed.len();
+
+        let mut dict = Dictionary::new();
+        dict.set("Filter", Object::Name(b"FlateDecode".to_vec()));
+        let stream = Stream::new(dict, compressed.clone());
+        doc.objects.insert((1, 0), Object::Stream(stream));
+
+        // raw mode: should show the compressed bytes, not decoded
+        let config = DumpConfig { decode_streams: false, truncate: None, json: false, hex: false, depth: None, deref: false, raw: true };
+        let out = output_of(|w| print_single_object(w, &doc, 1, &config));
+        assert!(out.contains("raw, undecoded"));
+        assert!(out.contains(&format!("{} bytes", compressed_len)));
+        // Should NOT contain the decoded text
+        assert!(!out.contains("Hello, World!"));
+    }
+
+    #[test]
+    fn raw_with_hex() {
+        let mut doc = Document::new();
+        let binary_content: Vec<u8> = (0..64).collect();
+        let stream = Stream::new(Dictionary::new(), binary_content);
+        doc.objects.insert((1, 0), Object::Stream(stream));
+
+        let config = DumpConfig { decode_streams: false, truncate: None, json: false, hex: true, depth: None, deref: false, raw: true };
+        let out = output_of(|w| print_single_object(w, &doc, 1, &config));
+        assert!(out.contains("raw, undecoded"));
+        assert!(out.contains("00000000  "));
+    }
+
+    #[test]
+    fn raw_with_truncate() {
+        let mut doc = Document::new();
+        let binary_content: Vec<u8> = (0..200).map(|i| (i % 256) as u8).collect();
+        let stream = Stream::new(Dictionary::new(), binary_content);
+        doc.objects.insert((1, 0), Object::Stream(stream));
+
+        let config = DumpConfig { decode_streams: false, truncate: Some(50), json: false, hex: true, depth: None, deref: false, raw: true };
+        let out = output_of(|w| print_single_object(w, &doc, 1, &config));
+        assert!(out.contains("raw, undecoded"));
+        assert!(out.contains("truncated to 50"));
+    }
+
+    #[test]
+    fn raw_on_non_stream_is_noop() {
+        let mut doc = Document::new();
+        doc.objects.insert((1, 0), Object::Integer(42));
+
+        let config = DumpConfig { decode_streams: false, truncate: None, json: false, hex: false, depth: None, deref: false, raw: true };
+        let out = output_of(|w| print_single_object(w, &doc, 1, &config));
+        assert!(out.contains("42"));
+        assert!(!out.contains("raw"));
+    }
+
+    #[test]
+    fn raw_json_text_stream() {
+        let mut doc = Document::new();
+        let stream = Stream::new(Dictionary::new(), b"Hello text content".to_vec());
+        doc.objects.insert((1, 0), Object::Stream(stream));
+
+        let config = DumpConfig { decode_streams: false, truncate: None, json: true, hex: false, depth: None, deref: false, raw: true };
+        let out = output_of(|w| print_single_object_json(w, &doc, 1, &config));
+        let parsed: Value = serde_json::from_str(&out).unwrap();
+        assert_eq!(parsed["object"]["raw_content"].as_str().unwrap(), "Hello text content");
+        assert!(parsed["object"]["content"].is_null());
+    }
+
+    #[test]
+    fn raw_json_binary_stream() {
+        let mut doc = Document::new();
+        let binary: Vec<u8> = (0..32).collect();
+        let stream = Stream::new(Dictionary::new(), binary);
+        doc.objects.insert((1, 0), Object::Stream(stream));
+
+        let config = DumpConfig { decode_streams: false, truncate: None, json: true, hex: false, depth: None, deref: false, raw: true };
+        let out = output_of(|w| print_single_object_json(w, &doc, 1, &config));
+        let parsed: Value = serde_json::from_str(&out).unwrap();
+        assert!(parsed["object"]["raw_content_binary"].as_str().unwrap().contains("32 bytes"));
+    }
+
+    #[test]
+    fn raw_json_binary_hex() {
+        let mut doc = Document::new();
+        let binary: Vec<u8> = (0..32).collect();
+        let stream = Stream::new(Dictionary::new(), binary);
+        doc.objects.insert((1, 0), Object::Stream(stream));
+
+        let config = DumpConfig { decode_streams: false, truncate: None, json: true, hex: true, depth: None, deref: false, raw: true };
+        let out = output_of(|w| print_single_object_json(w, &doc, 1, &config));
+        let parsed: Value = serde_json::from_str(&out).unwrap();
+        assert!(parsed["object"]["raw_content_hex"].is_string());
+        assert!(parsed["object"]["raw_content_hex"].as_str().unwrap().contains("00000000"));
+    }
+
+    #[test]
+    fn raw_json_binary_hex_truncate() {
+        let mut doc = Document::new();
+        let binary: Vec<u8> = (0..200).map(|i| (i % 256) as u8).collect();
+        let stream = Stream::new(Dictionary::new(), binary);
+        doc.objects.insert((1, 0), Object::Stream(stream));
+
+        let config = DumpConfig { decode_streams: false, truncate: Some(32), json: true, hex: true, depth: None, deref: false, raw: true };
+        let out = output_of(|w| print_single_object_json(w, &doc, 1, &config));
+        let parsed: Value = serde_json::from_str(&out).unwrap();
+        assert!(parsed["object"]["raw_content_hex"].is_string());
+        // Should only show 32 bytes = 2 full hex lines
+        let hex_str = parsed["object"]["raw_content_hex"].as_str().unwrap();
+        let hex_lines: Vec<&str> = hex_str.lines().filter(|l| l.starts_with("0000")).collect();
+        assert_eq!(hex_lines.len(), 2);
+    }
+
+    #[test]
+    fn raw_text_stream_shows_content() {
+        let mut doc = Document::new();
+        let stream = Stream::new(Dictionary::new(), b"Some PDF text stream".to_vec());
+        doc.objects.insert((1, 0), Object::Stream(stream));
+
+        let config = DumpConfig { decode_streams: false, truncate: None, json: false, hex: false, depth: None, deref: false, raw: true };
+        let out = output_of(|w| print_single_object(w, &doc, 1, &config));
+        assert!(out.contains("raw, undecoded"));
+        assert!(out.contains("Some PDF text stream"));
+    }
+
+    #[test]
+    fn raw_does_not_parse_content_stream() {
+        // Even if the stream has content operations, raw should NOT parse them
+        let mut doc = Document::new();
+        let content = b"BT /F1 12 Tf (Hello) Tj ET";
+        let stream = Stream::new(Dictionary::new(), content.to_vec());
+        doc.objects.insert((1, 0), Object::Stream(stream));
+
+        // With raw, is_contents=false so it won't try to parse
+        let config = DumpConfig { decode_streams: false, truncate: None, json: false, hex: false, depth: None, deref: false, raw: true };
+        let out = output_of(|w| print_single_object(w, &doc, 1, &config));
+        assert!(out.contains("raw, undecoded"));
+        // Should show raw text, not parsed operations
+        assert!(out.contains("BT /F1 12 Tf"));
+        assert!(!out.contains("Parsed Content Stream"));
+    }
+
+    // ── Enhanced --fonts diagnostics tests ────────────────────────────
+
+    #[test]
+    fn fonts_to_unicode_present() {
+        let mut doc = Document::new();
+        let cmap_stream = Stream::new(Dictionary::new(), b"cmap data".to_vec());
+        doc.objects.insert((10, 0), Object::Stream(cmap_stream));
+
+        let mut font = Dictionary::new();
+        font.set("Type", Object::Name(b"Font".to_vec()));
+        font.set("Subtype", Object::Name(b"Type1".to_vec()));
+        font.set("BaseFont", Object::Name(b"Helvetica".to_vec()));
+        font.set("ToUnicode", Object::Reference((10, 0)));
+        doc.objects.insert((1, 0), Object::Dictionary(font));
+
+        let fonts = collect_fonts(&doc);
+        assert_eq!(fonts.len(), 1);
+        assert_eq!(fonts[0].to_unicode, Some((10, 0)));
+    }
+
+    #[test]
+    fn fonts_to_unicode_absent() {
+        let mut doc = Document::new();
+        let mut font = Dictionary::new();
+        font.set("Type", Object::Name(b"Font".to_vec()));
+        font.set("Subtype", Object::Name(b"Type1".to_vec()));
+        font.set("BaseFont", Object::Name(b"Helvetica".to_vec()));
+        doc.objects.insert((1, 0), Object::Dictionary(font));
+
+        let fonts = collect_fonts(&doc);
+        assert_eq!(fonts[0].to_unicode, None);
+    }
+
+    #[test]
+    fn fonts_first_last_char_widths() {
+        let mut doc = Document::new();
+        let mut font = Dictionary::new();
+        font.set("Type", Object::Name(b"Font".to_vec()));
+        font.set("Subtype", Object::Name(b"Type1".to_vec()));
+        font.set("BaseFont", Object::Name(b"Courier".to_vec()));
+        font.set("FirstChar", Object::Integer(32));
+        font.set("LastChar", Object::Integer(126));
+        font.set("Widths", Object::Array(vec![Object::Integer(600); 95]));
+        doc.objects.insert((1, 0), Object::Dictionary(font));
+
+        let fonts = collect_fonts(&doc);
+        assert_eq!(fonts[0].first_char, Some(32));
+        assert_eq!(fonts[0].last_char, Some(126));
+        assert_eq!(fonts[0].widths_len, Some(95));
+    }
+
+    #[test]
+    fn fonts_widths_as_reference() {
+        let mut doc = Document::new();
+        let widths = Object::Array(vec![Object::Integer(500); 50]);
+        doc.objects.insert((10, 0), widths);
+
+        let mut font = Dictionary::new();
+        font.set("Type", Object::Name(b"Font".to_vec()));
+        font.set("Subtype", Object::Name(b"TrueType".to_vec()));
+        font.set("BaseFont", Object::Name(b"Arial".to_vec()));
+        font.set("Widths", Object::Reference((10, 0)));
+        doc.objects.insert((1, 0), Object::Dictionary(font));
+
+        let fonts = collect_fonts(&doc);
+        assert_eq!(fonts[0].widths_len, Some(50));
+    }
+
+    #[test]
+    fn fonts_encoding_differences_small() {
+        let mut doc = Document::new();
+        let mut enc = Dictionary::new();
+        enc.set("Type", Object::Name(b"Encoding".to_vec()));
+        enc.set("Differences", Object::Array(vec![
+            Object::Integer(32), Object::Name(b"space".to_vec()),
+            Object::Name(b"exclam".to_vec()),
+        ]));
+        let mut font = Dictionary::new();
+        font.set("Type", Object::Name(b"Font".to_vec()));
+        font.set("Subtype", Object::Name(b"Type1".to_vec()));
+        font.set("BaseFont", Object::Name(b"Test".to_vec()));
+        font.set("Encoding", Object::Dictionary(enc));
+        doc.objects.insert((1, 0), Object::Dictionary(font));
+
+        let fonts = collect_fonts(&doc);
+        let diffs = fonts[0].encoding_differences.as_ref().unwrap();
+        assert!(diffs.contains("32=/space"));
+        assert!(diffs.contains("33=/exclam"));
+    }
+
+    #[test]
+    fn fonts_encoding_differences_truncated() {
+        let mut doc = Document::new();
+        let mut items: Vec<Object> = vec![Object::Integer(32)];
+        for i in 0..10 {
+            items.push(Object::Name(format!("glyph{}", i).into_bytes()));
+        }
+        let mut enc = Dictionary::new();
+        enc.set("Differences", Object::Array(items));
+        let mut font = Dictionary::new();
+        font.set("Type", Object::Name(b"Font".to_vec()));
+        font.set("Subtype", Object::Name(b"Type1".to_vec()));
+        font.set("BaseFont", Object::Name(b"Test".to_vec()));
+        font.set("Encoding", Object::Dictionary(enc));
+        doc.objects.insert((1, 0), Object::Dictionary(font));
+
+        let fonts = collect_fonts(&doc);
+        let diffs = fonts[0].encoding_differences.as_ref().unwrap();
+        assert!(diffs.contains("10 total"));
+    }
+
+    #[test]
+    fn fonts_cid_system_info() {
+        let mut doc = Document::new();
+        let mut csi = Dictionary::new();
+        csi.set("Registry", Object::String(b"Adobe".to_vec(), lopdf::StringFormat::Literal));
+        csi.set("Ordering", Object::String(b"Identity".to_vec(), lopdf::StringFormat::Literal));
+        csi.set("Supplement", Object::Integer(0));
+        let mut cid_font = Dictionary::new();
+        cid_font.set("Type", Object::Name(b"Font".to_vec()));
+        cid_font.set("Subtype", Object::Name(b"CIDFontType2".to_vec()));
+        cid_font.set("BaseFont", Object::Name(b"NotoSans".to_vec()));
+        cid_font.set("CIDSystemInfo", Object::Dictionary(csi));
+        doc.objects.insert((2, 0), Object::Dictionary(cid_font));
+
+        let mut type0 = Dictionary::new();
+        type0.set("Type", Object::Name(b"Font".to_vec()));
+        type0.set("Subtype", Object::Name(b"Type0".to_vec()));
+        type0.set("BaseFont", Object::Name(b"NotoSans".to_vec()));
+        type0.set("DescendantFonts", Object::Array(vec![Object::Reference((2, 0))]));
+        doc.objects.insert((1, 0), Object::Dictionary(type0));
+
+        let fonts = collect_fonts(&doc);
+        let type0_font = fonts.iter().find(|f| f.subtype == "Type0").unwrap();
+        assert_eq!(type0_font.cid_system_info.as_deref(), Some("Adobe-Identity-0"));
+    }
+
+    #[test]
+    fn fonts_text_output_shows_diagnostics() {
+        let mut doc = Document::new();
+        let cmap_stream = Stream::new(Dictionary::new(), b"cmap".to_vec());
+        doc.objects.insert((10, 0), Object::Stream(cmap_stream));
+
+        let mut font = Dictionary::new();
+        font.set("Type", Object::Name(b"Font".to_vec()));
+        font.set("Subtype", Object::Name(b"Type1".to_vec()));
+        font.set("BaseFont", Object::Name(b"Helvetica".to_vec()));
+        font.set("ToUnicode", Object::Reference((10, 0)));
+        font.set("FirstChar", Object::Integer(32));
+        font.set("LastChar", Object::Integer(126));
+        font.set("Widths", Object::Array(vec![Object::Integer(600); 95]));
+        doc.objects.insert((1, 0), Object::Dictionary(font));
+
+        let out = output_of(|w| print_fonts(w, &doc));
+        assert!(out.contains("ToUnicode: 10 0 R"));
+        assert!(out.contains("CharRange: 32-126"));
+        assert!(out.contains("Widths: 95"));
+    }
+
+    #[test]
+    fn fonts_json_includes_diagnostics() {
+        let mut doc = Document::new();
+        let cmap_stream = Stream::new(Dictionary::new(), b"cmap".to_vec());
+        doc.objects.insert((10, 0), Object::Stream(cmap_stream));
+
+        let mut font = Dictionary::new();
+        font.set("Type", Object::Name(b"Font".to_vec()));
+        font.set("Subtype", Object::Name(b"Type1".to_vec()));
+        font.set("BaseFont", Object::Name(b"Helvetica".to_vec()));
+        font.set("ToUnicode", Object::Reference((10, 0)));
+        font.set("FirstChar", Object::Integer(32));
+        font.set("LastChar", Object::Integer(126));
+        font.set("Widths", Object::Array(vec![Object::Integer(600); 95]));
+        doc.objects.insert((1, 0), Object::Dictionary(font));
+
+        let out = output_of(|w| print_fonts_json(w, &doc));
+        let parsed: Value = serde_json::from_str(&out).unwrap();
+        let font_json = &parsed["fonts"][0];
+        assert_eq!(font_json["to_unicode"]["object_number"], 10);
+        assert_eq!(font_json["first_char"], 32);
+        assert_eq!(font_json["last_char"], 126);
+        assert_eq!(font_json["widths_count"], 95);
+    }
+
+    #[test]
+    fn fonts_json_cid_system_info() {
+        let mut doc = Document::new();
+        let mut csi = Dictionary::new();
+        csi.set("Registry", Object::String(b"Adobe".to_vec(), lopdf::StringFormat::Literal));
+        csi.set("Ordering", Object::String(b"Japan1".to_vec(), lopdf::StringFormat::Literal));
+        csi.set("Supplement", Object::Integer(6));
+        let mut cid_font = Dictionary::new();
+        cid_font.set("Subtype", Object::Name(b"CIDFontType0".to_vec()));
+        cid_font.set("BaseFont", Object::Name(b"KozMin".to_vec()));
+        cid_font.set("CIDSystemInfo", Object::Dictionary(csi));
+        doc.objects.insert((2, 0), Object::Dictionary(cid_font));
+
+        let mut type0 = Dictionary::new();
+        type0.set("Type", Object::Name(b"Font".to_vec()));
+        type0.set("Subtype", Object::Name(b"Type0".to_vec()));
+        type0.set("BaseFont", Object::Name(b"KozMin".to_vec()));
+        type0.set("DescendantFonts", Object::Array(vec![Object::Reference((2, 0))]));
+        doc.objects.insert((1, 0), Object::Dictionary(type0));
+
+        let out = output_of(|w| print_fonts_json(w, &doc));
+        let parsed: Value = serde_json::from_str(&out).unwrap();
+        let type0_json = parsed["fonts"].as_array().unwrap()
+            .iter().find(|f| f["subtype"] == "Type0").unwrap();
+        assert_eq!(type0_json["cid_system_info"].as_str().unwrap(), "Adobe-Japan1-6");
+    }
+
+    #[test]
+    fn fonts_no_diagnostics_for_simple_font() {
+        let mut doc = Document::new();
+        let mut font = Dictionary::new();
+        font.set("Type", Object::Name(b"Font".to_vec()));
+        font.set("Subtype", Object::Name(b"Type1".to_vec()));
+        font.set("BaseFont", Object::Name(b"Helvetica".to_vec()));
+        doc.objects.insert((1, 0), Object::Dictionary(font));
+
+        let out = output_of(|w| print_fonts(w, &doc));
+        assert!(!out.contains("ToUnicode"));
+        assert!(!out.contains("CharRange"));
+        assert!(!out.contains("Differences"));
+        assert!(!out.contains("CIDSystemInfo"));
+    }
+
+    #[test]
+    fn fonts_json_omits_absent_diagnostics() {
+        let mut doc = Document::new();
+        let mut font = Dictionary::new();
+        font.set("Type", Object::Name(b"Font".to_vec()));
+        font.set("Subtype", Object::Name(b"Type1".to_vec()));
+        font.set("BaseFont", Object::Name(b"Courier".to_vec()));
+        doc.objects.insert((1, 0), Object::Dictionary(font));
+
+        let out = output_of(|w| print_fonts_json(w, &doc));
+        let parsed: Value = serde_json::from_str(&out).unwrap();
+        let f = &parsed["fonts"][0];
+        assert!(f.get("to_unicode").is_none());
+        assert!(f.get("first_char").is_none());
+        assert!(f.get("widths_count").is_none());
+        assert!(f.get("encoding_differences").is_none());
+        assert!(f.get("cid_system_info").is_none());
+    }
+
+    #[test]
+    fn fonts_encoding_differences_via_reference() {
+        let mut doc = Document::new();
+        let mut enc = Dictionary::new();
+        enc.set("Differences", Object::Array(vec![
+            Object::Integer(65), Object::Name(b"A".to_vec()),
+        ]));
+        doc.objects.insert((10, 0), Object::Dictionary(enc));
+
+        let mut font = Dictionary::new();
+        font.set("Type", Object::Name(b"Font".to_vec()));
+        font.set("Subtype", Object::Name(b"Type1".to_vec()));
+        font.set("BaseFont", Object::Name(b"Custom".to_vec()));
+        font.set("Encoding", Object::Reference((10, 0)));
+        doc.objects.insert((1, 0), Object::Dictionary(font));
+
+        let fonts = collect_fonts(&doc);
+        let diffs = fonts[0].encoding_differences.as_ref().unwrap();
+        assert!(diffs.contains("65=/A"));
+    }
+
+    // ── --layers / --ocg tests ───────────────────────────────────────
+
+    fn make_ocg_doc() -> Document {
+        let mut doc = Document::new();
+
+        // OCG objects
+        let mut ocg1 = Dictionary::new();
+        ocg1.set("Type", Object::Name(b"OCG".to_vec()));
+        ocg1.set("Name", Object::String(b"Layer1".to_vec(), StringFormat::Literal));
+        doc.objects.insert((10, 0), Object::Dictionary(ocg1));
+
+        let mut ocg2 = Dictionary::new();
+        ocg2.set("Type", Object::Name(b"OCG".to_vec()));
+        ocg2.set("Name", Object::String(b"Layer2".to_vec(), StringFormat::Literal));
+        doc.objects.insert((11, 0), Object::Dictionary(ocg2));
+
+        // Default config
+        let mut d_config = Dictionary::new();
+        d_config.set("BaseState", Object::Name(b"ON".to_vec()));
+        d_config.set("OFF", Object::Array(vec![Object::Reference((11, 0))]));
+
+        // OCProperties
+        let mut oc_props = Dictionary::new();
+        oc_props.set("OCGs", Object::Array(vec![
+            Object::Reference((10, 0)),
+            Object::Reference((11, 0)),
+        ]));
+        oc_props.set("D", Object::Dictionary(d_config));
+
+        // Page with Properties referencing OCG
+        let mut props = Dictionary::new();
+        props.set("MC0", Object::Reference((10, 0)));
+
+        let mut resources = Dictionary::new();
+        resources.set("Properties", Object::Dictionary(props));
+
+        let mut page = Dictionary::new();
+        page.set("Type", Object::Name(b"Page".to_vec()));
+        page.set("Resources", Object::Dictionary(resources));
+        page.set("Parent", Object::Reference((2, 0)));
+        doc.objects.insert((3, 0), Object::Dictionary(page));
+
+        let mut pages = Dictionary::new();
+        pages.set("Type", Object::Name(b"Pages".to_vec()));
+        pages.set("Kids", Object::Array(vec![Object::Reference((3, 0))]));
+        pages.set("Count", Object::Integer(1));
+        doc.objects.insert((2, 0), Object::Dictionary(pages));
+
+        let mut catalog = Dictionary::new();
+        catalog.set("Type", Object::Name(b"Catalog".to_vec()));
+        catalog.set("Pages", Object::Reference((2, 0)));
+        catalog.set("OCProperties", Object::Dictionary(oc_props));
+        doc.objects.insert((1, 0), Object::Dictionary(catalog));
+
+        doc.trailer.set("Root", Object::Reference((1, 0)));
+        doc
+    }
+
+    #[test]
+    fn layers_collects_ocgs() {
+        let doc = make_ocg_doc();
+        let layers = collect_layers(&doc);
+        assert_eq!(layers.len(), 2);
+        assert_eq!(layers[0].name, "Layer1");
+        assert_eq!(layers[1].name, "Layer2");
+    }
+
+    #[test]
+    fn layers_default_state() {
+        let doc = make_ocg_doc();
+        let layers = collect_layers(&doc);
+        assert_eq!(layers[0].default_state, "ON");
+        assert_eq!(layers[1].default_state, "OFF");
+    }
+
+    #[test]
+    fn layers_page_references() {
+        let doc = make_ocg_doc();
+        let layers = collect_layers(&doc);
+        // Layer1 is referenced on page 1
+        assert_eq!(layers[0].page_numbers, vec![1]);
+        // Layer2 is not referenced on any page
+        assert!(layers[1].page_numbers.is_empty());
+    }
+
+    #[test]
+    fn layers_no_ocproperties() {
+        let mut doc = Document::new();
+        let mut catalog = Dictionary::new();
+        catalog.set("Type", Object::Name(b"Catalog".to_vec()));
+        doc.objects.insert((1, 0), Object::Dictionary(catalog));
+        doc.trailer.set("Root", Object::Reference((1, 0)));
+
+        let layers = collect_layers(&doc);
+        assert!(layers.is_empty());
+    }
+
+    #[test]
+    fn layers_empty_ocgs() {
+        let mut doc = Document::new();
+        let mut d_config = Dictionary::new();
+        d_config.set("BaseState", Object::Name(b"ON".to_vec()));
+        let mut oc_props = Dictionary::new();
+        oc_props.set("OCGs", Object::Array(vec![]));
+        oc_props.set("D", Object::Dictionary(d_config));
+        let mut catalog = Dictionary::new();
+        catalog.set("Type", Object::Name(b"Catalog".to_vec()));
+        catalog.set("OCProperties", Object::Dictionary(oc_props));
+        doc.objects.insert((1, 0), Object::Dictionary(catalog));
+        doc.trailer.set("Root", Object::Reference((1, 0)));
+
+        let layers = collect_layers(&doc);
+        assert!(layers.is_empty());
+    }
+
+    #[test]
+    fn layers_base_state_off_with_on_override() {
+        let mut doc = Document::new();
+
+        let mut ocg1 = Dictionary::new();
+        ocg1.set("Type", Object::Name(b"OCG".to_vec()));
+        ocg1.set("Name", Object::String(b"Hidden".to_vec(), StringFormat::Literal));
+        doc.objects.insert((10, 0), Object::Dictionary(ocg1));
+
+        let mut ocg2 = Dictionary::new();
+        ocg2.set("Type", Object::Name(b"OCG".to_vec()));
+        ocg2.set("Name", Object::String(b"Visible".to_vec(), StringFormat::Literal));
+        doc.objects.insert((11, 0), Object::Dictionary(ocg2));
+
+        let mut d_config = Dictionary::new();
+        d_config.set("BaseState", Object::Name(b"OFF".to_vec()));
+        d_config.set("ON", Object::Array(vec![Object::Reference((11, 0))]));
+
+        let mut oc_props = Dictionary::new();
+        oc_props.set("OCGs", Object::Array(vec![
+            Object::Reference((10, 0)),
+            Object::Reference((11, 0)),
+        ]));
+        oc_props.set("D", Object::Dictionary(d_config));
+
+        let mut catalog = Dictionary::new();
+        catalog.set("Type", Object::Name(b"Catalog".to_vec()));
+        catalog.set("OCProperties", Object::Dictionary(oc_props));
+        doc.objects.insert((1, 0), Object::Dictionary(catalog));
+        doc.trailer.set("Root", Object::Reference((1, 0)));
+
+        let layers = collect_layers(&doc);
+        assert_eq!(layers[0].default_state, "OFF");
+        assert_eq!(layers[1].default_state, "ON");
+    }
+
+    #[test]
+    fn layers_unnamed_ocg() {
+        let mut doc = Document::new();
+        let mut ocg = Dictionary::new();
+        ocg.set("Type", Object::Name(b"OCG".to_vec()));
+        // No Name key
+        doc.objects.insert((10, 0), Object::Dictionary(ocg));
+
+        let d_config = Dictionary::new();
+        let mut oc_props = Dictionary::new();
+        oc_props.set("OCGs", Object::Array(vec![Object::Reference((10, 0))]));
+        oc_props.set("D", Object::Dictionary(d_config));
+
+        let mut catalog = Dictionary::new();
+        catalog.set("Type", Object::Name(b"Catalog".to_vec()));
+        catalog.set("OCProperties", Object::Dictionary(oc_props));
+        doc.objects.insert((1, 0), Object::Dictionary(catalog));
+        doc.trailer.set("Root", Object::Reference((1, 0)));
+
+        let layers = collect_layers(&doc);
+        assert_eq!(layers[0].name, "(unnamed)");
+    }
+
+    #[test]
+    fn layers_text_output() {
+        let doc = make_ocg_doc();
+        let out = output_of(|w| print_layers(w, &doc));
+        assert!(out.contains("2 layers found"));
+        assert!(out.contains("Layer1"));
+        assert!(out.contains("Layer2"));
+        assert!(out.contains("ON"));
+        assert!(out.contains("OFF"));
+    }
+
+    #[test]
+    fn layers_json_output() {
+        let doc = make_ocg_doc();
+        let out = output_of(|w| print_layers_json(w, &doc));
+        let parsed: Value = serde_json::from_str(&out).unwrap();
+        assert_eq!(parsed["layer_count"], 2);
+        assert_eq!(parsed["layers"][0]["name"], "Layer1");
+        assert_eq!(parsed["layers"][0]["default_state"], "ON");
+        assert_eq!(parsed["layers"][1]["name"], "Layer2");
+        assert_eq!(parsed["layers"][1]["default_state"], "OFF");
+    }
+
+    #[test]
+    fn layers_ocproperties_via_reference() {
+        let mut doc = Document::new();
+        let mut ocg = Dictionary::new();
+        ocg.set("Type", Object::Name(b"OCG".to_vec()));
+        ocg.set("Name", Object::String(b"RefLayer".to_vec(), StringFormat::Literal));
+        doc.objects.insert((10, 0), Object::Dictionary(ocg));
+
+        let d_config = Dictionary::new();
+        let mut oc_props = Dictionary::new();
+        oc_props.set("OCGs", Object::Array(vec![Object::Reference((10, 0))]));
+        oc_props.set("D", Object::Dictionary(d_config));
+        doc.objects.insert((20, 0), Object::Dictionary(oc_props));
+
+        let mut catalog = Dictionary::new();
+        catalog.set("Type", Object::Name(b"Catalog".to_vec()));
+        catalog.set("OCProperties", Object::Reference((20, 0)));
+        doc.objects.insert((1, 0), Object::Dictionary(catalog));
+        doc.trailer.set("Root", Object::Reference((1, 0)));
+
+        let layers = collect_layers(&doc);
+        assert_eq!(layers.len(), 1);
+        assert_eq!(layers[0].name, "RefLayer");
+    }
+
+    // ── --structure tests ────────────────────────────────────────────
+
+    fn make_struct_doc() -> Document {
+        let mut doc = Document::new();
+
+        // Page
+        let mut page = Dictionary::new();
+        page.set("Type", Object::Name(b"Page".to_vec()));
+        page.set("Parent", Object::Reference((2, 0)));
+        doc.objects.insert((3, 0), Object::Dictionary(page));
+
+        let mut pages = Dictionary::new();
+        pages.set("Type", Object::Name(b"Pages".to_vec()));
+        pages.set("Kids", Object::Array(vec![Object::Reference((3, 0))]));
+        pages.set("Count", Object::Integer(1));
+        doc.objects.insert((2, 0), Object::Dictionary(pages));
+
+        // Structure elements
+        let mut span = Dictionary::new();
+        span.set("Type", Object::Name(b"StructElem".to_vec()));
+        span.set("S", Object::Name(b"Span".to_vec()));
+        span.set("Pg", Object::Reference((3, 0)));
+        span.set("K", Object::Integer(0)); // MCID
+        doc.objects.insert((12, 0), Object::Dictionary(span));
+
+        let mut p_elem = Dictionary::new();
+        p_elem.set("Type", Object::Name(b"StructElem".to_vec()));
+        p_elem.set("S", Object::Name(b"P".to_vec()));
+        p_elem.set("K", Object::Array(vec![Object::Reference((12, 0))]));
+        p_elem.set("T", Object::String(b"My Paragraph".to_vec(), StringFormat::Literal));
+        doc.objects.insert((11, 0), Object::Dictionary(p_elem));
+
+        let mut doc_elem = Dictionary::new();
+        doc_elem.set("Type", Object::Name(b"StructElem".to_vec()));
+        doc_elem.set("S", Object::Name(b"Document".to_vec()));
+        doc_elem.set("K", Object::Array(vec![Object::Reference((11, 0))]));
+        doc.objects.insert((10, 0), Object::Dictionary(doc_elem));
+
+        // StructTreeRoot
+        let mut str_root = Dictionary::new();
+        str_root.set("Type", Object::Name(b"StructTreeRoot".to_vec()));
+        str_root.set("K", Object::Reference((10, 0)));
+        doc.objects.insert((5, 0), Object::Dictionary(str_root));
+
+        // MarkInfo
+        let mut mark_info = Dictionary::new();
+        mark_info.set("Marked", Object::Boolean(true));
+
+        let mut catalog = Dictionary::new();
+        catalog.set("Type", Object::Name(b"Catalog".to_vec()));
+        catalog.set("Pages", Object::Reference((2, 0)));
+        catalog.set("StructTreeRoot", Object::Reference((5, 0)));
+        catalog.set("MarkInfo", Object::Dictionary(mark_info));
+        doc.objects.insert((1, 0), Object::Dictionary(catalog));
+
+        doc.trailer.set("Root", Object::Reference((1, 0)));
+        doc
+    }
+
+    #[test]
+    fn structure_collects_tree() {
+        let doc = make_struct_doc();
+        let (is_marked, tree) = collect_structure_tree(&doc);
+        assert!(is_marked);
+        assert_eq!(tree.len(), 1);
+        assert_eq!(tree[0].role, "Document");
+        assert_eq!(tree[0].children.len(), 1);
+        assert_eq!(tree[0].children[0].role, "P");
+        assert_eq!(tree[0].children[0].title.as_deref(), Some("My Paragraph"));
+        assert_eq!(tree[0].children[0].children.len(), 1);
+        assert_eq!(tree[0].children[0].children[0].role, "Span");
+        assert_eq!(tree[0].children[0].children[0].mcid, Some(0));
+    }
+
+    #[test]
+    fn structure_page_refs() {
+        let doc = make_struct_doc();
+        let (_, tree) = collect_structure_tree(&doc);
+        let span = &tree[0].children[0].children[0];
+        assert_eq!(span.page, Some(1));
+    }
+
+    #[test]
+    fn structure_no_struct_tree_root() {
+        let mut doc = Document::new();
+        let mut catalog = Dictionary::new();
+        catalog.set("Type", Object::Name(b"Catalog".to_vec()));
+        doc.objects.insert((1, 0), Object::Dictionary(catalog));
+        doc.trailer.set("Root", Object::Reference((1, 0)));
+
+        let (is_marked, tree) = collect_structure_tree(&doc);
+        assert!(!is_marked);
+        assert!(tree.is_empty());
+    }
+
+    #[test]
+    fn structure_mark_info_false() {
+        let mut doc = Document::new();
+        let mut mark_info = Dictionary::new();
+        mark_info.set("Marked", Object::Boolean(false));
+        let mut catalog = Dictionary::new();
+        catalog.set("Type", Object::Name(b"Catalog".to_vec()));
+        catalog.set("MarkInfo", Object::Dictionary(mark_info));
+        doc.objects.insert((1, 0), Object::Dictionary(catalog));
+        doc.trailer.set("Root", Object::Reference((1, 0)));
+
+        let (is_marked, _) = collect_structure_tree(&doc);
+        assert!(!is_marked);
+    }
+
+    #[test]
+    fn structure_text_output() {
+        let doc = make_struct_doc();
+        let config = default_config();
+        let out = output_of(|w| print_structure(w, &doc, &config));
+        assert!(out.contains("Tagged PDF: yes"));
+        assert!(out.contains("Structure elements: 3"));
+        assert!(out.contains("/Document"));
+        assert!(out.contains("/P"));
+        assert!(out.contains("/Span"));
+        assert!(out.contains("MCID=0"));
+        assert!(out.contains("\"My Paragraph\""));
+    }
+
+    #[test]
+    fn structure_json_output() {
+        let doc = make_struct_doc();
+        let config = default_config();
+        let out = output_of(|w| print_structure_json(w, &doc, &config));
+        let parsed: Value = serde_json::from_str(&out).unwrap();
+        assert_eq!(parsed["tagged"], true);
+        assert_eq!(parsed["element_count"], 3);
+        let root = &parsed["structure"][0];
+        assert_eq!(root["role"], "Document");
+        assert!(root["children"].is_array());
+    }
+
+    #[test]
+    fn structure_depth_limit_0() {
+        let doc = make_struct_doc();
+        let config = DumpConfig { decode_streams: false, truncate: None, json: false, hex: false, depth: Some(0), deref: false, raw: false };
+        let out = output_of(|w| print_structure(w, &doc, &config));
+        assert!(out.contains("/Document"));
+        assert!(out.contains("children"));
+        // /P and /Span should NOT appear since depth=0 only shows root level
+        assert!(!out.contains("/P"));
+    }
+
+    #[test]
+    fn structure_depth_limit_1() {
+        let doc = make_struct_doc();
+        let config = DumpConfig { decode_streams: false, truncate: None, json: false, hex: false, depth: Some(1), deref: false, raw: false };
+        let out = output_of(|w| print_structure(w, &doc, &config));
+        assert!(out.contains("/Document"));
+        assert!(out.contains("/P"));
+        // /Span at depth 2 should NOT appear
+        assert!(!out.contains("/Span"));
+    }
+
+    #[test]
+    fn structure_json_with_depth_limit() {
+        let doc = make_struct_doc();
+        let config = DumpConfig { decode_streams: false, truncate: None, json: true, hex: false, depth: Some(0), deref: false, raw: false };
+        let out = output_of(|w| print_structure_json(w, &doc, &config));
+        let parsed: Value = serde_json::from_str(&out).unwrap();
+        let root = &parsed["structure"][0];
+        // At depth 0, children should be represented as children_count
+        assert!(root.get("children_count").is_some());
+        assert!(root.get("children").is_none());
+    }
+
+    #[test]
+    fn structure_cycle_detection() {
+        let mut doc = Document::new();
+
+        // Create a cycle: elem1 -> elem2 -> elem1
+        let mut elem2 = Dictionary::new();
+        elem2.set("S", Object::Name(b"Span".to_vec()));
+        elem2.set("K", Object::Reference((10, 0))); // back to elem1
+        doc.objects.insert((11, 0), Object::Dictionary(elem2));
+
+        let mut elem1 = Dictionary::new();
+        elem1.set("S", Object::Name(b"P".to_vec()));
+        elem1.set("K", Object::Reference((11, 0)));
+        doc.objects.insert((10, 0), Object::Dictionary(elem1));
+
+        let mut str_root = Dictionary::new();
+        str_root.set("Type", Object::Name(b"StructTreeRoot".to_vec()));
+        str_root.set("K", Object::Reference((10, 0)));
+        doc.objects.insert((5, 0), Object::Dictionary(str_root));
+
+        let mut catalog = Dictionary::new();
+        catalog.set("Type", Object::Name(b"Catalog".to_vec()));
+        catalog.set("StructTreeRoot", Object::Reference((5, 0)));
+        doc.objects.insert((1, 0), Object::Dictionary(catalog));
+        doc.trailer.set("Root", Object::Reference((1, 0)));
+
+        let (_, tree) = collect_structure_tree(&doc);
+        // Should not infinite-loop, should have 2 elements (one is visited, stops)
+        let count = count_struct_elems(&tree);
+        assert!(count <= 2);
+    }
+
+    #[test]
+    fn structure_empty_tree() {
+        let mut doc = Document::new();
+        let mut str_root = Dictionary::new();
+        str_root.set("Type", Object::Name(b"StructTreeRoot".to_vec()));
+        doc.objects.insert((5, 0), Object::Dictionary(str_root));
+
+        let mut mark_info = Dictionary::new();
+        mark_info.set("Marked", Object::Boolean(true));
+
+        let mut catalog = Dictionary::new();
+        catalog.set("Type", Object::Name(b"Catalog".to_vec()));
+        catalog.set("StructTreeRoot", Object::Reference((5, 0)));
+        catalog.set("MarkInfo", Object::Dictionary(mark_info));
+        doc.objects.insert((1, 0), Object::Dictionary(catalog));
+        doc.trailer.set("Root", Object::Reference((1, 0)));
+
+        let (is_marked, tree) = collect_structure_tree(&doc);
+        assert!(is_marked);
+        assert!(tree.is_empty());
+    }
+
+    #[test]
+    fn structure_alt_text() {
+        let mut doc = Document::new();
+
+        let mut elem = Dictionary::new();
+        elem.set("S", Object::Name(b"Figure".to_vec()));
+        elem.set("Alt", Object::String(b"A photo of sunset".to_vec(), StringFormat::Literal));
+        doc.objects.insert((10, 0), Object::Dictionary(elem));
+
+        let mut str_root = Dictionary::new();
+        str_root.set("Type", Object::Name(b"StructTreeRoot".to_vec()));
+        str_root.set("K", Object::Reference((10, 0)));
+        doc.objects.insert((5, 0), Object::Dictionary(str_root));
+
+        let mut catalog = Dictionary::new();
+        catalog.set("Type", Object::Name(b"Catalog".to_vec()));
+        catalog.set("StructTreeRoot", Object::Reference((5, 0)));
+        doc.objects.insert((1, 0), Object::Dictionary(catalog));
+        doc.trailer.set("Root", Object::Reference((1, 0)));
+
+        let config = default_config();
+        let out = output_of(|w| print_structure(w, &doc, &config));
+        assert!(out.contains("alt=\"A photo of sunset\""));
+    }
+
+    #[test]
+    fn structure_k_as_array() {
+        let mut doc = Document::new();
+
+        let mut elem1 = Dictionary::new();
+        elem1.set("S", Object::Name(b"P".to_vec()));
+        doc.objects.insert((10, 0), Object::Dictionary(elem1));
+
+        let mut elem2 = Dictionary::new();
+        elem2.set("S", Object::Name(b"Span".to_vec()));
+        doc.objects.insert((11, 0), Object::Dictionary(elem2));
+
+        let mut str_root = Dictionary::new();
+        str_root.set("Type", Object::Name(b"StructTreeRoot".to_vec()));
+        str_root.set("K", Object::Array(vec![
+            Object::Reference((10, 0)),
+            Object::Reference((11, 0)),
+        ]));
+        doc.objects.insert((5, 0), Object::Dictionary(str_root));
+
+        let mut catalog = Dictionary::new();
+        catalog.set("Type", Object::Name(b"Catalog".to_vec()));
+        catalog.set("StructTreeRoot", Object::Reference((5, 0)));
+        doc.objects.insert((1, 0), Object::Dictionary(catalog));
+        doc.trailer.set("Root", Object::Reference((1, 0)));
+
+        let (_, tree) = collect_structure_tree(&doc);
+        assert_eq!(tree.len(), 2);
+        assert_eq!(tree[0].role, "P");
+        assert_eq!(tree[1].role, "Span");
     }
 }
