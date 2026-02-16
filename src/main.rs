@@ -1710,8 +1710,10 @@ fn object_matches(obj: &Object, conditions: &[SearchCondition]) -> bool {
                     Object::String(bytes, _) => bytes,
                     _ => return false,
                 };
-                // Case-insensitive byte search: compare lowercase bytes
-                haystack.to_ascii_lowercase().windows(needle_bytes.len()).any(|w| w == needle_bytes)
+                // Case-insensitive byte search: zero-allocation byte-by-byte compare
+                haystack.windows(needle_bytes.len()).any(|w|
+                    w.iter().zip(needle_bytes).all(|(a, b)| a.to_ascii_lowercase() == *b)
+                )
             })
         }
         SearchCondition::StreamContains { text } => {
@@ -2043,22 +2045,51 @@ struct PageResources {
     color_spaces: Vec<ResourceEntry>,
 }
 
+fn resolve_dict<'a>(doc: &'a Document, obj: &'a Object) -> Option<&'a lopdf::Dictionary> {
+    match obj {
+        Object::Dictionary(d) => Some(d),
+        Object::Reference(id) => match doc.get_object(*id).ok()? {
+            Object::Dictionary(d) => Some(d),
+            _ => None,
+        },
+        _ => None,
+    }
+}
+
+fn resolve_array<'a>(doc: &'a Document, obj: &'a Object) -> Option<&'a Vec<Object>> {
+    match obj {
+        Object::Array(a) => Some(a),
+        Object::Reference(id) => match doc.get_object(*id).ok()? {
+            Object::Array(a) => Some(a),
+            _ => None,
+        },
+        _ => None,
+    }
+}
+
+/// Extracts a String from an Object::String or Object::Name (lossy UTF-8 conversion).
+fn obj_to_string_lossy(obj: &Object) -> Option<String> {
+    match obj {
+        Object::String(bytes, _) => Some(String::from_utf8_lossy(bytes).into_owned()),
+        Object::Name(n) => Some(String::from_utf8_lossy(n).into_owned()),
+        _ => None,
+    }
+}
+
+/// Extracts a String from an Object::Name only (lossy UTF-8 conversion).
+fn name_to_string(obj: &Object) -> Option<String> {
+    match obj {
+        Object::Name(n) => Some(String::from_utf8_lossy(n).into_owned()),
+        _ => None,
+    }
+}
+
 fn resolve_page_resources(doc: &Document, page_id: ObjectId) -> Option<&lopdf::Dictionary> {
     // Walk up the page tree to find inherited Resources
     let mut current_id = page_id;
     while let Ok(Object::Dictionary(dict)) = doc.get_object(current_id) {
         if let Ok(res) = dict.get(b"Resources") {
-            return match res {
-                Object::Dictionary(d) => Some(d),
-                Object::Reference(id) => {
-                    if let Ok(Object::Dictionary(d)) = doc.get_object(*id) {
-                        Some(d)
-                    } else {
-                        None
-                    }
-                }
-                _ => None,
-            };
+            return resolve_dict(doc, res);
         }
         // Walk up to parent
         if let Ok(parent_ref) = dict.get(b"Parent").and_then(|o| o.as_reference()) {
@@ -3139,11 +3170,11 @@ fn collect_fonts(doc: &Document) -> Vec<FontInfo> {
         if !is_font { continue; }
 
         let base_font = dict.get(b"BaseFont").ok()
-            .and_then(|v| v.as_name().ok().map(|n| String::from_utf8_lossy(n).into_owned()))
+            .and_then(name_to_string)
             .unwrap_or_else(|| "-".to_string());
 
         let subtype = dict.get(b"Subtype").ok()
-            .and_then(|v| v.as_name().ok().map(|n| String::from_utf8_lossy(n).into_owned()))
+            .and_then(name_to_string)
             .unwrap_or_else(|| "-".to_string());
 
         let encoding = dict.get(b"Encoding").ok()
@@ -3207,24 +3238,9 @@ fn collect_fonts(doc: &Document) -> Vec<FontInfo> {
 
 fn extract_encoding_differences(doc: &Document, dict: &lopdf::Dictionary) -> Option<String> {
     let enc_obj = dict.get(b"Encoding").ok()?;
-    let enc_dict = match enc_obj {
-        Object::Dictionary(d) => d,
-        Object::Reference(id) => match doc.get_object(*id).ok()? {
-            Object::Dictionary(d) => d,
-            _ => return None,
-        },
-        _ => return None,
-    };
+    let enc_dict = resolve_dict(doc, enc_obj)?;
     let diffs = enc_dict.get(b"Differences").ok()?;
-    let diffs_arr;
-    let arr = match diffs {
-        Object::Array(a) => a,
-        Object::Reference(id) => match doc.get_object(*id).ok()? {
-            Object::Array(a) => { diffs_arr = a; diffs_arr }
-            _ => return None,
-        },
-        _ => return None,
-    };
+    let arr = resolve_array(doc, diffs)?;
 
     let mut parts = Vec::new();
     let mut current_code: Option<i64> = None;
@@ -3261,15 +3277,7 @@ fn extract_encoding_differences(doc: &Document, dict: &lopdf::Dictionary) -> Opt
 
 fn extract_cid_system_info(doc: &Document, dict: &lopdf::Dictionary) -> Option<String> {
     let descendants = dict.get(b"DescendantFonts").ok()?;
-    let desc_arr;
-    let arr = match descendants {
-        Object::Array(a) => a,
-        Object::Reference(id) => match doc.get_object(*id).ok()? {
-            Object::Array(a) => { desc_arr = a; desc_arr }
-            _ => return None,
-        },
-        _ => return None,
-    };
+    let arr = resolve_array(doc, descendants)?;
 
     let first = arr.first()?;
     let cid_font_dict = match first {
@@ -3283,20 +3291,13 @@ fn extract_cid_system_info(doc: &Document, dict: &lopdf::Dictionary) -> Option<S
     };
 
     let csi = cid_font_dict.get(b"CIDSystemInfo").ok()?;
-    let csi_dict = match csi {
-        Object::Dictionary(d) => d,
-        Object::Reference(id) => match doc.get_object(*id).ok()? {
-            Object::Dictionary(d) => d,
-            _ => return None,
-        },
-        _ => return None,
-    };
+    let csi_dict = resolve_dict(doc, csi)?;
 
     let registry = csi_dict.get(b"Registry").ok()
-        .and_then(|v| if let Object::String(bytes, _) = v { Some(String::from_utf8_lossy(bytes).into_owned()) } else { None })
+        .and_then(obj_to_string_lossy)
         .unwrap_or_else(|| "?".to_string());
     let ordering = csi_dict.get(b"Ordering").ok()
-        .and_then(|v| if let Object::String(bytes, _) = v { Some(String::from_utf8_lossy(bytes).into_owned()) } else { None })
+        .and_then(obj_to_string_lossy)
         .unwrap_or_else(|| "?".to_string());
     let supplement = csi_dict.get(b"Supplement").ok()
         .and_then(|v| v.as_i64().ok())
@@ -3828,24 +3829,16 @@ fn check_names_tree_structure(doc: &Document, issues: &mut Vec<ValidationIssue>)
         Ok(Object::Dictionary(d)) => d,
         _ => return,
     };
-    let names_dict = match catalog.get(b"Names").ok() {
-        Some(Object::Reference(id)) => match doc.get_object(*id) {
-            Ok(Object::Dictionary(d)) => d,
-            _ => return,
-        },
-        Some(Object::Dictionary(d)) => d,
-        _ => return,
+    let names_dict = match catalog.get(b"Names").ok().and_then(|o| resolve_dict(doc, o)) {
+        Some(d) => d,
+        None => return,
     };
 
     let subtree_keys: &[&[u8]] = &[b"EmbeddedFiles", b"Dests", b"JavaScript", b"AP"];
     for key in subtree_keys {
-        let subtree = match names_dict.get(key).ok() {
-            Some(Object::Reference(id)) => match doc.get_object(*id) {
-                Ok(Object::Dictionary(d)) => d,
-                _ => continue,
-            },
-            Some(Object::Dictionary(d)) => d,
-            _ => continue,
+        let subtree = match names_dict.get(key).ok().and_then(|o| resolve_dict(doc, o)) {
+            Some(d) => d,
+            None => continue,
         };
         let key_name = String::from_utf8_lossy(key);
         validate_name_tree_node(doc, subtree, &key_name, &mut BTreeSet::new(), issues, 0);
@@ -4460,7 +4453,7 @@ fn collect_annotations(doc: &Document, page_filter: Option<&PageSpec>) -> Vec<An
             };
 
             let subtype = annot_dict.get(b"Subtype").ok()
-                .and_then(|v| v.as_name().ok().map(|n| String::from_utf8_lossy(n).into_owned()))
+                .and_then(name_to_string)
                 .unwrap_or_else(|| "-".to_string());
 
             let rect = annot_dict.get(b"Rect").ok()
@@ -4797,21 +4790,13 @@ fn collect_embedded_files(doc: &Document) -> Vec<EmbeddedFileInfo> {
         Ok(Object::Dictionary(d)) => d,
         _ => return files,
     };
-    let names_dict = match catalog.get(b"Names").ok() {
-        Some(Object::Reference(id)) => match doc.get_object(*id) {
-            Ok(Object::Dictionary(d)) => d,
-            _ => return files,
-        },
-        Some(Object::Dictionary(d)) => d,
-        _ => return files,
+    let names_dict = match catalog.get(b"Names").ok().and_then(|o| resolve_dict(doc, o)) {
+        Some(d) => d,
+        None => return files,
     };
-    let ef_dict = match names_dict.get(b"EmbeddedFiles").ok() {
-        Some(Object::Reference(id)) => match doc.get_object(*id) {
-            Ok(Object::Dictionary(d)) => d,
-            _ => return files,
-        },
-        Some(Object::Dictionary(d)) => d,
-        _ => return files,
+    let ef_dict = match names_dict.get(b"EmbeddedFiles").ok().and_then(|o| resolve_dict(doc, o)) {
+        Some(d) => d,
+        None => return files,
     };
 
     let entries = walk_name_tree(doc, ef_dict);
@@ -4827,21 +4812,12 @@ fn collect_embedded_files(doc: &Document) -> Vec<EmbeddedFileInfo> {
 
         let filename = filespec.get(b"UF").ok()
             .or_else(|| filespec.get(b"F").ok())
-            .map(|v| match v {
-                Object::String(bytes, _) => String::from_utf8_lossy(bytes).into_owned(),
-                _ => name.clone(),
-            })
+            .and_then(obj_to_string_lossy)
             .unwrap_or_else(|| name.clone());
 
         // Get the embedded file stream from /EF dict
         let ef_ref = filespec.get(b"EF").ok()
-            .and_then(|v| match v {
-                Object::Dictionary(d) => Some(d),
-                Object::Reference(id) => doc.get_object(*id).ok().and_then(|o| {
-                    if let Object::Dictionary(d) = o { Some(d) } else { None }
-                }),
-                _ => None,
-            });
+            .and_then(|v| resolve_dict(doc, v));
         let (stream_id, stream_dict) = match ef_ref {
             Some(ef) => {
                 let stream_ref = ef.get(b"F").ok()
@@ -4861,22 +4837,13 @@ fn collect_embedded_files(doc: &Document) -> Vec<EmbeddedFileInfo> {
 
         let mime_type = stream_dict
             .and_then(|s| s.dict.get(b"Subtype").ok())
-            .map(|v| match v {
-                Object::Name(n) => String::from_utf8_lossy(n).into_owned(),
-                _ => "-".to_string(),
-            })
+            .and_then(name_to_string)
             .unwrap_or_else(|| "-".to_string());
 
         // Try /Params/Size for the uncompressed size
         let size = stream_dict
             .and_then(|s| s.dict.get(b"Params").ok())
-            .and_then(|v| match v {
-                Object::Dictionary(d) => Some(d),
-                Object::Reference(id) => doc.get_object(*id).ok().and_then(|o| {
-                    if let Object::Dictionary(d) = o { Some(d) } else { None }
-                }),
-                _ => None,
-            })
+            .and_then(|v| resolve_dict(doc, v))
             .and_then(|d| d.get(b"Size").ok())
             .and_then(|v| if let Object::Integer(i) = v { Some(*i) } else { None });
 
@@ -4988,13 +4955,9 @@ fn collect_page_labels(doc: &Document) -> Vec<PageLabelEntry> {
         _ => return entries,
     };
 
-    let page_labels_dict = match catalog.get(b"PageLabels").ok() {
-        Some(Object::Reference(id)) => match doc.get_object(*id) {
-            Ok(Object::Dictionary(d)) => d,
-            _ => return entries,
-        },
-        Some(Object::Dictionary(d)) => d,
-        _ => return entries,
+    let page_labels_dict = match catalog.get(b"PageLabels").ok().and_then(|o| resolve_dict(doc, o)) {
+        Some(d) => d,
+        None => return entries,
     };
 
     let mut ranges = walk_number_tree(doc, page_labels_dict);
@@ -5002,23 +4965,14 @@ fn collect_page_labels(doc: &Document) -> Vec<PageLabelEntry> {
 
     // Pre-parse ranges into (range_start, style, prefix, start_val) tuples
     let parsed_ranges: Vec<(i64, String, String, i64)> = ranges.iter().map(|(range_key, value)| {
-        let label_dict = match value {
-            Object::Dictionary(d) => Some(d),
-            Object::Reference(id) => doc.get_object(*id).ok().and_then(|o| {
-                if let Object::Dictionary(d) = o { Some(d) } else { None }
-            }),
-            _ => None,
-        };
+        let label_dict = resolve_dict(doc, value);
         match label_dict {
             Some(d) => {
                 let s = d.get(b"S").ok()
-                    .and_then(|v| v.as_name().ok().map(|n| String::from_utf8_lossy(n).into_owned()))
+                    .and_then(name_to_string)
                     .unwrap_or_else(|| "-".to_string());
                 let p = d.get(b"P").ok()
-                    .map(|v| match v {
-                        Object::String(bytes, _) => String::from_utf8_lossy(bytes).into_owned(),
-                        _ => String::new(),
-                    })
+                    .and_then(obj_to_string_lossy)
                     .unwrap_or_default();
                 let st = d.get(b"St").ok()
                     .and_then(|v| if let Object::Integer(i) = v { Some(*i) } else { None })
@@ -5123,10 +5077,7 @@ fn classify_link(doc: &Document, dict: &lopdf::Dictionary) -> (Cow<'static, str>
             }
             Some(b"GoToR") => {
                 let file = action_dict.get(b"F").ok()
-                    .map(|v| match v {
-                        Object::String(bytes, _) => String::from_utf8_lossy(bytes).into_owned(),
-                        _ => "?".to_string(),
-                    })
+                    .and_then(obj_to_string_lossy)
                     .unwrap_or_else(|| "?".to_string());
                 let dest = action_dict.get(b"D").ok()
                     .map(|d| format_dest_value(doc, d))
@@ -5135,28 +5086,19 @@ fn classify_link(doc: &Document, dict: &lopdf::Dictionary) -> (Cow<'static, str>
             }
             Some(b"URI") => {
                 let uri = action_dict.get(b"URI").ok()
-                    .map(|v| match v {
-                        Object::String(bytes, _) => String::from_utf8_lossy(bytes).into_owned(),
-                        _ => "?".to_string(),
-                    })
+                    .and_then(obj_to_string_lossy)
                     .unwrap_or_else(|| "?".to_string());
                 (Cow::Borrowed("URI"), uri)
             }
             Some(b"Named") => {
                 let n = action_dict.get(b"N").ok()
-                    .map(|v| match v {
-                        Object::Name(n) => String::from_utf8_lossy(n).into_owned(),
-                        _ => "?".to_string(),
-                    })
+                    .and_then(obj_to_string_lossy)
                     .unwrap_or_else(|| "?".to_string());
                 (Cow::Borrowed("Named"), n)
             }
             Some(b"Launch") => {
                 let f = action_dict.get(b"F").ok()
-                    .map(|v| match v {
-                        Object::String(bytes, _) => String::from_utf8_lossy(bytes).into_owned(),
-                        _ => "?".to_string(),
-                    })
+                    .and_then(obj_to_string_lossy)
                     .unwrap_or_else(|| "?".to_string());
                 (Cow::Borrowed("Launch"), f)
             }
@@ -5521,38 +5463,25 @@ fn collect_layers(doc: &Document) -> Vec<OcgInfo> {
         _ => return Vec::new(),
     };
 
-    let oc_props = match catalog.get(b"OCProperties").ok() {
-        Some(Object::Dictionary(d)) => d,
-        Some(Object::Reference(id)) => match doc.get_object(*id).ok() {
-            Some(Object::Dictionary(d)) => d,
-            _ => return Vec::new(),
-        },
-        _ => return Vec::new(),
+    let oc_props = match catalog.get(b"OCProperties").ok().and_then(|o| resolve_dict(doc, o)) {
+        Some(d) => d,
+        None => return Vec::new(),
     };
 
     // Get OCGs array
-    let ocgs_arr = match oc_props.get(b"OCGs").ok() {
-        Some(Object::Array(a)) => a,
-        Some(Object::Reference(id)) => match doc.get_object(*id).ok() {
-            Some(Object::Array(a)) => a,
-            _ => return Vec::new(),
-        },
-        _ => return Vec::new(),
+    let ocgs_arr = match oc_props.get(b"OCGs").ok().and_then(|o| resolve_array(doc, o)) {
+        Some(a) => a,
+        None => return Vec::new(),
     };
 
     // Get default config /D
     let empty_dict = lopdf::Dictionary::new();
-    let d_dict = match oc_props.get(b"D").ok() {
-        Some(Object::Dictionary(d)) => d,
-        Some(Object::Reference(id)) => match doc.get_object(*id).ok() {
-            Some(Object::Dictionary(d)) => d,
-            _ => &empty_dict,
-        },
-        _ => &empty_dict,
-    };
+    let d_dict = oc_props.get(b"D").ok()
+        .and_then(|o| resolve_dict(doc, o))
+        .unwrap_or(&empty_dict);
 
     let base_state = d_dict.get(b"BaseState").ok()
-        .and_then(|v| v.as_name().ok().map(|n| String::from_utf8_lossy(n).into_owned()))
+        .and_then(name_to_string)
         .unwrap_or_else(|| "ON".to_string());
 
     // Collect ON/OFF override sets
@@ -5620,40 +5549,24 @@ fn extract_id_set(dict: &lopdf::Dictionary, key: &[u8]) -> BTreeSet<ObjectId> {
 
 fn scan_page_for_ocgs(doc: &Document, page_dict: &lopdf::Dictionary, page_num: u32, ocg_pages: &mut BTreeMap<ObjectId, Vec<u32>>) {
     // Look for Resources -> Properties which holds OCG references
-    let resources = match page_dict.get(b"Resources").ok() {
-        Some(Object::Dictionary(d)) => d,
-        Some(Object::Reference(id)) => match doc.get_object(*id).ok() {
-            Some(Object::Dictionary(d)) => d,
-            _ => return,
-        },
-        _ => {
+    let resources = match page_dict.get(b"Resources").ok().and_then(|o| resolve_dict(doc, o)) {
+        Some(d) => d,
+        None => {
             // Try inheriting from parent
-            if let Ok(Object::Reference(parent_id)) = page_dict.get(b"Parent") {
-                if let Ok(Object::Dictionary(parent)) = doc.get_object(*parent_id) {
-                    match parent.get(b"Resources").ok() {
-                        Some(Object::Dictionary(d)) => d,
-                        Some(Object::Reference(id)) => match doc.get_object(*id).ok() {
-                            Some(Object::Dictionary(d)) => d,
-                            _ => return,
-                        },
-                        _ => return,
-                    }
-                } else {
-                    return;
-                }
+            if let Ok(Object::Reference(parent_id)) = page_dict.get(b"Parent")
+                && let Ok(Object::Dictionary(parent)) = doc.get_object(*parent_id)
+                && let Some(d) = parent.get(b"Resources").ok().and_then(|o| resolve_dict(doc, o))
+            {
+                d
             } else {
                 return;
             }
         }
     };
 
-    let props = match resources.get(b"Properties").ok() {
-        Some(Object::Dictionary(d)) => d,
-        Some(Object::Reference(id)) => match doc.get_object(*id).ok() {
-            Some(Object::Dictionary(d)) => d,
-            _ => return,
-        },
-        _ => return,
+    let props = match resources.get(b"Properties").ok().and_then(|o| resolve_dict(doc, o)) {
+        Some(d) => d,
+        None => return,
     };
 
     for (_, val) in props.iter() {
@@ -5732,28 +5645,14 @@ fn collect_structure_tree(doc: &Document) -> (bool, Vec<StructElemInfo>) {
 
     // Check MarkInfo
     let is_marked = catalog.get(b"MarkInfo").ok()
-        .and_then(|v| match v {
-            Object::Dictionary(d) => d.get(b"Marked").ok()
-                .and_then(|m| if let Object::Boolean(b) = m { Some(*b) } else { None }),
-            Object::Reference(id) => doc.get_object(*id).ok().and_then(|o| {
-                if let Object::Dictionary(d) = o {
-                    d.get(b"Marked").ok()
-                        .and_then(|m| if let Object::Boolean(b) = m { Some(*b) } else { None })
-                } else {
-                    None
-                }
-            }),
-            _ => None,
-        })
+        .and_then(|v| resolve_dict(doc, v))
+        .and_then(|d| d.get(b"Marked").ok())
+        .and_then(|m| if let Object::Boolean(b) = m { Some(*b) } else { None })
         .unwrap_or(false);
 
-    let struct_tree_root = match catalog.get(b"StructTreeRoot").ok() {
-        Some(Object::Reference(id)) => match doc.get_object(*id).ok() {
-            Some(Object::Dictionary(d)) => d,
-            _ => return (is_marked, Vec::new()),
-        },
-        Some(Object::Dictionary(d)) => d,
-        _ => return (is_marked, Vec::new()),
+    let struct_tree_root = match catalog.get(b"StructTreeRoot").ok().and_then(|o| resolve_dict(doc, o)) {
+        Some(d) => d,
+        None => return (is_marked, Vec::new()),
     };
 
     // Build page_id -> page_num lookup
@@ -5798,10 +5697,10 @@ fn collect_struct_children(doc: &Document, dict: &lopdf::Dictionary, page_lookup
                     let mcid = extract_mcid(child_dict);
 
                     let title = child_dict.get(b"T").ok()
-                        .and_then(|v| if let Object::String(bytes, _) = v { Some(String::from_utf8_lossy(bytes).into_owned()) } else { None });
+                        .and_then(obj_to_string_lossy);
 
                     let alt = child_dict.get(b"Alt").ok()
-                        .and_then(|v| if let Object::String(bytes, _) = v { Some(String::from_utf8_lossy(bytes).into_owned()) } else { None });
+                        .and_then(obj_to_string_lossy);
 
                     let children = collect_struct_children(doc, child_dict, page_lookup, visited);
 
