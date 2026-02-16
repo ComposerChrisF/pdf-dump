@@ -25,22 +25,16 @@ cargo build --release
 
 ## Quick start
 
-Dump the full object tree (trailer, catalog, pages, resources, streams):
+Get a comprehensive overview (metadata, validation, stats, features):
 
 ```
 pdf-dump file.pdf
 ```
 
-Get a one-line summary of every object:
+Get a one-line listing of every object:
 
 ```
-pdf-dump file.pdf --summary
-```
-
-Show document metadata (version, page count, /Info fields):
-
-```
-pdf-dump file.pdf --metadata
+pdf-dump file.pdf --list
 ```
 
 Inspect a single object by number:
@@ -49,21 +43,23 @@ Inspect a single object by number:
 pdf-dump file.pdf --object 42
 ```
 
+Get structured page info (dimensions, resources, annotations, text preview):
+
+```
+pdf-dump file.pdf --page 3
+```
+
 ## Modes
 
 Each invocation runs in one mode. Only one mode flag at a time (with a few noted exceptions).
 
-### Default dump
+### Default overview
 
-No flags. Prints the trailer, then walks the object graph depth-first from `/Root`, printing each object's full contents and following all references.
+No flags. Shows PDF version, page/object counts, encryption status, all /Info fields (Producer, Creator, Title, Author, Subject, Keywords, CreationDate, ModDate), catalog properties (PageLayout, PageMode, Lang), validation summary, stream stats, and feature indicators (bookmarks, forms, layers, embedded files, page labels, tagged structure).
 
-### `--summary` / `-s`
+### `--list` / `-s`
 
 One-line-per-object table showing object number, kind, `/Type`, and a detail string (key count, stream size, filter).
-
-### `--metadata` / `-m`
-
-Prints PDF version, object count, page count, `/Info` dictionary fields (Title, Author, Producer, etc.), and catalog-level properties (PageLayout, Lang).
 
 ### `--object N` / `-o N`
 
@@ -71,7 +67,7 @@ Prints one or more objects by number (generation 0) without following references
 
 ### `--page N` or `--page N-M`
 
-Dumps the object subtree for a specific page or page range (1-based). Only follows references reachable from each page's dictionary. Examples: `--page 3` for a single page, `--page 1-5` for pages 1 through 5.
+Shows structured page information: MediaBox, CropBox, Rotate, resource summary (fonts, images, ExtGState), annotation count with subtype breakdown, content stream count/bytes, and text preview. JSON output includes full text. Accepts single pages (e.g. `--page 3`) or inclusive ranges (e.g. `--page 1-5`).
 
 ### `--search <expr>`
 
@@ -86,7 +82,7 @@ pdf-dump file.pdf --search "regex=D:20(23|24)"     # regex match across values
 pdf-dump file.pdf --search Type=Font,Subtype=Type1 # both conditions must match
 ```
 
-Combine with `--summary` for compact output (includes matched key/value): `pdf-dump file.pdf --search Type=Font --summary`
+Combine with `--list` for compact output (includes matched key/value): `pdf-dump file.pdf --search Type=Font --list`
 
 ### `--text`
 
@@ -142,19 +138,9 @@ pdf-dump file.pdf --forms
 pdf-dump file.pdf --forms --json
 ```
 
-### `--links`
-
-Extracts all hyperlinks and GoTo actions. Lists every URI, GoTo, GoToR, and Named action with source page number and target. Can be filtered to specific pages.
-
-```
-pdf-dump file.pdf --links                  # all pages
-pdf-dump file.pdf --links --page 1         # just page 1
-pdf-dump file.pdf --links --json
-```
-
 ### `--annotations`
 
-Lists all annotations in the document, grouped by page. Shows subtype, rectangle, and contents. Can be filtered to specific pages.
+Lists all annotations in the document, grouped by page. Shows subtype, rectangle, contents, and for Link annotations: link type (URI/GoTo/GoToR/Named/Launch) and target. Can be filtered to specific pages.
 
 ```
 pdf-dump file.pdf --annotations              # all pages
@@ -174,7 +160,7 @@ pdf-dump file.pdf --bookmarks --json
 
 ### `--embedded-files`
 
-Lists file attachments embedded in the PDF. Shows filename, MIME type, size, and the object number of the EmbeddedFile stream (which `--extract-object` can extract).
+Lists file attachments embedded in the PDF. Shows filename, MIME type, size, and the object number of the EmbeddedFile stream (which `--extract-stream` can extract).
 
 ```
 pdf-dump file.pdf --embedded-files
@@ -190,14 +176,14 @@ pdf-dump file.pdf --layers
 pdf-dump file.pdf --ocg --json
 ```
 
-### `--structure`
+### `--tags`
 
 Shows the tagged PDF logical structure tree from `/StructTreeRoot`. Displays element roles (heading, paragraph, table, figure), page refs, MCIDs, titles, and alt text. Supports `--depth N` to limit tree depth. Cycle detection prevents infinite output.
 
 ```
-pdf-dump file.pdf --structure
-pdf-dump file.pdf --structure --depth 3
-pdf-dump file.pdf --structure --json
+pdf-dump file.pdf --tags
+pdf-dump file.pdf --tags --depth 3
+pdf-dump file.pdf --tags --json
 ```
 
 ### `--page-labels`
@@ -231,21 +217,16 @@ pdf-dump file.pdf --tree --json
 
 ### `--stats`
 
-Shows document statistics: page count, object count, object type breakdown, stream statistics (total raw/decoded bytes, filter usage histogram), and the top 10 largest streams.
+Shows document statistics: object type breakdown, stream statistics (total raw/decoded bytes, filter usage histogram), and the top 10 largest streams.
 
 ```
 pdf-dump file.pdf --stats
 pdf-dump file.pdf --stats --json
 ```
 
-### `--xref`
+### `--dump`
 
-Shows a cross-reference table listing every object in the document with its number, generation, kind, and `/Type`.
-
-```
-pdf-dump file.pdf --xref
-pdf-dump file.pdf --xref --json
-```
+Full depth-first dump of all reachable objects from `/Root`. Prints the trailer, then walks the entire object graph. Respects `--depth N` to limit traversal.
 
 ### `--refs-to N`
 
@@ -277,7 +258,7 @@ Structural health check. Runs 10 validation checks:
 
 Severity levels: `[ERROR]`, `[WARN]`, `[INFO]`, `[OK]`
 
-### `--extract-object N --output <path>`
+### `--extract-stream N --output <path>`
 
 Extracts a stream object's decoded content to a file.
 
@@ -295,13 +276,18 @@ These combine with mode flags:
 | `--decode-streams` | Decompress and display stream contents (FlateDecode, ASCII85Decode, ASCIIHexDecode, LZWDecode, RunLengthDecode). |
 | `--hex` | Show binary streams as hex dump (use with `--decode-streams` or `--raw`). |
 | `--truncate N` | Limit binary stream output to N bytes. |
-| `--depth N` | Limit traversal depth (0 = root only). Works with dump, page, tree, structure. |
+| `--depth N` | Limit traversal depth (0 = root only). Works with dump, tree, tags. |
 | `--dot` | Output tree as GraphViz DOT format (use with `--tree`). |
-| `--deref` | Inline-expand references to show target summaries (use with `--object` or `--page`). |
+| `--deref` | Inline-expand references to show target summaries (use with `--object`). |
 | `--raw` | Show raw undecoded stream bytes (use with `--object`; conflicts with `--decode-streams`). |
-| `--context` | Show bidirectional reference context (use with `--object`). |
 
 ## Examples
+
+Get an overview of an unknown PDF:
+
+```
+pdf-dump file.pdf
+```
 
 Decode all streams and show binary content as hex, truncated:
 
@@ -351,12 +337,6 @@ Get a human-readable explanation of what an object is:
 pdf-dump file.pdf --info 42
 ```
 
-See an object with full bidirectional reference context:
-
-```
-pdf-dump file.pdf --object 42 --context
-```
-
 Inspect an object with references expanded inline:
 
 ```
@@ -367,6 +347,13 @@ View raw undecoded stream bytes as hex:
 
 ```
 pdf-dump file.pdf --object 42 --raw --hex
+```
+
+Get structured page info:
+
+```
+pdf-dump file.pdf --page 1
+pdf-dump file.pdf --page 1-3 --json
 ```
 
 List embedded file attachments:
@@ -393,12 +380,11 @@ Show document statistics:
 pdf-dump file.pdf --stats
 ```
 
-List bookmarks, annotations, links, and forms:
+List bookmarks, annotations, and forms:
 
 ```
 pdf-dump file.pdf --bookmarks
 pdf-dump file.pdf --annotations --page 1-3
-pdf-dump file.pdf --links
 pdf-dump file.pdf --forms
 ```
 
@@ -406,7 +392,7 @@ Show layers and tagged structure:
 
 ```
 pdf-dump file.pdf --layers
-pdf-dump file.pdf --structure --depth 3
+pdf-dump file.pdf --tags --depth 3
 ```
 
 ## For Claude Code users

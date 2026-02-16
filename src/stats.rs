@@ -61,11 +61,6 @@ pub(crate) fn collect_stats(doc: &Document) -> PdfStats {
 pub(crate) fn print_stats(writer: &mut impl Write, doc: &Document) {
     let stats = collect_stats(doc);
 
-    writeln!(writer, "--- Overview ---").unwrap();
-    writeln!(writer, "  Pages:   {}", stats.page_count).unwrap();
-    writeln!(writer, "  Objects: {}", stats.object_count).unwrap();
-    writeln!(writer).unwrap();
-
     writeln!(writer, "--- Objects by Type ---").unwrap();
     for (typ, count) in &stats.type_counts {
         writeln!(writer, "  {:<14} {}", typ, count).unwrap();
@@ -191,8 +186,6 @@ mod tests {
         let s = make_stream(None, vec![0; 50]);
         doc.objects.insert((2, 0), Object::Stream(s));
         let out = output_of(|w| print_stats(w, &doc));
-        assert!(out.contains("Overview"));
-        assert!(out.contains("Objects: 2"));
         assert!(out.contains("Objects by Type"));
         assert!(out.contains("Stream Statistics"));
     }

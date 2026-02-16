@@ -3,7 +3,17 @@ use std::path::PathBuf;
 
 /// Dumps the internal structure of a PDF file.
 #[derive(Parser, Debug)]
-#[command(author, version, about, long_about = None)]
+#[command(author, version, about, long_about = None, after_long_help = "\
+Common workflows:
+  pdf-dump file.pdf                     Overview (metadata + validation + stats)
+  pdf-dump file.pdf --text              Extract all text
+  pdf-dump file.pdf --text --page 3     Extract text from page 3
+  pdf-dump file.pdf --page 3            Page 3 info (dimensions, resources, text preview)
+  pdf-dump file.pdf --info 5            Explain object 5
+  pdf-dump file.pdf --search Type=Font  Find all font objects
+  pdf-dump file.pdf --validate --json   Validation results as JSON
+  pdf-dump file.pdf --list              One-line listing of every object
+")]
 pub(crate) struct Args {
     /// Path to the PDF file
     #[arg(required = true)]
@@ -11,13 +21,9 @@ pub(crate) struct Args {
 
     // ── Overview ──────────────────────────────────────────────────────
 
-    /// Print document metadata (version, pages, /Info fields)
-    #[arg(short = 'm', long, help_heading = "Overview")]
-    pub metadata: bool,
-
-    /// Print a one-line summary of every object
+    /// Print a one-line listing of every object
     #[arg(short = 's', long, help_heading = "Overview")]
-    pub summary: bool,
+    pub list: bool,
 
     /// Show document statistics (object types, stream sizes, filter usage)
     #[arg(long, help_heading = "Overview")]
@@ -59,9 +65,9 @@ pub(crate) struct Args {
     #[arg(long, help_heading = "Structure")]
     pub bookmarks: bool,
 
-    /// Show tagged PDF logical structure tree
+    /// Show tagged PDF structure tree (accessibility tags)
     #[arg(long, help_heading = "Structure")]
-    pub structure: bool,
+    pub tags: bool,
 
     /// Show optional content groups (layers)
     #[arg(long, alias = "ocg", help_heading = "Structure")]
@@ -71,18 +77,14 @@ pub(crate) struct Args {
     #[arg(long, help_heading = "Structure")]
     pub page_labels: bool,
 
-    // ── Annotations & Links ──────────────────────────────────────────
+    // ── Annotations & Forms ──────────────────────────────────────────
 
-    /// Show annotations (all pages, or filtered with --page)
-    #[arg(long, help_heading = "Annotations & Links")]
+    /// Show annotations with link targets (all pages, or filtered with --page)
+    #[arg(long, help_heading = "Annotations & Forms")]
     pub annotations: bool,
 
-    /// List link annotations with targets (all pages, or filtered with --page)
-    #[arg(long, help_heading = "Annotations & Links")]
-    pub links: bool,
-
     /// List form fields (AcroForm)
-    #[arg(long, help_heading = "Annotations & Links")]
+    #[arg(long, help_heading = "Annotations & Forms")]
     pub forms: bool,
 
     // ── Objects ──────────────────────────────────────────────────────
@@ -130,7 +132,7 @@ pub(crate) struct Args {
     pub output: Option<PathBuf>,
 
     /// Full depth-first dump of all reachable objects from /Root
-    #[arg(long, help_heading = "Export")]
+    #[arg(long, help_heading = "Objects")]
     pub dump: bool,
 
     // ── Modifiers ────────────────────────────────────────────────────

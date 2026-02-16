@@ -125,6 +125,27 @@ fn count_outline_items(items: &[OutlineItem]) -> usize {
     items.iter().map(|item| 1 + count_outline_items(&item.children)).sum()
 }
 
+pub(crate) fn count_bookmarks(doc: &Document) -> usize {
+    let root_ref = match doc.trailer.get(b"Root").ok().and_then(|o| o.as_reference().ok()) {
+        Some(id) => id,
+        None => return 0,
+    };
+    let catalog = match doc.get_object(root_ref) {
+        Ok(Object::Dictionary(d)) => d,
+        _ => return 0,
+    };
+    let first_id = catalog.get(b"Outlines").ok()
+        .and_then(|v| v.as_reference().ok())
+        .and_then(|id| doc.get_object(id).ok())
+        .and_then(|obj| if let Object::Dictionary(d) = obj { Some(d) } else { None })
+        .and_then(|d| d.get(b"First").ok())
+        .and_then(|v| v.as_reference().ok());
+    match first_id {
+        Some(id) => count_outline_items(&collect_outline_items(doc, id)),
+        None => 0,
+    }
+}
+
 pub(crate) fn print_bookmarks(writer: &mut impl Write, doc: &Document) {
     let root_ref = match doc.trailer.get(b"Root").ok().and_then(|o| o.as_reference().ok()) {
         Some(id) => id,

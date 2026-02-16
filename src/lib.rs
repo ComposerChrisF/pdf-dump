@@ -19,11 +19,11 @@ pub(crate) mod annotations;
 pub(crate) mod security;
 pub(crate) mod embedded;
 pub(crate) mod page_labels;
-pub(crate) mod links;
 pub(crate) mod tree;
 pub(crate) mod layers;
 pub(crate) mod structure;
 pub(crate) mod info;
+pub(crate) mod page_info;
 
 use clap::Parser;
 use lopdf::{Document, Object};
@@ -36,14 +36,13 @@ pub fn run() {
     let args = Args::parse();
 
     // Mutual exclusivity check
-    // --summary alone is a mode; with --search it becomes a modifier
+    // --list alone is a mode; with --search it becomes a modifier
     // --page alone is a mode; with --text it becomes a filter
     let mode_count = [
         args.extract_stream.is_some(),
         args.object.is_some(),
-        args.summary && args.search.is_none(),
-        args.metadata,
-        args.page.is_some() && !args.text && !args.annotations && !args.operators && !args.resources && !args.links,
+        args.list && args.search.is_none(),
+        args.page.is_some() && !args.text && !args.annotations && !args.operators && !args.resources,
         args.search.is_some(),
         args.text,
         args.operators,
@@ -60,9 +59,8 @@ pub fn run() {
         args.security,
         args.embedded_files,
         args.page_labels,
-        args.links && args.page.is_none(),
         args.layers,
-        args.structure,
+        args.tags,
         args.info.is_some(),
         args.dump,
     ].iter().filter(|&&b| b).count();
@@ -86,8 +84,7 @@ pub fn run() {
     // --diff validation: only works with default mode, --page, and --json
     if args.diff.is_some() {
         let incompatible = args.object.is_some()
-            || (args.summary && args.search.is_none())
-            || args.metadata
+            || (args.list && args.search.is_none())
             || args.extract_stream.is_some()
             || args.search.is_some()
             || args.text
@@ -105,9 +102,8 @@ pub fn run() {
             || args.security
             || args.embedded_files
             || args.page_labels
-            || args.links
             || args.layers
-            || args.structure
+            || args.tags
             || args.info.is_some()
             || args.dump;
         if incompatible {
@@ -205,7 +201,7 @@ pub fn run() {
         if config.json {
             search::search_objects_json(&mut out, &doc, search_expr, &conditions, &config);
         } else {
-            search::search_objects(&mut out, &doc, &conditions, &config, args.summary);
+            search::search_objects(&mut out, &doc, &conditions, &config, args.list);
         }
     } else if args.text {
         let mut out = io::stdout().lock();
@@ -312,13 +308,6 @@ pub fn run() {
         } else {
             page_labels::print_page_labels(&mut out, &doc);
         }
-    } else if args.links {
-        let mut out = io::stdout().lock();
-        if config.json {
-            links::print_links_json(&mut out, &doc, page_spec.as_ref());
-        } else {
-            links::print_links(&mut out, &doc, page_spec.as_ref());
-        }
     } else if args.layers {
         let mut out = io::stdout().lock();
         if config.json {
@@ -326,7 +315,7 @@ pub fn run() {
         } else {
             layers::print_layers(&mut out, &doc);
         }
-    } else if args.structure {
+    } else if args.tags {
         let mut out = io::stdout().lock();
         if config.json {
             structure::print_structure_json(&mut out, &doc, &config);
@@ -349,7 +338,7 @@ pub fn run() {
         } else {
             object::print_objects(&mut out, &doc, nums, &config);
         }
-    } else if args.summary {
+    } else if args.list {
         let mut out = io::stdout().lock();
         if config.json {
             summary::print_summary_json(&mut out, &doc);
@@ -359,16 +348,9 @@ pub fn run() {
     } else if let Some(ref spec) = page_spec {
         let mut out = io::stdout().lock();
         if config.json {
-            object::dump_page_json(&mut out, &doc, spec, &config);
+            page_info::print_page_info_json(&mut out, &doc, spec);
         } else {
-            object::dump_page(&mut out, &doc, spec, &config);
-        }
-    } else if args.metadata {
-        let mut out = io::stdout().lock();
-        if config.json {
-            summary::print_metadata_json(&mut out, &doc);
-        } else {
-            summary::print_metadata(&mut out, &doc);
+            page_info::print_page_info(&mut out, &doc, spec);
         }
     } else if args.dump {
         let mut out = io::stdout().lock();

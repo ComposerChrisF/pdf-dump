@@ -275,6 +275,7 @@ pub(crate) fn print_objects_json(writer: &mut impl Write, doc: &Document, nums: 
     }
 }
 
+#[allow(dead_code)]
 pub(crate) fn dump_page(writer: &mut impl Write, doc: &Document, spec: &PageSpec, config: &DumpConfig) {
     let pages = doc.get_pages();
     let total = pages.len();
@@ -447,6 +448,7 @@ pub(crate) fn print_single_object_json(writer: &mut impl Write, doc: &Document, 
     }
 }
 
+#[allow(dead_code)]
 pub(crate) fn dump_page_json(writer: &mut impl Write, doc: &Document, spec: &PageSpec, config: &DumpConfig) {
     let pages = doc.get_pages();
     let total = pages.len();

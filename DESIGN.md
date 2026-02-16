@@ -1,5 +1,7 @@
 # DESIGN.md — pdf-dump Feature Design
 
+> **Note:** This is the original design document. All P0 and P1 features have been implemented, along with most P2 features. Some flag names have since changed: `--summary` is now `--list`, `--metadata` has been removed (its content is part of the default overview), `--links` has been merged into `--annotations`, and `--structure` is now `--tags`. See CLAUDE.md for the current CLI reference.
+
 ## Motivation
 
 When debugging, inspecting, or comparing PDF files, Claude Code currently falls back to writing throwaway Python scripts (PyPDF2, pdfplumber, etc.). `pdf-dump` should replace that workflow entirely — providing targeted queries, structured output, and comparison capabilities that make it the fastest path to understanding a PDF's internals.
@@ -527,10 +529,12 @@ For making pdf-dump a complete Claude Code PDF debugging tool, implement in this
 
 ## Files to Modify
 
-- **`src/main.rs`** — All feature implementations (single-file architecture)
-- **`Cargo.toml`** — Add `serde_json` dependency (for `--json`), possibly `weezl` (for LZW)
-- **`tests/integration.rs`** — Integration tests for new modes
-- **`CLAUDE.md`** — Update with new flags and modes
+> **Note:** The codebase has since been split into ~29 source files in `src/`. See CLAUDE.md for the current module layout.
+
+- **`src/`** — Feature implementations split across modules
+- **`Cargo.toml`** — Dependencies: `serde_json`, `weezl` (LZW), `flate2` (zlib), etc.
+- **`tests/integration.rs`** — Integration tests for all modes
+- **`CLAUDE.md`** — CLI reference
 
 ---
 

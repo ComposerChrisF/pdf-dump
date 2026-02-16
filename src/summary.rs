@@ -4,6 +4,12 @@ use std::io::Write;
 
 use crate::helpers::object_type_label;
 use crate::validate::validate_pdf;
+use crate::bookmarks::count_bookmarks;
+use crate::forms::collect_form_fields;
+use crate::layers::collect_layers;
+use crate::embedded::collect_embedded_files;
+use crate::page_labels::collect_page_labels;
+use crate::structure::collect_structure_tree;
 
 pub(crate) fn print_summary(writer: &mut impl Write, doc: &Document) {
     writeln!(writer, "PDF {}  |  {} objects\n", doc.version, doc.objects.len()).unwrap();
@@ -122,49 +128,34 @@ pub(crate) fn metadata_info(doc: &Document) -> (serde_json::Map<String, Value>, 
     (info, catalog)
 }
 
-pub(crate) fn print_metadata_json(writer: &mut impl Write, doc: &Document) {
-    let (info, catalog) = metadata_info(doc);
-    let output = json!({
-        "version": doc.version,
-        "object_count": doc.objects.len(),
-        "page_count": doc.get_pages().len(),
-        "info": info,
-        "catalog": catalog,
-    });
-    writeln!(writer, "{}", serde_json::to_string_pretty(&output).unwrap()).unwrap();
-}
+// ── Overview (default mode) ──────────────────────────────────────────
 
-pub(crate) fn print_metadata(writer: &mut impl Write, doc: &Document) {
+pub(crate) fn print_overview(writer: &mut impl Write, doc: &Document) {
+    // Basic counts
     writeln!(writer, "PDF Version: {}", doc.version).unwrap();
     writeln!(writer, "Objects:     {}", doc.objects.len()).unwrap();
     writeln!(writer, "Pages:       {}", doc.get_pages().len()).unwrap();
 
-    // Extract /Info from trailer
+    // Encryption status
+    let encrypted = doc.trailer.get(b"Encrypt").is_ok();
+    writeln!(writer, "Encrypted:   {}", if encrypted { "yes" } else { "no" }).unwrap();
+
+    // /Info fields
     if let Ok(info_ref) = doc.trailer.get(b"Info")
         && let Ok((_, Object::Dictionary(info))) = doc.dereference(info_ref)
     {
         let fields = [
-            b"Title".as_slice(),
-            b"Author",
-            b"Subject",
-            b"Keywords",
-            b"Creator",
-            b"Producer",
-            b"CreationDate",
-            b"ModDate",
+            b"Producer".as_slice(), b"Creator", b"Title", b"Author",
+            b"Subject", b"Keywords", b"CreationDate", b"ModDate",
         ];
         for key in fields {
-            if let Ok(val) = info.get(key) {
-                let text = match val {
-                    Object::String(bytes, _) => String::from_utf8_lossy(bytes).into_owned(),
-                    _ => continue,
-                };
-                writeln!(writer, "{}: {}", String::from_utf8_lossy(key), text).unwrap();
+            if let Ok(Object::String(bytes, _)) = info.get(key) {
+                writeln!(writer, "{:<13}{}", format!("{}:", String::from_utf8_lossy(key)), String::from_utf8_lossy(bytes)).unwrap();
             }
         }
     }
 
-    // Check catalog for additional fields
+    // Catalog properties
     if let Some(root_ref) = doc.trailer.get(b"Root").ok().and_then(|o| o.as_reference().ok())
         && let Ok(Object::Dictionary(catalog)) = doc.get_object(root_ref)
     {
@@ -175,31 +166,7 @@ pub(crate) fn print_metadata(writer: &mut impl Write, doc: &Document) {
                     Object::String(bytes, _) => String::from_utf8_lossy(bytes).into_owned(),
                     _ => continue,
                 };
-                writeln!(writer, "{}: {}", String::from_utf8_lossy(key), text).unwrap();
-            }
-        }
-    }
-}
-
-// ── Overview (default mode) ──────────────────────────────────────────
-
-pub(crate) fn print_overview(writer: &mut impl Write, doc: &Document) {
-    // Metadata
-    writeln!(writer, "PDF Version: {}", doc.version).unwrap();
-    writeln!(writer, "Objects:     {}", doc.objects.len()).unwrap();
-    writeln!(writer, "Pages:       {}", doc.get_pages().len()).unwrap();
-
-    // Encryption status
-    let encrypted = doc.trailer.get(b"Encrypt").is_ok();
-    writeln!(writer, "Encrypted:   {}", if encrypted { "yes" } else { "no" }).unwrap();
-
-    // Producer / Creator from /Info
-    if let Ok(info_ref) = doc.trailer.get(b"Info")
-        && let Ok((_, Object::Dictionary(info))) = doc.dereference(info_ref)
-    {
-        for key in [b"Producer".as_slice(), b"Creator"] {
-            if let Ok(Object::String(bytes, _)) = info.get(key) {
-                writeln!(writer, "{:<13}{}", format!("{}:", String::from_utf8_lossy(key)), String::from_utf8_lossy(bytes)).unwrap();
+                writeln!(writer, "{:<13}{}", format!("{}:", String::from_utf8_lossy(key)), text).unwrap();
             }
         }
     }
@@ -233,6 +200,35 @@ pub(crate) fn print_overview(writer: &mut impl Write, doc: &Document) {
     }
     writeln!(writer).unwrap();
     writeln!(writer, "Streams:     {} ({} bytes)", stream_count, total_stream_bytes).unwrap();
+
+    // Feature indicators
+    let mut features = Vec::new();
+    let bookmark_count = count_bookmarks(doc);
+    if bookmark_count > 0 {
+        features.push(format!("bookmarks ({})", bookmark_count));
+    }
+    let (_, _, form_fields) = collect_form_fields(doc);
+    if !form_fields.is_empty() {
+        features.push(format!("forms ({} fields)", form_fields.len()));
+    }
+    let layer_count = collect_layers(doc).len();
+    if layer_count > 0 {
+        features.push(format!("layers ({})", layer_count));
+    }
+    let embedded_count = collect_embedded_files(doc).len();
+    if embedded_count > 0 {
+        features.push(format!("embedded files ({})", embedded_count));
+    }
+    if !collect_page_labels(doc).is_empty() {
+        features.push("page labels".to_string());
+    }
+    let (has_tags, _) = collect_structure_tree(doc);
+    if has_tags {
+        features.push("tagged structure".to_string());
+    }
+    if !features.is_empty() {
+        writeln!(writer, "Features:    {}", features.join(", ")).unwrap();
+    }
 }
 
 pub(crate) fn print_overview_json(writer: &mut impl Write, doc: &Document) {
@@ -261,6 +257,13 @@ pub(crate) fn print_overview_json(writer: &mut impl Write, doc: &Document) {
 
     let encrypted = doc.trailer.get(b"Encrypt").is_ok();
 
+    let bookmark_count = count_bookmarks(doc);
+    let (_, _, form_fields) = collect_form_fields(doc);
+    let layer_count = collect_layers(doc).len();
+    let embedded_count = collect_embedded_files(doc).len();
+    let has_page_labels = !collect_page_labels(doc).is_empty();
+    let (has_tags, _) = collect_structure_tree(doc);
+
     let output = json!({
         "version": doc.version,
         "object_count": doc.objects.len(),
@@ -277,6 +280,14 @@ pub(crate) fn print_overview_json(writer: &mut impl Write, doc: &Document) {
         "streams": {
             "count": stream_count,
             "total_bytes": total_stream_bytes,
+        },
+        "features": {
+            "bookmark_count": bookmark_count,
+            "form_field_count": form_fields.len(),
+            "layer_count": layer_count,
+            "embedded_file_count": embedded_count,
+            "page_labels": has_page_labels,
+            "tagged_structure": has_tags,
         },
     });
     writeln!(writer, "{}", serde_json::to_string_pretty(&output).unwrap()).unwrap();
@@ -350,67 +361,6 @@ mod tests {
     }
 
     #[test]
-    fn print_metadata_basic_fields() {
-        let doc = Document::new();
-        let out = output_of(|w| {
-            print_metadata(w, &doc);
-        });
-        assert!(out.contains("PDF Version: 1.4"));
-        assert!(out.contains("Objects:"));
-        assert!(out.contains("Pages:"));
-    }
-
-    #[test]
-    fn print_metadata_with_info_dict() {
-        let mut doc = Document::new();
-        let mut info = Dictionary::new();
-        info.set("Title", Object::String(b"Test Title".to_vec(), StringFormat::Literal));
-        info.set("Author", Object::String(b"Test Author".to_vec(), StringFormat::Literal));
-        info.set("Producer", Object::String(b"Test Producer".to_vec(), StringFormat::Literal));
-        let info_id = doc.add_object(Object::Dictionary(info));
-        doc.trailer.set("Info", Object::Reference(info_id));
-
-        let out = output_of(|w| {
-            print_metadata(w, &doc);
-        });
-        assert!(out.contains("Title: Test Title"));
-        assert!(out.contains("Author: Test Author"));
-        assert!(out.contains("Producer: Test Producer"));
-    }
-
-    #[test]
-    fn print_metadata_empty_info_dict() {
-        let mut doc = Document::new();
-        let info = Dictionary::new();
-        let info_id = doc.add_object(Object::Dictionary(info));
-        doc.trailer.set("Info", Object::Reference(info_id));
-
-        let out = output_of(|w| {
-            print_metadata(w, &doc);
-        });
-        // Should still show basic fields, just no Info entries
-        assert!(out.contains("PDF Version:"));
-        assert!(!out.contains("Title:"));
-    }
-
-    #[test]
-    fn print_metadata_catalog_fields() {
-        let mut doc = Document::new();
-        let mut catalog = Dictionary::new();
-        catalog.set("Type", Object::Name(b"Catalog".to_vec()));
-        catalog.set("PageLayout", Object::Name(b"SinglePage".to_vec()));
-        catalog.set("Lang", Object::String(b"en-US".to_vec(), StringFormat::Literal));
-        let catalog_id = doc.add_object(Object::Dictionary(catalog));
-        doc.trailer.set("Root", Object::Reference(catalog_id));
-
-        let out = output_of(|w| {
-            print_metadata(w, &doc);
-        });
-        assert!(out.contains("PageLayout: /SinglePage"));
-        assert!(out.contains("Lang: en-US"));
-    }
-
-    #[test]
     fn print_summary_json_produces_valid_json() {
         let mut doc = Document::new();
         doc.objects.insert((1, 0), Object::Integer(42));
@@ -418,15 +368,6 @@ mod tests {
         let parsed: Value = serde_json::from_str(&out).expect("Should be valid JSON");
         assert_eq!(parsed["object_count"], 1);
         assert!(parsed["objects"].is_array());
-    }
-
-    #[test]
-    fn print_metadata_json_produces_valid_json() {
-        let doc = Document::new();
-        let out = output_of(|w| print_metadata_json(w, &doc));
-        let parsed: Value = serde_json::from_str(&out).expect("Should be valid JSON");
-        assert!(parsed.get("version").is_some());
-        assert!(parsed.get("page_count").is_some());
     }
 
     #[test]
@@ -572,19 +513,6 @@ mod tests {
 
         let (_, catalog_map) = metadata_info(&doc);
         assert_eq!(catalog_map["PageLayout"], "/TwoColumnLeft");
-    }
-
-    #[test]
-    fn print_metadata_json_with_info() {
-        let mut doc = Document::new();
-        let mut info = Dictionary::new();
-        info.set("Title", Object::String(b"Test Title".to_vec(), StringFormat::Literal));
-        let info_id = doc.add_object(Object::Dictionary(info));
-        doc.trailer.set("Info", Object::Reference(info_id));
-
-        let out = output_of(|w| print_metadata_json(w, &doc));
-        let parsed: Value = serde_json::from_str(&out).expect("Should be valid JSON");
-        assert_eq!(parsed["info"]["Title"], "Test Title");
     }
 
     #[test]
