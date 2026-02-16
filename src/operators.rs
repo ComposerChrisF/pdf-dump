@@ -11,11 +11,6 @@ pub(crate) struct OpsResult {
     pub warnings: Vec<String>,
 }
 
-#[cfg(test)]
-fn get_page_operations(doc: &Document, page_id: ObjectId) -> Vec<lopdf::content::Operation> {
-    get_page_operations_with_warnings(doc, page_id).operations
-}
-
 pub(crate) fn get_page_operations_with_warnings(doc: &Document, page_id: ObjectId) -> OpsResult {
     let dict = match doc.get_object(page_id) {
         Ok(Object::Dictionary(d)) => d,
