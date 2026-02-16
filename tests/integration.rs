@@ -123,6 +123,7 @@ fn dump_minimal_pdf_prints_trailer_and_objects() {
     let pdf = create_minimal_pdf();
     let output = Command::new(binary_path())
         .arg(pdf.path())
+        .arg("--dump")
         .output()
         .expect("failed to execute binary");
 
@@ -140,6 +141,7 @@ fn dump_with_decode_streams_shows_content() {
     let pdf = create_minimal_pdf();
     let output = Command::new(binary_path())
         .arg(pdf.path())
+        .arg("--dump")
         .arg("--decode-streams")
         .output()
         .expect("failed to execute binary");
@@ -161,7 +163,7 @@ fn extract_stream_object_writes_file() {
 
     let output = Command::new(binary_path())
         .arg(pdf.path())
-        .arg("--extract-object")
+        .arg("--extract-stream")
         .arg(stream_obj_num.to_string())
         .arg("--output")
         .arg(&output_path)
@@ -192,7 +194,7 @@ fn extract_non_stream_object_fails() {
     let output_file = tempfile::NamedTempFile::new().unwrap();
     let output = Command::new(binary_path())
         .arg(tmp.path())
-        .arg("--extract-object")
+        .arg("--extract-stream")
         .arg(int_id.0.to_string())
         .arg("--output")
         .arg(output_file.path())
@@ -211,7 +213,7 @@ fn extract_nonexistent_object_fails() {
 
     let output = Command::new(binary_path())
         .arg(pdf.path())
-        .arg("--extract-object")
+        .arg("--extract-stream")
         .arg("9999")
         .arg("--output")
         .arg(output_file.path())
@@ -255,7 +257,7 @@ fn no_arguments_shows_error() {
 
 #[test]
 fn output_without_extract_object_fails() {
-    // --output requires --extract-object (clap `requires` constraint)
+    // --output requires --extract-stream (clap `requires` constraint)
     let pdf = create_minimal_pdf();
     let output = Command::new(binary_path())
         .arg(pdf.path())
@@ -268,7 +270,7 @@ fn output_without_extract_object_fails() {
     let stderr = String::from_utf8_lossy(&output.stderr);
     assert!(
         stderr.contains("extract") || stderr.contains("required"),
-        "Should indicate --output requires --extract-object: {}",
+        "Should indicate --output requires --extract-stream: {}",
         stderr
     );
 }
@@ -287,7 +289,7 @@ fn help_flag_prints_usage() {
         stdout
     );
     assert!(stdout.contains("--decode-streams"), "Should list --decode-streams flag");
-    assert!(stdout.contains("--extract-object"), "Should list --extract-object flag");
+    assert!(stdout.contains("--extract-stream"), "Should list --extract-stream flag");
 }
 
 #[test]
@@ -333,6 +335,7 @@ fn dump_shows_separator_between_objects() {
     let pdf = create_minimal_pdf();
     let output = Command::new(binary_path())
         .arg(pdf.path())
+        .arg("--dump")
         .output()
         .expect("failed to execute binary");
 
@@ -354,6 +357,7 @@ fn dump_with_decode_streams_shows_parsed_content_stream() {
     let pdf = create_minimal_pdf();
     let output = Command::new(binary_path())
         .arg(pdf.path())
+        .arg("--dump")
         .arg("--decode-streams")
         .output()
         .expect("failed to execute binary");
@@ -393,6 +397,7 @@ fn dump_binary_stream_truncation_visible() {
 
     let output = Command::new(binary_path())
         .arg(tmp.path())
+        .arg("--dump")
         .arg("--decode-streams")
         .arg("--truncate")
         .arg("100")
@@ -432,7 +437,7 @@ fn extract_uncompressed_stream() {
 
     let output = Command::new(binary_path())
         .arg(tmp.path())
-        .arg("--extract-object")
+        .arg("--extract-stream")
         .arg(stream_id.0.to_string())
         .arg("--output")
         .arg(&output_path)
@@ -451,7 +456,7 @@ fn extract_object_prints_success_message() {
 
     let output = Command::new(binary_path())
         .arg(pdf.path())
-        .arg("--extract-object")
+        .arg("--extract-stream")
         .arg(stream_obj_num.to_string())
         .arg("--output")
         .arg(output_file.path())
@@ -666,6 +671,7 @@ fn dump_traverses_all_page_tree_objects() {
     let pdf = create_minimal_pdf();
     let output = Command::new(binary_path())
         .arg(pdf.path())
+        .arg("--dump")
         .output()
         .expect("failed to execute binary");
 
@@ -684,6 +690,7 @@ fn json_default_dump_is_valid_json() {
     let pdf = create_minimal_pdf();
     let output = Command::new(binary_path())
         .arg(pdf.path())
+        .arg("--dump")
         .arg("--json")
         .output()
         .expect("failed to execute binary");
@@ -1425,7 +1432,7 @@ fn diff_incompatible_with_extract() {
     let output = Command::new(binary_path())
         .arg(pdf.path())
         .arg("--diff").arg(pdf.path())
-        .arg("--extract-object").arg("1")
+        .arg("--extract-stream").arg("1")
         .arg("--output").arg(output_file.path())
         .output()
         .expect("failed to execute binary");
@@ -1833,6 +1840,7 @@ fn truncate_flag_with_custom_value() {
 
     let output = Command::new(binary_path())
         .arg(tmp.path())
+        .arg("--dump")
         .arg("--decode-streams")
         .arg("--truncate")
         .arg("50")
@@ -1870,6 +1878,7 @@ fn run_length_decode_stream_decodes() {
 
     let output = Command::new(binary_path())
         .arg(tmp.path())
+        .arg("--dump")
         .arg("--decode-streams")
         .output()
         .expect("failed to execute binary");
@@ -1902,6 +1911,7 @@ fn corrupt_stream_shows_warning() {
 
     let output = Command::new(binary_path())
         .arg(tmp.path())
+        .arg("--dump")
         .arg("--decode-streams")
         .output()
         .expect("failed to execute binary");
@@ -1919,6 +1929,7 @@ fn depth_zero_limits_output() {
     let tmp = create_minimal_pdf();
     let output = Command::new(binary_path())
         .arg(tmp.path())
+        .arg("--dump")
         .arg("--depth")
         .arg("0")
         .output()
@@ -1933,6 +1944,7 @@ fn depth_large_value_shows_all() {
     let tmp = create_minimal_pdf();
     let output = Command::new(binary_path())
         .arg(tmp.path())
+        .arg("--dump")
         .arg("--depth")
         .arg("100")
         .output()
@@ -1947,6 +1959,7 @@ fn depth_with_json() {
     let tmp = create_minimal_pdf();
     let output = Command::new(binary_path())
         .arg(tmp.path())
+        .arg("--dump")
         .arg("--depth")
         .arg("0")
         .arg("--json")
@@ -1962,6 +1975,7 @@ fn depth_with_json() {
     // Without depth, a minimal PDF has more objects
     let output_no_depth = Command::new(binary_path())
         .arg(tmp.path())
+        .arg("--dump")
         .arg("--json")
         .output()
         .expect("failed to execute binary");
@@ -2129,6 +2143,7 @@ fn pipeline_unsupported_filter_shows_warning() {
 
     let output = Command::new(binary_path())
         .arg(tmp.path())
+        .arg("--dump")
         .arg("--decode-streams")
         .output()
         .expect("failed to execute binary");
@@ -2162,6 +2177,7 @@ fn corrupt_stream_warning_with_hex_flag() {
 
     let output = Command::new(binary_path())
         .arg(tmp.path())
+        .arg("--dump")
         .arg("--decode-streams")
         .arg("--hex")
         .output()
@@ -2303,6 +2319,7 @@ fn truncate_zero_cli() {
 
     let output = Command::new(binary_path())
         .arg(tmp.path())
+        .arg("--dump")
         .arg("--decode-streams")
         .arg("--truncate").arg("0")
         .output()
@@ -2374,7 +2391,7 @@ fn extract_corrupt_stream_shows_warning_on_stderr() {
     let output_file = tempfile::NamedTempFile::new().unwrap();
     let output = Command::new(binary_path())
         .arg(tmp.path())
-        .arg("--extract-object").arg(stream_id.0.to_string())
+        .arg("--extract-stream").arg(stream_id.0.to_string())
         .arg("--output").arg(output_file.path())
         .output()
         .expect("failed to execute binary");
@@ -2463,23 +2480,6 @@ fn stats_json_output() {
     let val: serde_json::Value = serde_json::from_str(&stdout).expect("Should be valid JSON");
     assert!(val["object_count"].as_u64().unwrap() > 0);
     assert!(val["page_count"].as_u64().unwrap() > 0);
-}
-
-// ── --xref integration tests ────────────────────────────────────────
-
-#[test]
-fn xref_on_minimal_pdf() {
-    let pdf = create_minimal_pdf();
-    let output = Command::new(binary_path())
-        .arg(pdf.path())
-        .arg("--xref")
-        .output()
-        .expect("failed to execute binary");
-
-    let stdout = String::from_utf8_lossy(&output.stdout);
-    assert!(output.status.success());
-    assert!(stdout.contains("objects"), "Should show object count: {}", stdout);
-    assert!(stdout.contains("Obj#"), "Should show table header: {}", stdout);
 }
 
 // ── --bookmarks integration tests ───────────────────────────────────
@@ -2723,18 +2723,6 @@ fn diff_incompatible_with_stats() {
 }
 
 #[test]
-fn diff_incompatible_with_xref() {
-    let pdf = create_minimal_pdf();
-    let output = Command::new(binary_path())
-        .arg(pdf.path())
-        .arg("--diff").arg(pdf.path())
-        .arg("--xref")
-        .output()
-        .expect("failed to execute binary");
-    assert!(!output.status.success(), "diff + xref should fail");
-}
-
-#[test]
 fn diff_incompatible_with_bookmarks() {
     let pdf = create_minimal_pdf();
     let output = Command::new(binary_path())
@@ -2759,18 +2747,6 @@ fn diff_incompatible_with_annotations() {
 }
 
 // ── Mode mutual exclusivity for new modes ───────────────────────────
-
-#[test]
-fn stats_and_xref_mutual_exclusion() {
-    let pdf = create_minimal_pdf();
-    let output = Command::new(binary_path())
-        .arg(pdf.path())
-        .arg("--stats")
-        .arg("--xref")
-        .output()
-        .expect("failed to execute binary");
-    assert!(!output.status.success(), "stats + xref should fail");
-}
 
 #[test]
 fn bookmarks_and_fonts_mutual_exclusion() {

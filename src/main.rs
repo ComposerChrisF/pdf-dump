@@ -17,153 +17,167 @@ struct Args {
     #[arg(required = true)]
     file: PathBuf,
 
-    /// Decode and print the content of streams
-    #[arg(long)]
-    decode_streams: bool,
+    // ── Overview ──────────────────────────────────────────────────────
 
-    /// Truncate binary streams to the first N bytes
-    #[arg(long)]
-    truncate: Option<usize>,
-
-    /// Object number to extract
-    #[arg(long, requires = "output")]
-    extract_object: Option<u32>,
-
-    /// Output file for extracted object
-    #[arg(long, requires = "extract_object")]
-    output: Option<PathBuf>,
-
-    /// Print one or more objects by number (e.g. 5, 1,5,12, 3-7, 1,5,10-15)
-    #[arg(short = 'o', long)]
-    object: Option<String>,
-
-    /// Print a one-line summary of every object
-    #[arg(short = 's', long)]
-    summary: bool,
-
-    /// Dump the object tree for a specific page or range (e.g. 1, 1-3)
-    #[arg(long)]
-    page: Option<String>,
-
-    /// Print document metadata
-    #[arg(short = 'm', long)]
+    /// Print document metadata (version, pages, /Info fields)
+    #[arg(short = 'm', long, help_heading = "Overview")]
     metadata: bool,
 
-    /// Output as structured JSON
-    #[arg(long)]
-    json: bool,
-
-    /// Search for objects matching an expression (e.g. Type=Font, key=MediaBox, value=Hello)
-    #[arg(long)]
-    search: Option<String>,
-
-    /// Extract readable text from page content streams
-    #[arg(long)]
-    text: bool,
-
-    /// Compare structurally with a second PDF file
-    #[arg(long)]
-    diff: Option<PathBuf>,
-
-    /// Display binary stream content as hex dump (use with --decode-streams)
-    #[arg(long)]
-    hex: bool,
-
-    /// Find all objects that reference a given object number
-    #[arg(long)]
-    refs_to: Option<u32>,
-
-    /// List all fonts in the document
-    #[arg(long)]
-    fonts: bool,
-
-    /// List all images in the document
-    #[arg(long)]
-    images: bool,
-
-    /// Run structural validation checks on the PDF
-    #[arg(long)]
-    validate: bool,
-
-    /// Limit traversal depth (0 = root only, 1 = root + immediate refs, etc.)
-    #[arg(long)]
-    depth: Option<usize>,
-
-    /// Show the object graph as an indented reference tree
-    #[arg(long)]
-    tree: bool,
+    /// Print a one-line summary of every object
+    #[arg(short = 's', long, help_heading = "Overview")]
+    summary: bool,
 
     /// Show document statistics (object types, stream sizes, filter usage)
-    #[arg(long)]
+    #[arg(long, help_heading = "Overview")]
     stats: bool,
 
-    /// Show cross-reference table listing all objects
-    #[arg(long)]
-    xref: bool,
+    /// Run structural validation checks on the PDF
+    #[arg(long, help_heading = "Overview")]
+    validate: bool,
 
-    /// Show document bookmarks (outline tree)
-    #[arg(long)]
-    bookmarks: bool,
+    // ── Content ──────────────────────────────────────────────────────
 
-    /// Show annotations (all pages, or filtered with --page)
-    #[arg(long)]
-    annotations: bool,
+    /// Extract readable text from page content streams
+    #[arg(long, help_heading = "Content")]
+    text: bool,
 
     /// Show content stream operators (all pages, or filtered with --page)
-    #[arg(long)]
+    #[arg(long, help_heading = "Content")]
     operators: bool,
 
     /// Show page resource map (fonts, images, graphics states, color spaces)
-    #[arg(long)]
+    #[arg(long, help_heading = "Content")]
     resources: bool,
 
+    /// List all fonts in the document
+    #[arg(long, help_heading = "Content")]
+    fonts: bool,
+
+    /// List all images in the document
+    #[arg(long, help_heading = "Content")]
+    images: bool,
+
+    // ── Structure ────────────────────────────────────────────────────
+
+    /// Show the object graph as an indented reference tree
+    #[arg(long, help_heading = "Structure")]
+    tree: bool,
+
+    /// Show document bookmarks (outline tree)
+    #[arg(long, help_heading = "Structure")]
+    bookmarks: bool,
+
+    /// Show tagged PDF logical structure tree
+    #[arg(long, help_heading = "Structure")]
+    structure: bool,
+
+    /// Show optional content groups (layers)
+    #[arg(long, alias = "ocg", help_heading = "Structure")]
+    layers: bool,
+
+    /// Show page labels (logical page numbering)
+    #[arg(long, help_heading = "Structure")]
+    page_labels: bool,
+
+    // ── Annotations & Links ──────────────────────────────────────────
+
+    /// Show annotations (all pages, or filtered with --page)
+    #[arg(long, help_heading = "Annotations & Links")]
+    annotations: bool,
+
+    /// List link annotations with targets (all pages, or filtered with --page)
+    #[arg(long, help_heading = "Annotations & Links")]
+    links: bool,
+
     /// List form fields (AcroForm)
-    #[arg(long)]
+    #[arg(long, help_heading = "Annotations & Links")]
     forms: bool,
 
-    /// Output tree as GraphViz DOT format (use with --tree)
-    #[arg(long, requires = "tree")]
-    dot: bool,
+    // ── Objects ──────────────────────────────────────────────────────
 
-    /// Inline-expand references to show target summaries (use with --object or --page)
-    #[arg(long)]
-    deref: bool,
+    /// Print one or more objects by number (e.g. 5, 1,5,12, 3-7, 1,5,10-15)
+    #[arg(short = 'o', long, help_heading = "Objects")]
+    object: Option<String>,
 
-    /// Show raw undecoded stream bytes (use with --object)
-    #[arg(long)]
-    raw: bool,
+    /// Show a human-readable explanation of an object's role, with full content
+    #[arg(long, help_heading = "Objects")]
+    info: Option<u32>,
 
-    /// Show bidirectional reference context (use with --object)
-    #[arg(long)]
-    context: bool,
+    /// Find all objects that reference a given object number
+    #[arg(long, help_heading = "Objects")]
+    refs_to: Option<u32>,
+
+    /// Search for objects matching an expression (e.g. Type=Font, key=MediaBox, value=Hello)
+    #[arg(long, help_heading = "Objects")]
+    search: Option<String>,
+
+    // ── Security & Files ─────────────────────────────────────────────
 
     /// Show encryption and permission details
-    #[arg(long)]
+    #[arg(long, help_heading = "Security & Files")]
     security: bool,
 
     /// List embedded files (file attachments)
-    #[arg(long)]
+    #[arg(long, help_heading = "Security & Files")]
     embedded_files: bool,
 
-    /// Show page labels (logical page numbering)
-    #[arg(long)]
-    page_labels: bool,
+    // ── Comparison ───────────────────────────────────────────────────
 
-    /// List link annotations with targets (all pages, or filtered with --page)
-    #[arg(long)]
-    links: bool,
+    /// Compare structurally with a second PDF file
+    #[arg(long, help_heading = "Comparison")]
+    diff: Option<PathBuf>,
 
-    /// Show optional content groups (layers)
-    #[arg(long, alias = "ocg")]
-    layers: bool,
+    // ── Export ────────────────────────────────────────────────────────
 
-    /// Show tagged PDF logical structure tree
-    #[arg(long)]
-    structure: bool,
+    /// Extract a stream object to a file
+    #[arg(long, requires = "output", help_heading = "Export")]
+    extract_stream: Option<u32>,
 
-    /// Show a human-readable explanation of an object's role
-    #[arg(long)]
-    info: Option<u32>,
+    /// Output file for extracted stream
+    #[arg(long, requires = "extract_stream", help_heading = "Export")]
+    output: Option<PathBuf>,
+
+    /// Full depth-first dump of all reachable objects from /Root
+    #[arg(long, help_heading = "Export")]
+    dump: bool,
+
+    // ── Modifiers ────────────────────────────────────────────────────
+
+    /// Dump the object tree for a specific page or range (e.g. 1, 1-3)
+    #[arg(long, help_heading = "Modifiers")]
+    page: Option<String>,
+
+    /// Output as structured JSON
+    #[arg(long, help_heading = "Modifiers")]
+    json: bool,
+
+    /// Decode and print the content of streams
+    #[arg(long, help_heading = "Modifiers")]
+    decode_streams: bool,
+
+    /// Inline-expand references to show target summaries (use with --object or --page)
+    #[arg(long, help_heading = "Modifiers")]
+    deref: bool,
+
+    /// Limit traversal depth (0 = root only, 1 = root + immediate refs, etc.)
+    #[arg(long, help_heading = "Modifiers")]
+    depth: Option<usize>,
+
+    /// Display binary stream content as hex dump (use with --decode-streams)
+    #[arg(long, help_heading = "Modifiers")]
+    hex: bool,
+
+    /// Truncate binary streams to the first N bytes
+    #[arg(long, help_heading = "Modifiers")]
+    truncate: Option<usize>,
+
+    /// Show raw undecoded stream bytes (use with --object)
+    #[arg(long, help_heading = "Modifiers")]
+    raw: bool,
+
+    /// Output tree as GraphViz DOT format (use with --tree)
+    #[arg(long, requires = "tree", help_heading = "Modifiers")]
+    dot: bool,
 }
 
 #[derive(Clone, Copy)]
@@ -255,7 +269,7 @@ fn main() {
     // --summary alone is a mode; with --search it becomes a modifier
     // --page alone is a mode; with --text it becomes a filter
     let mode_count = [
-        args.extract_object.is_some(),
+        args.extract_stream.is_some(),
         args.object.is_some(),
         args.summary && args.search.is_none(),
         args.metadata,
@@ -271,7 +285,6 @@ fn main() {
         args.validate,
         args.tree,
         args.stats,
-        args.xref,
         args.bookmarks,
         args.annotations && args.page.is_none(),
         args.security,
@@ -281,6 +294,7 @@ fn main() {
         args.layers,
         args.structure,
         args.info.is_some(),
+        args.dump,
     ].iter().filter(|&&b| b).count();
     if mode_count > 1 {
         eprintln!("Error: Only one mode flag may be used at a time.");
@@ -299,28 +313,12 @@ fn main() {
         }
     }
 
-    // --context validation: requires --object
-    if args.context
-        && args.object.is_none() {
-        eprintln!("Error: --context requires --object.");
-        std::process::exit(1);
-    }
-
-    // --info validation: incompatible modifier flags
-    if args.info.is_some()
-        && (args.decode_streams || args.deref || args.depth.is_some()
-            || args.hex || args.truncate.is_some())
-    {
-        eprintln!("Error: --info does not support --decode-streams, --deref, --depth, --hex, or --truncate.");
-        std::process::exit(1);
-    }
-
     // --diff validation: only works with default mode, --page, and --json
     if args.diff.is_some() {
         let incompatible = args.object.is_some()
             || (args.summary && args.search.is_none())
             || args.metadata
-            || args.extract_object.is_some()
+            || args.extract_stream.is_some()
             || args.search.is_some()
             || args.text
             || args.refs_to.is_some()
@@ -329,7 +327,6 @@ fn main() {
             || args.validate
             || args.tree
             || args.stats
-            || args.xref
             || args.bookmarks
             || args.annotations
             || args.operators
@@ -341,7 +338,8 @@ fn main() {
             || args.links
             || args.layers
             || args.structure
-            || args.info.is_some();
+            || args.info.is_some()
+            || args.dump;
         if incompatible {
             eprintln!("Error: --diff can only be combined with --page and --json.");
             std::process::exit(1);
@@ -402,7 +400,7 @@ fn main() {
         return;
     }
 
-    if let Some(object_id) = args.extract_object {
+    if let Some(object_id) = args.extract_stream {
         let output_path = args.output.as_ref().unwrap();
         let object_id = (object_id, 0);
         match doc.get_object(object_id) {
@@ -510,13 +508,6 @@ fn main() {
         } else {
             print_stats(&mut out, &doc);
         }
-    } else if args.xref {
-        let mut out = io::stdout().lock();
-        if config.json {
-            print_xref_json(&mut out, &doc);
-        } else {
-            print_xref(&mut out, &doc);
-        }
     } else if args.bookmarks {
         let mut out = io::stdout().lock();
         if config.json {
@@ -584,13 +575,7 @@ fn main() {
         }
     } else if let Some(ref nums) = object_nums {
         let mut out = io::stdout().lock();
-        if args.context {
-            if config.json {
-                print_object_context_json(&mut out, &doc, nums, &config);
-            } else {
-                print_object_context(&mut out, &doc, nums, &config);
-            }
-        } else if config.json {
+        if config.json {
             print_objects_json(&mut out, &doc, nums, &config);
         } else {
             print_objects(&mut out, &doc, nums, &config);
@@ -616,7 +601,7 @@ fn main() {
         } else {
             print_metadata(&mut out, &doc);
         }
-    } else {
+    } else if args.dump {
         let mut out = io::stdout().lock();
         if config.json {
             dump_json(&mut out, &doc, &config);
@@ -645,6 +630,14 @@ fn main() {
             } else {
                 eprintln!("Warning: /Root not found or not a reference in trailer.");
             }
+        }
+    } else {
+        // Default: overview mode
+        let mut out = io::stdout().lock();
+        if config.json {
+            print_overview_json(&mut out, &doc);
+        } else {
+            print_overview(&mut out, &doc);
         }
     }
 }
@@ -1139,96 +1132,6 @@ fn print_objects_json(writer: &mut impl Write, doc: &Document, nums: &[u32], con
         let output = json!({"objects": items});
         writeln!(writer, "{}", serde_json::to_string_pretty(&output).unwrap()).unwrap();
     }
-}
-
-// ── Object context (--object N --context) ────────────────────────────
-
-fn print_object_context(writer: &mut impl Write, doc: &Document, nums: &[u32], config: &DumpConfig) {
-    for (i, &obj_num) in nums.iter().enumerate() {
-        if i > 0 { writeln!(writer, "\n================================\n").unwrap(); }
-        print_single_object_context(writer, doc, obj_num, config);
-    }
-}
-
-fn print_single_object_context(writer: &mut impl Write, doc: &Document, obj_num: u32, config: &DumpConfig) {
-    let obj_id = (obj_num, 0);
-    let object = match doc.get_object(obj_id) {
-        Ok(obj) => obj,
-        Err(_) => {
-            eprintln!("Error: Object {} not found in the document.", obj_num);
-            std::process::exit(1);
-        }
-    };
-
-    // Section 1: The object itself
-    writeln!(writer, "Object {} 0:", obj_num).unwrap();
-    let visited = BTreeSet::new();
-    let mut child_refs = BTreeSet::new();
-    print_object(writer, object, doc, &visited, 1, config, false, &mut child_refs);
-    writeln!(writer).unwrap();
-
-    // Section 2: Forward references (what this object references)
-    let forward_refs = collect_refs_with_paths(object);
-    writeln!(writer, "\nReferences from this object:").unwrap();
-    if forward_refs.is_empty() {
-        writeln!(writer, "  (none)").unwrap();
-    } else {
-        for (path, ref_id) in &forward_refs {
-            let summary = if let Ok(resolved) = doc.get_object(*ref_id) {
-                deref_summary(resolved, doc)
-            } else {
-                "(not found)".to_string()
-            };
-            writeln!(writer, "  {} -> {} {} R  {}", path, ref_id.0, ref_id.1, summary).unwrap();
-        }
-    }
-
-    // Section 3: Reverse references (what references this object)
-    let rev_refs = collect_reverse_refs(doc, (obj_num, 0));
-    writeln!(writer, "\nReferenced by:").unwrap();
-    if rev_refs.is_empty() {
-        writeln!(writer, "  (none)").unwrap();
-    } else {
-        for r in &rev_refs {
-            writeln!(writer, "  {:>4}  {:>3}  {:<13} {:<14} via {}", r.obj_num, r.generation, r.kind, r.type_label, r.paths.join(", ")).unwrap();
-        }
-    }
-}
-
-fn print_object_context_json(writer: &mut impl Write, doc: &Document, nums: &[u32], config: &DumpConfig) {
-    if nums.len() == 1 {
-        let val = single_object_context_json(doc, nums[0], config);
-        writeln!(writer, "{}", serde_json::to_string_pretty(&val).unwrap()).unwrap();
-    } else {
-        let items: Vec<Value> = nums.iter().map(|&n| single_object_context_json(doc, n, config)).collect();
-        let output = json!({"objects": items});
-        writeln!(writer, "{}", serde_json::to_string_pretty(&output).unwrap()).unwrap();
-    }
-}
-
-fn single_object_context_json(doc: &Document, obj_num: u32, config: &DumpConfig) -> Value {
-    let obj_id = (obj_num, 0);
-    let object = match doc.get_object(obj_id) {
-        Ok(obj) => obj,
-        Err(_) => {
-            return json!({
-                "object_number": obj_num,
-                "generation": 0,
-                "error": "not found",
-            });
-        }
-    };
-
-    let refs_to = collect_forward_refs_json(doc, object);
-    let referenced_by = reverse_refs_to_json(&collect_reverse_refs(doc, (obj_num, 0)));
-
-    json!({
-        "object_number": obj_num,
-        "generation": 0,
-        "object": object_to_json(object, doc, config),
-        "references_to": refs_to,
-        "referenced_by": referenced_by,
-    })
 }
 
 fn print_summary(writer: &mut impl Write, doc: &Document) {
@@ -1774,32 +1677,67 @@ fn search_objects_json(writer: &mut impl Write, doc: &Document, expr: &str, cond
 
 // ── Text extraction (Phase 3) ────────────────────────────────────────
 
+struct TextResult {
+    text: String,
+    warnings: Vec<String>,
+}
+
 fn extract_text_from_page(doc: &Document, page_id: ObjectId) -> String {
+    extract_text_from_page_with_warnings(doc, page_id).text
+}
+
+fn extract_text_from_page_with_warnings(doc: &Document, page_id: ObjectId) -> TextResult {
     let mut text = String::new();
+    let mut warnings = Vec::new();
 
     // Get content stream(s) for the page
     let page_dict = match doc.get_object(page_id) {
         Ok(Object::Dictionary(d)) => d,
-        _ => return text,
+        _ => return TextResult { text, warnings },
     };
+
+    // Check font encodings for this page
+    let font_warnings = check_page_font_encodings(doc, page_dict);
+    warnings.extend(font_warnings);
 
     let content_ids: Vec<ObjectId> = match page_dict.get(b"Contents") {
         Ok(Object::Reference(id)) => vec![*id],
         Ok(Object::Array(arr)) => arr.iter().filter_map(|o| o.as_reference().ok()).collect(),
-        _ => return text,
+        _ => return TextResult { text, warnings },
     };
 
     let mut all_bytes = Vec::new();
+    let mut decode_failed = false;
     for cid in &content_ids {
-        if let Ok(Object::Stream(stream)) = doc.get_object(*cid) {
-            let (decoded, _warning) = decode_stream(stream);
-            all_bytes.extend_from_slice(&decoded);
+        match doc.get_object(*cid) {
+            Ok(Object::Stream(stream)) => {
+                let (decoded, warning) = decode_stream(stream);
+                if let Some(warn) = warning {
+                    warnings.push(format!("Content stream {} {}: {}", cid.0, cid.1, warn));
+                    decode_failed = true;
+                }
+                all_bytes.extend_from_slice(&decoded);
+            }
+            Ok(_) => {
+                warnings.push(format!("Content stream {} {} is not a stream object", cid.0, cid.1));
+            }
+            Err(_) => {
+                warnings.push(format!("Content stream {} {} not found", cid.0, cid.1));
+            }
         }
+    }
+
+    if all_bytes.is_empty() && !content_ids.is_empty() && decode_failed {
+        warnings.push("Content stream could not be decoded".to_string());
+        return TextResult { text, warnings };
     }
 
     let operations = match Content::decode(&all_bytes) {
         Ok(content) => content.operations,
-        Err(_) => return text,
+        Err(_) => {
+            warnings.push("Content stream has syntax errors".to_string());
+            return TextResult { text, warnings };
+        }
     };
 
     let mut first_bt = true;
@@ -1858,14 +1796,120 @@ fn extract_text_from_page(doc: &Document, page_id: ObjectId) -> String {
         }
     }
 
-    text
+    TextResult { text, warnings }
+}
+
+/// Check whether fonts on a page have known encodings.
+/// Returns warnings for fonts that lack ToUnicode maps or recognized encodings.
+fn check_page_font_encodings(doc: &Document, page_dict: &lopdf::Dictionary) -> Vec<String> {
+    let mut warnings = Vec::new();
+
+    // Resolve /Resources (may be a reference)
+    let resources = match page_dict.get(b"Resources") {
+        Ok(Object::Dictionary(d)) => d.clone(),
+        Ok(Object::Reference(r)) => {
+            match doc.get_object(*r) {
+                Ok(Object::Dictionary(d)) => d.clone(),
+                _ => return warnings,
+            }
+        }
+        _ => return warnings,
+    };
+
+    // Get /Font sub-dictionary
+    let font_dict = match resources.get(b"Font") {
+        Ok(Object::Dictionary(d)) => d.clone(),
+        Ok(Object::Reference(r)) => {
+            match doc.get_object(*r) {
+                Ok(Object::Dictionary(d)) => d.clone(),
+                _ => return warnings,
+            }
+        }
+        _ => return warnings,
+    };
+
+    for (name, value) in font_dict.iter() {
+        let font_name = String::from_utf8_lossy(name);
+        let font_obj = match value {
+            Object::Reference(r) => {
+                match doc.get_object(*r) {
+                    Ok(obj) => obj,
+                    _ => continue,
+                }
+            }
+            obj => obj,
+        };
+
+        let dict = match font_obj {
+            Object::Dictionary(d) => d,
+            Object::Stream(s) => &s.dict,
+            _ => continue,
+        };
+
+        // Check for /ToUnicode — if present, encoding is known
+        if dict.has(b"ToUnicode") {
+            continue;
+        }
+
+        // Check /Encoding
+        let has_known_encoding = match dict.get(b"Encoding") {
+            Ok(Object::Name(enc)) => {
+                let enc_str = String::from_utf8_lossy(enc);
+                matches!(enc_str.as_ref(), "WinAnsiEncoding" | "MacRomanEncoding" | "MacExpertEncoding" | "StandardEncoding")
+            }
+            Ok(Object::Dictionary(_)) => true, // Encoding dict with /Differences
+            Ok(Object::Reference(r)) => {
+                matches!(doc.get_object(*r), Ok(Object::Dictionary(_)) | Ok(Object::Name(_)))
+            }
+            _ => false,
+        };
+
+        if has_known_encoding {
+            continue;
+        }
+
+        // Check /Subtype — CID fonts without ToUnicode are problematic
+        let subtype = dict.get(b"Subtype").ok()
+            .and_then(|v| v.as_name().ok())
+            .map(|n| String::from_utf8_lossy(n).into_owned())
+            .unwrap_or_default();
+
+        let base_font = dict.get(b"BaseFont").ok()
+            .and_then(|v| v.as_name().ok())
+            .map(|n| String::from_utf8_lossy(n).into_owned())
+            .unwrap_or_else(|| font_name.to_string());
+
+        if subtype == "Type0" || subtype == "CIDFontType0" || subtype == "CIDFontType2" {
+            warnings.push(format!(
+                "Font /{} ({}) uses CID encoding without ToUnicode map. Text may be inaccurate.",
+                font_name, base_font
+            ));
+        } else if subtype == "Type1" || subtype == "TrueType" || subtype == "Type3" {
+            // Simple fonts without encoding — may use built-in encoding
+            // Only warn if it looks custom (not a standard 14 font)
+            let standard_14 = [
+                "Courier", "Courier-Bold", "Courier-BoldOblique", "Courier-Oblique",
+                "Helvetica", "Helvetica-Bold", "Helvetica-BoldOblique", "Helvetica-Oblique",
+                "Times-Roman", "Times-Bold", "Times-BoldItalic", "Times-Italic",
+                "Symbol", "ZapfDingbats",
+            ];
+            if !standard_14.iter().any(|s| base_font == *s) {
+                warnings.push(format!(
+                    "Font /{} ({}) has no explicit encoding or ToUnicode map. Text may be inaccurate.",
+                    font_name, base_font
+                ));
+            }
+        }
+    }
+
+    warnings
 }
 
 fn print_text(writer: &mut impl Write, doc: &Document, page_filter: Option<&PageSpec>) {
     let pages = doc.get_pages();
 
-    if let Some(spec) = page_filter {
-        for pn in spec.pages() {
+    let page_list: Vec<(u32, ObjectId)> = if let Some(spec) = page_filter {
+        spec.pages().into_iter().map(|pn| {
             let page_id = match pages.get(&pn) {
                 Some(&id) => id,
                 None => {
@@ -1873,25 +1917,27 @@ fn print_text(writer: &mut impl Write, doc: &Document, page_filter: Option<&Page
                     std::process::exit(1);
                 }
             };
-            writeln!(writer, "--- Page {} ---", pn).unwrap();
-            let text = extract_text_from_page(doc, page_id);
-            writeln!(writer, "{}", text).unwrap();
-        }
+            (pn, page_id)
+        }).collect()
     } else {
-        for (&page_num, &page_id) in &pages {
-            writeln!(writer, "--- Page {} ---", page_num).unwrap();
-            let text = extract_text_from_page(doc, page_id);
-            writeln!(writer, "{}", text).unwrap();
+        pages.iter().map(|(&pn, &id)| (pn, id)).collect()
+    };
+
+    for (pn, page_id) in &page_list {
+        writeln!(writer, "--- Page {} ---", pn).unwrap();
+        let result = extract_text_from_page_with_warnings(doc, *page_id);
+        for warn in &result.warnings {
+            eprintln!("Warning: Page {}: {}", pn, warn);
         }
+        writeln!(writer, "{}", result.text).unwrap();
     }
 }
 
 fn print_text_json(writer: &mut impl Write, doc: &Document, page_filter: Option<&PageSpec>) {
     let pages = doc.get_pages();
-    let mut page_results = Vec::new();
 
-    if let Some(spec) = page_filter {
-        for pn in spec.pages() {
+    let page_list: Vec<(u32, ObjectId)> = if let Some(spec) = page_filter {
+        spec.pages().into_iter().map(|pn| {
             let page_id = match pages.get(&pn) {
                 Some(&id) => id,
                 None => {
@@ -1899,14 +1945,25 @@ fn print_text_json(writer: &mut impl Write, doc: &Document, page_filter: Option<
                     std::process::exit(1);
                 }
             };
-            let text = extract_text_from_page(doc, page_id);
-            page_results.push(json!({"page_number": pn, "text": text}));
-        }
+            (pn, page_id)
+        }).collect()
     } else {
-        for (&page_num, &page_id) in &pages {
-            let text = extract_text_from_page(doc, page_id);
-            page_results.push(json!({"page_number": page_num, "text": text}));
+        pages.iter().map(|(&pn, &id)| (pn, id)).collect()
+    };
+
+    let mut page_results = Vec::new();
+    for (pn, page_id) in &page_list {
+        let result = extract_text_from_page_with_warnings(doc, *page_id);
+        for warn in &result.warnings {
+            eprintln!("Warning: Page {}: {}", pn, warn);
         }
+        let mut entry = serde_json::Map::new();
+        entry.insert("page_number".to_string(), json!(pn));
+        entry.insert("text".to_string(), json!(result.text));
+        if !result.warnings.is_empty() {
+            entry.insert("warnings".to_string(), json!(result.warnings));
+        }
+        page_results.push(Value::Object(entry));
     }
 
     let output = json!({"pages": page_results});
@@ -1915,29 +1972,50 @@ fn print_text_json(writer: &mut impl Write, doc: &Document, page_filter: Option<
 
 // ── Operators ───────────────────────────────────────────────────────
 
+struct OpsResult {
+    operations: Vec<lopdf::content::Operation>,
+    warnings: Vec<String>,
+}
+
 fn get_page_operations(doc: &Document, page_id: ObjectId) -> Vec<lopdf::content::Operation> {
+    get_page_operations_with_warnings(doc, page_id).operations
+}
+
+fn get_page_operations_with_warnings(doc: &Document, page_id: ObjectId) -> OpsResult {
     let dict = match doc.get_object(page_id) {
         Ok(Object::Dictionary(d)) => d,
-        _ => return vec![],
+        _ => return OpsResult { operations: vec![], warnings: vec![] },
     };
 
     let content_ids: Vec<ObjectId> = match dict.get(b"Contents") {
         Ok(Object::Reference(id)) => vec![*id],
         Ok(Object::Array(arr)) => arr.iter().filter_map(|o| o.as_reference().ok()).collect(),
-        _ => return vec![],
+        _ => return OpsResult { operations: vec![], warnings: vec![] },
     };
 
     let mut all_bytes = Vec::new();
+    let mut warnings = Vec::new();
     for cid in &content_ids {
-        if let Ok(Object::Stream(stream)) = doc.get_object(*cid) {
-            let (decoded, _) = decode_stream(stream);
-            all_bytes.extend_from_slice(&decoded);
+        match doc.get_object(*cid) {
+            Ok(Object::Stream(stream)) => {
+                let (decoded, warning) = decode_stream(stream);
+                if let Some(warn) = warning {
+                    warnings.push(format!("Content stream {} {}: {}", cid.0, cid.1, warn));
+                }
+                all_bytes.extend_from_slice(&decoded);
+            }
+            _ => {
+                warnings.push(format!("Content stream {} {} could not be read", cid.0, cid.1));
+            }
         }
     }
 
     match Content::decode(&all_bytes) {
-        Ok(content) => content.operations,
-        Err(_) => vec![],
+        Ok(content) => OpsResult { operations: content.operations, warnings },
+        Err(_) => {
+            warnings.push("Content stream has syntax errors".to_string());
+            OpsResult { operations: vec![], warnings }
+        }
     }
 }
 
@@ -1960,9 +2038,12 @@ fn print_operators(writer: &mut impl Write, doc: &Document, page_filter: Option<
     };
 
     for (pn, page_id) in &page_list {
-        let ops = get_page_operations(doc, *page_id);
-        writeln!(writer, "--- Page {} ({} operations) ---", pn, ops.len()).unwrap();
-        for op in &ops {
+        let result = get_page_operations_with_warnings(doc, *page_id);
+        for warn in &result.warnings {
+            eprintln!("Warning: Page {}: {}", pn, warn);
+        }
+        writeln!(writer, "--- Page {} ({} operations) ---", pn, result.operations.len()).unwrap();
+        for op in &result.operations {
             writeln!(writer, "{}", format_operation(op)).unwrap();
         }
         writeln!(writer).unwrap();
@@ -1989,19 +2070,25 @@ fn print_operators_json(writer: &mut impl Write, doc: &Document, page_filter: Op
 
     let mut page_results = Vec::new();
     for (pn, page_id) in &page_list {
-        let ops = get_page_operations(doc, *page_id);
-        let json_ops: Vec<Value> = ops.iter().map(|op| {
+        let result = get_page_operations_with_warnings(doc, *page_id);
+        for warn in &result.warnings {
+            eprintln!("Warning: Page {}: {}", pn, warn);
+        }
+        let json_ops: Vec<Value> = result.operations.iter().map(|op| {
             let operands: Vec<Value> = op.operands.iter().map(|o| json!(format_dict_value(o))).collect();
             json!({
                 "operator": op.operator,
                 "operands": operands,
             })
         }).collect();
-        page_results.push(json!({
-            "page_number": pn,
-            "operation_count": ops.len(),
-            "operations": json_ops,
-        }));
+        let mut entry = serde_json::Map::new();
+        entry.insert("page_number".to_string(), json!(pn));
+        entry.insert("operation_count".to_string(), json!(result.operations.len()));
+        entry.insert("operations".to_string(), json!(json_ops));
+        if !result.warnings.is_empty() {
+            entry.insert("warnings".to_string(), json!(result.warnings));
+        }
+        page_results.push(Value::Object(entry));
     }
 
     let output = json!({"pages": page_results});
@@ -3034,6 +3121,107 @@ fn print_metadata(writer: &mut impl Write, doc: &Document) {
             }
         }
     }
+}
+
+// ── Overview (default mode) ──────────────────────────────────────────
+
+fn print_overview(writer: &mut impl Write, doc: &Document) {
+    // Metadata
+    writeln!(writer, "PDF Version: {}", doc.version).unwrap();
+    writeln!(writer, "Objects:     {}", doc.objects.len()).unwrap();
+    writeln!(writer, "Pages:       {}", doc.get_pages().len()).unwrap();
+
+    // Encryption status
+    let encrypted = doc.trailer.get(b"Encrypt").is_ok();
+    writeln!(writer, "Encrypted:   {}", if encrypted { "yes" } else { "no" }).unwrap();
+
+    // Producer / Creator from /Info
+    if let Ok(info_ref) = doc.trailer.get(b"Info")
+        && let Ok((_, Object::Dictionary(info))) = doc.dereference(info_ref)
+    {
+        for key in [b"Producer".as_slice(), b"Creator"] {
+            if let Ok(Object::String(bytes, _)) = info.get(key) {
+                writeln!(writer, "{:<13}{}", format!("{}:", String::from_utf8_lossy(key)), String::from_utf8_lossy(bytes)).unwrap();
+            }
+        }
+    }
+
+    // Validation summary
+    let report = validate_pdf(doc);
+    writeln!(writer).unwrap();
+    if report.issues.is_empty() {
+        writeln!(writer, "Validation:  no issues found").unwrap();
+    } else {
+        writeln!(writer, "Validation:  {} errors, {} warnings, {} info",
+            report.error_count, report.warn_count, report.info_count).unwrap();
+        for issue in &report.issues {
+            let prefix = match issue.level {
+                ValidationLevel::Error => "[ERROR]",
+                ValidationLevel::Warn => "[WARN]",
+                ValidationLevel::Info => "[INFO]",
+            };
+            writeln!(writer, "  {} {}", prefix, issue.message).unwrap();
+        }
+    }
+
+    // Object stats summary
+    let mut stream_count = 0usize;
+    let mut total_stream_bytes = 0usize;
+    for object in doc.objects.values() {
+        if let Object::Stream(stream) = object {
+            stream_count += 1;
+            total_stream_bytes += stream.content.len();
+        }
+    }
+    writeln!(writer).unwrap();
+    writeln!(writer, "Streams:     {} ({} bytes)", stream_count, total_stream_bytes).unwrap();
+}
+
+fn print_overview_json(writer: &mut impl Write, doc: &Document) {
+    let (info, catalog) = metadata_info(doc);
+    let report = validate_pdf(doc);
+
+    let issues: Vec<Value> = report.issues.iter().map(|i| {
+        json!({
+            "level": match i.level {
+                ValidationLevel::Error => "error",
+                ValidationLevel::Warn => "warning",
+                ValidationLevel::Info => "info",
+            },
+            "message": i.message,
+        })
+    }).collect();
+
+    let mut stream_count = 0usize;
+    let mut total_stream_bytes = 0usize;
+    for object in doc.objects.values() {
+        if let Object::Stream(stream) = object {
+            stream_count += 1;
+            total_stream_bytes += stream.content.len();
+        }
+    }
+
+    let encrypted = doc.trailer.get(b"Encrypt").is_ok();
+
+    let output = json!({
+        "version": doc.version,
+        "object_count": doc.objects.len(),
+        "page_count": doc.get_pages().len(),
+        "encrypted": encrypted,
+        "info": info,
+        "catalog": catalog,
+        "validation": {
+            "error_count": report.error_count,
+            "warning_count": report.warn_count,
+            "info_count": report.info_count,
+            "issues": issues,
+        },
+        "streams": {
+            "count": stream_count,
+            "total_bytes": total_stream_bytes,
+        },
+    });
+    writeln!(writer, "{}", serde_json::to_string_pretty(&output).unwrap()).unwrap();
 }
 
 // ── Refs-To (P1) ────────────────────────────────────────────────────
@@ -4076,36 +4264,6 @@ fn print_stats_json(writer: &mut impl Write, doc: &Document) {
         "total_decoded_bytes": stats.total_decoded_bytes,
         "filter_counts": stats.filter_counts,
         "largest_streams": largest,
-    });
-    writeln!(writer, "{}", serde_json::to_string_pretty(&output).unwrap()).unwrap();
-}
-
-// ── Xref ─────────────────────────────────────────────────────────────
-
-fn print_xref(writer: &mut impl Write, doc: &Document) {
-    writeln!(writer, "{} objects\n", doc.objects.len()).unwrap();
-    writeln!(writer, "  {:>4}  {:>3}  {:<13} /Type", "Obj#", "Gen", "Kind").unwrap();
-    for (&(obj_num, generation), object) in &doc.objects {
-        let kind = object.enum_variant();
-        let type_label = object_type_label(object);
-        writeln!(writer, "  {:>4}  {:>3}  {:<13} {}", obj_num, generation, kind, type_label).unwrap();
-    }
-}
-
-fn print_xref_json(writer: &mut impl Write, doc: &Document) {
-    let entries: Vec<Value> = doc.objects.iter()
-        .map(|(&(obj_num, generation), object)| {
-            json!({
-                "object_number": obj_num,
-                "generation": generation,
-                "kind": object.enum_variant(),
-                "type": object_type_label(object),
-            })
-        })
-        .collect();
-    let output = json!({
-        "object_count": entries.len(),
-        "entries": entries,
     });
     writeln!(writer, "{}", serde_json::to_string_pretty(&output).unwrap()).unwrap();
 }
@@ -6213,10 +6371,23 @@ fn print_info(writer: &mut impl Write, doc: &Document, obj_num: u32) {
         writeln!(writer, "\nReferenced by pages: {}", pages_str.join(", ")).unwrap();
     }
 
+    // Full object content
+    let config = DumpConfig {
+        decode_streams: false, truncate: None, json: false,
+        hex: false, depth: None, deref: false, raw: false,
+    };
+    writeln!(writer, "\nObject {} 0:", obj_num).unwrap();
+    let visited = BTreeSet::new();
+    let mut child_refs = BTreeSet::new();
+    print_object(writer, object, doc, &visited, 1, &config, false, &mut child_refs);
+    writeln!(writer).unwrap();
+
     // Forward references
     let forward_refs = collect_refs_with_paths(object);
-    if !forward_refs.is_empty() {
-        writeln!(writer, "\nReferences from this object:").unwrap();
+    writeln!(writer, "\nReferences from this object:").unwrap();
+    if forward_refs.is_empty() {
+        writeln!(writer, "  (none)").unwrap();
+    } else {
         for (path, ref_id) in &forward_refs {
             let summary = if let Ok(resolved) = doc.get_object(*ref_id) {
                 deref_summary(resolved, doc)
@@ -6229,10 +6400,12 @@ fn print_info(writer: &mut impl Write, doc: &Document, obj_num: u32) {
 
     // Reverse references
     let rev_refs = collect_reverse_refs(doc, (obj_num, 0));
-    if !rev_refs.is_empty() {
-        writeln!(writer, "\nReferenced by:").unwrap();
+    writeln!(writer, "\nReferenced by:").unwrap();
+    if rev_refs.is_empty() {
+        writeln!(writer, "  (none)").unwrap();
+    } else {
         for r in &rev_refs {
-            writeln!(writer, "  {} {} ({}) via {}", r.obj_num, r.generation, r.type_label, r.paths.join(", ")).unwrap();
+            writeln!(writer, "  {:>4}  {:>3}  {:<13} {:<14} via {}", r.obj_num, r.generation, r.kind, r.type_label, r.paths.join(", ")).unwrap();
         }
     }
 }
@@ -6254,6 +6427,10 @@ fn print_info_json(writer: &mut impl Write, doc: &Document, obj_num: u32) {
     let pages = doc.get_pages();
     let (role, description, details) = classify_object(doc, obj_num, object, &pages);
 
+    let config = DumpConfig {
+        decode_streams: false, truncate: None, json: true,
+        hex: false, depth: None, deref: false, raw: false,
+    };
     let refs_to = collect_forward_refs_json(doc, object);
     let referenced_by = reverse_refs_to_json(&collect_reverse_refs(doc, (obj_num, 0)));
     let page_assoc = find_page_associations(doc, obj_num, &pages);
@@ -6269,6 +6446,7 @@ fn print_info_json(writer: &mut impl Write, doc: &Document, obj_num: u32) {
         "description": description,
         "kind": format!("{}", object.enum_variant()),
         "details": details_map,
+        "object": object_to_json(object, doc, &config),
         "page_associations": page_assoc,
         "references": refs_to,
         "referenced_by": referenced_by,
@@ -13071,51 +13249,6 @@ mod tests {
         assert_eq!(val["object_count"], 1);
     }
 
-    // ── Xref tests ──────────────────────────────────────────────────────
-
-    #[test]
-    fn xref_various_object_types() {
-        let mut doc = Document::new();
-        doc.objects.insert((1, 0), Object::Integer(42));
-        let mut dict = Dictionary::new();
-        dict.set("Type", Object::Name(b"Catalog".to_vec()));
-        doc.objects.insert((2, 0), Object::Dictionary(dict));
-        let out = output_of(|w| print_xref(w, &doc));
-        assert!(out.contains("2 objects"));
-        assert!(out.contains("Integer"));
-        assert!(out.contains("Catalog"));
-    }
-
-    #[test]
-    fn xref_empty_doc() {
-        let doc = Document::new();
-        let out = output_of(|w| print_xref(w, &doc));
-        assert!(out.contains("0 objects"));
-    }
-
-    #[test]
-    fn xref_json_output() {
-        let mut doc = Document::new();
-        doc.objects.insert((1, 0), Object::Integer(42));
-        let out = output_of(|w| print_xref_json(w, &doc));
-        let val: Value = serde_json::from_str(&out).unwrap();
-        assert_eq!(val["object_count"], 1);
-        assert_eq!(val["entries"][0]["kind"], "Integer");
-    }
-
-    #[test]
-    fn xref_sorted_by_object_number() {
-        let mut doc = Document::new();
-        doc.objects.insert((3, 0), Object::Boolean(true));
-        doc.objects.insert((1, 0), Object::Integer(42));
-        doc.objects.insert((2, 0), Object::Null);
-        let out = output_of(|w| print_xref(w, &doc));
-        // BTreeMap iterates in order, so obj 1 should come before obj 3
-        let pos1 = out.find("   1").unwrap();
-        let pos3 = out.find("   3").unwrap();
-        assert!(pos1 < pos3);
-    }
-
     // ── Bookmarks tests ─────────────────────────────────────────────────
 
     fn make_doc_with_bookmarks() -> Document {
@@ -16323,132 +16456,7 @@ mod tests {
         assert_eq!(tree[1].role, "Span");
     }
 
-    // ── Object context (--object N --context) ────────────────────────
-
-    #[test]
-    fn context_shows_object_and_forward_refs() {
-        let mut doc = Document::new();
-        doc.objects.insert((5, 0), Object::Integer(99));
-        let mut dict = Dictionary::new();
-        dict.set("Ref", Object::Reference((5, 0)));
-        doc.objects.insert((1, 0), Object::Dictionary(dict));
-
-        let config = default_config();
-        let out = output_of(|w| print_object_context(w, &doc, &[1], &config));
-        assert!(out.contains("Object 1 0:"));
-        assert!(out.contains("References from this object:"));
-        assert!(out.contains("/Ref -> 5 0 R"));
-        assert!(out.contains("Referenced by:"));
-    }
-
-    #[test]
-    fn context_shows_reverse_refs() {
-        let mut doc = Document::new();
-        doc.objects.insert((5, 0), Object::Integer(99));
-        let mut dict = Dictionary::new();
-        dict.set("Target", Object::Reference((5, 0)));
-        doc.objects.insert((1, 0), Object::Dictionary(dict));
-
-        let config = default_config();
-        let out = output_of(|w| print_object_context(w, &doc, &[5], &config));
-        assert!(out.contains("Object 5 0:"));
-        assert!(out.contains("References from this object:"));
-        assert!(out.contains("(none)"));
-        assert!(out.contains("Referenced by:"));
-        assert!(out.contains("via /Target"));
-    }
-
-    #[test]
-    fn context_no_refs_shows_none() {
-        let mut doc = Document::new();
-        doc.objects.insert((5, 0), Object::Integer(42));
-
-        let config = default_config();
-        let out = output_of(|w| print_object_context(w, &doc, &[5], &config));
-        assert!(out.contains("References from this object:"));
-        assert!(out.contains("Referenced by:"));
-        // Both sections should show (none)
-        assert_eq!(out.matches("(none)").count(), 2);
-    }
-
-    #[test]
-    fn context_multiple_objects() {
-        let mut doc = Document::new();
-        doc.objects.insert((1, 0), Object::Integer(10));
-        doc.objects.insert((2, 0), Object::Integer(20));
-
-        let config = default_config();
-        let out = output_of(|w| print_object_context(w, &doc, &[1, 2], &config));
-        assert!(out.contains("Object 1 0:"));
-        assert!(out.contains("Object 2 0:"));
-        assert!(out.contains("================================"));
-    }
-
-    #[test]
-    fn context_json_single() {
-        let mut doc = Document::new();
-        doc.objects.insert((5, 0), Object::Integer(42));
-        let mut dict = Dictionary::new();
-        dict.set("Ref", Object::Reference((5, 0)));
-        doc.objects.insert((1, 0), Object::Dictionary(dict));
-
-        let config = default_config();
-        let out = output_of(|w| print_object_context_json(w, &doc, &[1], &config));
-        let val: Value = serde_json::from_str(&out).unwrap();
-        assert_eq!(val["object_number"], 1);
-        assert!(val["object"].is_object());
-        assert!(val["references_to"].is_array());
-        assert!(val["referenced_by"].is_array());
-    }
-
-    #[test]
-    fn context_json_multiple() {
-        let mut doc = Document::new();
-        doc.objects.insert((1, 0), Object::Integer(10));
-        doc.objects.insert((2, 0), Object::Integer(20));
-
-        let config = default_config();
-        let out = output_of(|w| print_object_context_json(w, &doc, &[1, 2], &config));
-        let val: Value = serde_json::from_str(&out).unwrap();
-        assert!(val["objects"].is_array());
-        assert_eq!(val["objects"].as_array().unwrap().len(), 2);
-    }
-
-    #[test]
-    fn context_json_forward_ref_has_summary() {
-        let mut doc = Document::new();
-        doc.objects.insert((5, 0), Object::Integer(99));
-        let mut dict = Dictionary::new();
-        dict.set("MyRef", Object::Reference((5, 0)));
-        doc.objects.insert((1, 0), Object::Dictionary(dict));
-
-        let config = default_config();
-        let out = output_of(|w| print_object_context_json(w, &doc, &[1], &config));
-        let val: Value = serde_json::from_str(&out).unwrap();
-        let refs = val["references_to"].as_array().unwrap();
-        assert_eq!(refs.len(), 1);
-        assert_eq!(refs[0]["path"], "/MyRef");
-        assert_eq!(refs[0]["object_number"], 5);
-        assert!(refs[0]["summary"].is_string());
-    }
-
-    #[test]
-    fn context_json_reverse_ref_has_via_keys() {
-        let mut doc = Document::new();
-        doc.objects.insert((5, 0), Object::Integer(42));
-        let mut dict = Dictionary::new();
-        dict.set("Target", Object::Reference((5, 0)));
-        doc.objects.insert((1, 0), Object::Dictionary(dict));
-
-        let config = default_config();
-        let out = output_of(|w| print_object_context_json(w, &doc, &[5], &config));
-        let val: Value = serde_json::from_str(&out).unwrap();
-        let rev = val["referenced_by"].as_array().unwrap();
-        assert_eq!(rev.len(), 1);
-        assert_eq!(rev[0]["object_number"], 1);
-        let via = rev[0]["via_keys"].as_array().unwrap();
-        assert!(via.iter().any(|v| v.as_str().unwrap().contains("Target")));
-    }
+    // ── Info mode includes object content and bidirectional refs ──────
 
     // ── Info mode (--info N) ─────────────────────────────────────────
 
@@ -16759,6 +16767,8 @@ mod tests {
         assert!(out.contains("Role: Font"));
         assert!(out.contains("Kind: Dictionary"));
         assert!(out.contains("BaseFont: Courier"));
+        // Now includes full object content
+        assert!(out.contains("Object 5 0:"));
     }
 
     #[test]
@@ -16771,7 +16781,7 @@ mod tests {
 
         let out = output_of(|w| print_info(w, &doc, 5));
         assert!(out.contains("Referenced by:"));
-        assert!(out.contains("1 0"));
+        assert!(out.contains("via /Value"));
     }
 
     #[test]
@@ -16789,6 +16799,7 @@ mod tests {
         assert_eq!(val["role"], "Font");
         assert!(val["description"].as_str().unwrap().contains("Arial"));
         assert!(val["details"].is_object());
+        assert!(val["object"].is_object()); // now includes full object content
         assert!(val["page_associations"].is_array());
         assert!(val["references"].is_array());
         assert!(val["referenced_by"].is_array());
@@ -16852,19 +16863,6 @@ mod tests {
         assert_eq!(val["object_number"], 5);
     }
 
-    #[test]
-    fn context_with_stream_object() {
-        let mut doc = Document::new();
-        let mut dict = Dictionary::new();
-        dict.set("Length", Object::Integer(5));
-        let stream = Stream::new(dict, b"hello".to_vec());
-        doc.objects.insert((5, 0), Object::Stream(stream));
-
-        let config = default_config();
-        let out = output_of(|w| print_object_context(w, &doc, &[5], &config));
-        assert!(out.contains("Object 5 0:"));
-        assert!(out.contains("stream"));
-    }
 
     #[test]
     fn classify_object_xref_stream() {
