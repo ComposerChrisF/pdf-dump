@@ -306,6 +306,15 @@ fn main() {
         std::process::exit(1);
     }
 
+    // --info validation: incompatible modifier flags
+    if args.info.is_some()
+        && (args.decode_streams || args.deref || args.depth.is_some()
+            || args.hex || args.truncate.is_some())
+    {
+        eprintln!("Error: --info does not support --decode-streams, --deref, --depth, --hex, or --truncate.");
+        std::process::exit(1);
+    }
+
     // --diff validation: only works with default mode, --page, and --json
     if args.diff.is_some() {
         let incompatible = args.object.is_some()
@@ -1175,21 +1184,14 @@ fn print_single_object_context(writer: &mut impl Write, doc: &Document, obj_num:
     }
 
     // Section 3: Reverse references (what references this object)
-    let target_id = (obj_num, 0);
+    let rev_refs = collect_reverse_refs(doc, (obj_num, 0));
     writeln!(writer, "\nReferenced by:").unwrap();
-    let mut rev_count = 0;
-    for (&(src_num, src_gen), src_object) in &doc.objects {
-        let paths = collect_references_in_object(src_object, target_id, "");
-        if !paths.is_empty() {
-            rev_count += 1;
-            let kind = src_object.enum_variant();
-            let type_label = object_type_label(src_object);
-            let via = paths.join(", ");
-            writeln!(writer, "  {:>4}  {:>3}  {:<13} {:<14} via {}", src_num, src_gen, kind, type_label, via).unwrap();
-        }
-    }
-    if rev_count == 0 {
+    if rev_refs.is_empty() {
         writeln!(writer, "  (none)").unwrap();
+    } else {
+        for r in &rev_refs {
+            writeln!(writer, "  {:>4}  {:>3}  {:<13} {:<14} via {}", r.obj_num, r.generation, r.kind, r.type_label, r.paths.join(", ")).unwrap();
+        }
     }
 }
 
@@ -1217,32 +1219,8 @@ fn single_object_context_json(doc: &Document, obj_num: u32, config: &DumpConfig)
         }
     };
 
-    let forward_refs = collect_refs_with_paths(object);
-    let refs_to: Vec<Value> = forward_refs.iter().map(|(path, ref_id)| {
-        let mut entry = json!({
-            "path": path,
-            "object_number": ref_id.0,
-            "generation": ref_id.1,
-        });
-        if let Ok(resolved) = doc.get_object(*ref_id) {
-            entry["summary"] = json!(deref_summary(resolved, doc));
-        }
-        entry
-    }).collect();
-
-    let target_id = (obj_num, 0);
-    let mut referenced_by = Vec::new();
-    for (&(src_num, src_gen), src_object) in &doc.objects {
-        let paths = collect_references_in_object(src_object, target_id, "");
-        if !paths.is_empty() {
-            referenced_by.push(json!({
-                "object_number": src_num,
-                "generation": src_gen,
-                "type": object_type_label(src_object),
-                "via_keys": paths,
-            }));
-        }
-    }
+    let refs_to = collect_forward_refs_json(doc, object);
+    let referenced_by = reverse_refs_to_json(&collect_reverse_refs(doc, (obj_num, 0)));
 
     json!({
         "object_number": obj_num,
@@ -3062,6 +3040,11 @@ fn print_metadata(writer: &mut impl Write, doc: &Document) {
 
 fn collect_references_in_object(obj: &Object, target_id: ObjectId, path: &str) -> Vec<String> {
     let mut found = Vec::new();
+    collect_references_in_object_into(obj, target_id, path, &mut found);
+    found
+}
+
+fn collect_references_in_object_into(obj: &Object, target_id: ObjectId, path: &str, found: &mut Vec<String>) {
     match obj {
         Object::Reference(id) if *id == target_id => {
             found.push(path.to_string());
@@ -3069,58 +3052,88 @@ fn collect_references_in_object(obj: &Object, target_id: ObjectId, path: &str) -
         Object::Array(arr) => {
             for (i, item) in arr.iter().enumerate() {
                 let child_path = format!("{}[{}]", path, i);
-                found.extend(collect_references_in_object(item, target_id, &child_path));
+                collect_references_in_object_into(item, target_id, &child_path, found);
             }
         }
         Object::Dictionary(dict) => {
             for (key, value) in dict.iter() {
                 let child_path = format!("{}/{}", path, String::from_utf8_lossy(key));
-                found.extend(collect_references_in_object(value, target_id, &child_path));
+                collect_references_in_object_into(value, target_id, &child_path, found);
             }
         }
         Object::Stream(stream) => {
             for (key, value) in stream.dict.iter() {
                 let child_path = format!("{}/{}", path, String::from_utf8_lossy(key));
-                found.extend(collect_references_in_object(value, target_id, &child_path));
+                collect_references_in_object_into(value, target_id, &child_path, found);
             }
         }
         _ => {}
     }
-    found
+}
+
+struct ReverseRef {
+    obj_num: u32,
+    generation: u16,
+    kind: String,
+    type_label: String,
+    paths: Vec<String>,
+}
+
+fn collect_reverse_refs(doc: &Document, target_id: ObjectId) -> Vec<ReverseRef> {
+    let mut refs = Vec::new();
+    for (&(obj_num, generation), object) in &doc.objects {
+        let paths = collect_references_in_object(object, target_id, "");
+        if !paths.is_empty() {
+            refs.push(ReverseRef {
+                obj_num,
+                generation,
+                kind: object.enum_variant().to_string(),
+                type_label: object_type_label(object),
+                paths,
+            });
+        }
+    }
+    refs
+}
+
+fn reverse_refs_to_json(refs: &[ReverseRef]) -> Vec<Value> {
+    refs.iter().map(|r| json!({
+        "object_number": r.obj_num,
+        "generation": r.generation,
+        "kind": r.kind,
+        "type": r.type_label,
+        "via_keys": r.paths,
+    })).collect()
+}
+
+fn collect_forward_refs_json(doc: &Document, object: &Object) -> Vec<Value> {
+    collect_refs_with_paths(object).iter().map(|(path, ref_id)| {
+        let mut entry = json!({
+            "path": path,
+            "object_number": ref_id.0,
+            "generation": ref_id.1,
+        });
+        if let Ok(resolved) = doc.get_object(*ref_id) {
+            entry["summary"] = json!(deref_summary(resolved, doc));
+        }
+        entry
+    }).collect()
 }
 
 fn print_refs_to(writer: &mut impl Write, doc: &Document, target_num: u32) {
     let target_id = (target_num, 0);
     writeln!(writer, "Objects referencing {} 0 R:\n", target_num).unwrap();
 
-    let mut count = 0;
-    for (&(obj_num, generation), object) in &doc.objects {
-        let paths = collect_references_in_object(object, target_id, "");
-        if !paths.is_empty() {
-            count += 1;
-            let kind = object.enum_variant();
-            let type_label = object_type_label(object);
-            let via = paths.join(", ");
-            writeln!(writer, "  {:>4}  {:>3}  {:<13} {:<14} via {}", obj_num, generation, kind, type_label, via).unwrap();
-        }
+    let rev_refs = collect_reverse_refs(doc, target_id);
+    for r in &rev_refs {
+        writeln!(writer, "  {:>4}  {:>3}  {:<13} {:<14} via {}", r.obj_num, r.generation, r.kind, r.type_label, r.paths.join(", ")).unwrap();
     }
-    writeln!(writer, "\nFound {} objects referencing {} 0 R.", count, target_num).unwrap();
+    writeln!(writer, "\nFound {} objects referencing {} 0 R.", rev_refs.len(), target_num).unwrap();
 }
 
 fn print_refs_to_json(writer: &mut impl Write, doc: &Document, target_num: u32) {
     let target_id = (target_num, 0);
-    let mut references = Vec::new();
-    for (&(obj_num, generation), object) in &doc.objects {
-        let paths = collect_references_in_object(object, target_id, "");
-        if !paths.is_empty() {
-            references.push(json!({
-                "object_number": obj_num,
-                "generation": generation,
-                "type": object_type_label(object),
-                "via_keys": paths,
-            }));
-        }
-    }
+    let references = reverse_refs_to_json(&collect_reverse_refs(doc, target_id));
     let output = json!({
         "target_object": target_num,
         "reference_count": references.len(),
@@ -5874,7 +5887,7 @@ fn struct_elem_to_json(elem: &StructElemInfo, depth: usize, config: &DumpConfig)
 
 // ── Info mode (--info N) ─────────────────────────────────────────────
 
-fn classify_object(doc: &Document, obj_num: u32, object: &Object) -> (String, String, Vec<(String, String)>) {
+fn classify_object(doc: &Document, obj_num: u32, object: &Object, pages: &BTreeMap<u32, ObjectId>) -> (String, String, Vec<(String, String)>) {
     let dict = match object {
         Object::Dictionary(d) => Some(d),
         Object::Stream(s) => Some(&s.dict),
@@ -5910,7 +5923,6 @@ fn classify_object(doc: &Document, obj_num: u32, object: &Object) -> (String, St
                 return ("Page Tree".to_string(), format!("Object {} is a page tree node.", obj_num), details);
             }
             Some("Page") => {
-                let pages = doc.get_pages();
                 let page_num = pages.iter().find(|(_, id)| **id == (obj_num, 0)).map(|(n, _)| *n);
                 let mut details = Vec::new();
                 if let Some(n) = page_num {
@@ -5927,7 +5939,7 @@ fn classify_object(doc: &Document, obj_num: u32, object: &Object) -> (String, St
                 return ("Page".to_string(), desc, details);
             }
             Some("Font") => {
-                return classify_font(obj_num, dict);
+                return classify_font(doc, obj_num, dict);
             }
             Some("Annot") => {
                 let sub = subtype.as_deref().unwrap_or("unknown");
@@ -5995,7 +6007,7 @@ fn classify_object(doc: &Document, obj_num: u32, object: &Object) -> (String, St
                     return ("Form XObject".to_string(), format!("Object {} is a form XObject.", obj_num), details);
                 }
                 "Type1" | "TrueType" | "Type0" | "CIDFontType0" | "CIDFontType2" | "MMType1" | "Type3" => {
-                    return classify_font(obj_num, dict);
+                    return classify_font(doc, obj_num, dict);
                 }
                 _ => {}
             }
@@ -6032,7 +6044,7 @@ fn classify_object(doc: &Document, obj_num: u32, object: &Object) -> (String, St
     (role, desc, vec![])
 }
 
-fn classify_font(obj_num: u32, dict: &lopdf::Dictionary) -> (String, String, Vec<(String, String)>) {
+fn classify_font(doc: &Document, obj_num: u32, dict: &lopdf::Dictionary) -> (String, String, Vec<(String, String)>) {
     let base_font = dict.get(b"BaseFont").ok()
         .and_then(|v| v.as_name().ok().map(|n| String::from_utf8_lossy(n).into_owned()))
         .unwrap_or_else(|| "-".to_string());
@@ -6047,13 +6059,33 @@ fn classify_font(obj_num: u32, dict: &lopdf::Dictionary) -> (String, String, Vec
         })
         .unwrap_or_else(|| "-".to_string());
 
-    let has_descriptor = dict.get(b"FontDescriptor").is_ok();
-    let embedded = if has_descriptor {
-        if let Ok(Object::Reference(desc_ref)) = dict.get(b"FontDescriptor") {
-            // We can't resolve the reference here easily, so just note it exists
-            format!("FontDescriptor at {} {} R", desc_ref.0, desc_ref.1)
-        } else {
-            "has FontDescriptor".to_string()
+    let embedded = if let Ok(desc_val) = dict.get(b"FontDescriptor") {
+        match desc_val {
+            Object::Reference(desc_ref) => {
+                if let Ok(desc_obj) = doc.get_object(*desc_ref) {
+                    let desc_dict = match desc_obj {
+                        Object::Dictionary(d) => Some(d),
+                        Object::Stream(s) => Some(&s.dict),
+                        _ => None,
+                    };
+                    if let Some(dd) = desc_dict {
+                        if let Some(key) = [b"FontFile".as_slice(), b"FontFile2", b"FontFile3"]
+                            .iter()
+                            .find(|k| dd.get(k).is_ok())
+                        {
+                            format!("embedded ({})", String::from_utf8_lossy(key))
+                        } else {
+                            "not embedded".to_string()
+                        }
+                    } else {
+                        format!("FontDescriptor at {} {} R", desc_ref.0, desc_ref.1)
+                    }
+                } else {
+                    format!("FontDescriptor at {} {} R (unresolvable)", desc_ref.0, desc_ref.1)
+                }
+            }
+            Object::Dictionary(_) => "has FontDescriptor (inline)".to_string(),
+            _ => "has FontDescriptor".to_string(),
         }
     } else {
         "no FontDescriptor".to_string()
@@ -6118,12 +6150,11 @@ fn classify_image(obj_num: u32, dict: &lopdf::Dictionary, doc: &Document, object
     ("Image".to_string(), desc, details)
 }
 
-fn find_page_associations(doc: &Document, obj_num: u32) -> Vec<u32> {
+fn find_page_associations(doc: &Document, obj_num: u32, pages: &BTreeMap<u32, ObjectId>) -> Vec<u32> {
     let target_id: ObjectId = (obj_num, 0);
-    let pages = doc.get_pages();
     let mut result = Vec::new();
 
-    for (&page_num, &page_id) in &pages {
+    for (&page_num, &page_id) in pages {
         if let Ok(page_obj) = doc.get_object(page_id) {
             // Check direct references in page dict
             let paths = collect_references_in_object(page_obj, target_id, "");
@@ -6161,7 +6192,8 @@ fn print_info(writer: &mut impl Write, doc: &Document, obj_num: u32) {
         }
     };
 
-    let (role, description, details) = classify_object(doc, obj_num, object);
+    let pages = doc.get_pages();
+    let (role, description, details) = classify_object(doc, obj_num, object, &pages);
 
     writeln!(writer, "{}", description).unwrap();
     writeln!(writer, "\nRole: {}", role).unwrap();
@@ -6175,7 +6207,7 @@ fn print_info(writer: &mut impl Write, doc: &Document, obj_num: u32) {
     }
 
     // Page associations
-    let page_assoc = find_page_associations(doc, obj_num);
+    let page_assoc = find_page_associations(doc, obj_num, &pages);
     if !page_assoc.is_empty() {
         let pages_str: Vec<String> = page_assoc.iter().map(|p| p.to_string()).collect();
         writeln!(writer, "\nReferenced by pages: {}", pages_str.join(", ")).unwrap();
@@ -6196,18 +6228,11 @@ fn print_info(writer: &mut impl Write, doc: &Document, obj_num: u32) {
     }
 
     // Reverse references
-    let target_id = (obj_num, 0);
-    let mut rev_entries = Vec::new();
-    for (&(src_num, src_gen), src_object) in &doc.objects {
-        let paths = collect_references_in_object(src_object, target_id, "");
-        if !paths.is_empty() {
-            rev_entries.push((src_num, src_gen, object_type_label(src_object), paths));
-        }
-    }
-    if !rev_entries.is_empty() {
+    let rev_refs = collect_reverse_refs(doc, (obj_num, 0));
+    if !rev_refs.is_empty() {
         writeln!(writer, "\nReferenced by:").unwrap();
-        for (src_num, src_gen, type_label, paths) in &rev_entries {
-            writeln!(writer, "  {} {} ({}) via {}", src_num, src_gen, type_label, paths.join(", ")).unwrap();
+        for r in &rev_refs {
+            writeln!(writer, "  {} {} ({}) via {}", r.obj_num, r.generation, r.type_label, r.paths.join(", ")).unwrap();
         }
     }
 }
@@ -6226,36 +6251,12 @@ fn print_info_json(writer: &mut impl Write, doc: &Document, obj_num: u32) {
         }
     };
 
-    let (role, description, details) = classify_object(doc, obj_num, object);
+    let pages = doc.get_pages();
+    let (role, description, details) = classify_object(doc, obj_num, object, &pages);
 
-    let forward_refs = collect_refs_with_paths(object);
-    let refs_to: Vec<Value> = forward_refs.iter().map(|(path, ref_id)| {
-        let mut entry = json!({
-            "path": path,
-            "object_number": ref_id.0,
-            "generation": ref_id.1,
-        });
-        if let Ok(resolved) = doc.get_object(*ref_id) {
-            entry["summary"] = json!(deref_summary(resolved, doc));
-        }
-        entry
-    }).collect();
-
-    let target_id = (obj_num, 0);
-    let mut referenced_by = Vec::new();
-    for (&(src_num, src_gen), src_object) in &doc.objects {
-        let paths = collect_references_in_object(src_object, target_id, "");
-        if !paths.is_empty() {
-            referenced_by.push(json!({
-                "object_number": src_num,
-                "generation": src_gen,
-                "type": object_type_label(src_object),
-                "via_keys": paths,
-            }));
-        }
-    }
-
-    let page_assoc = find_page_associations(doc, obj_num);
+    let refs_to = collect_forward_refs_json(doc, object);
+    let referenced_by = reverse_refs_to_json(&collect_reverse_refs(doc, (obj_num, 0)));
+    let page_assoc = find_page_associations(doc, obj_num, &pages);
 
     let details_map: serde_json::Map<String, Value> = details.into_iter()
         .map(|(k, v)| (k, json!(v)))
@@ -16465,7 +16466,7 @@ mod tests {
         doc.objects.insert((1, 0), Object::Dictionary(catalog.clone()));
 
         let obj = Object::Dictionary(catalog);
-        let (role, desc, details) = classify_object(&doc, 1, &obj);
+        let (role, desc, details) = classify_object(&doc, 1, &obj, &doc.get_pages());
         assert_eq!(role, "Catalog");
         assert!(desc.contains("document catalog"));
         assert!(details.iter().any(|(k, v)| k == "Pages" && v == "3"));
@@ -16481,7 +16482,7 @@ mod tests {
         dict.set("Encoding", Object::Name(b"WinAnsiEncoding".to_vec()));
         let obj = Object::Dictionary(dict);
 
-        let (role, desc, details) = classify_object(&doc, 10, &obj);
+        let (role, desc, details) = classify_object(&doc, 10, &obj, &doc.get_pages());
         assert_eq!(role, "Font");
         assert!(desc.contains("Type1"));
         assert!(desc.contains("Helvetica"));
@@ -16514,7 +16515,7 @@ mod tests {
         doc.trailer.set("Root", Object::Reference((1, 0)));
 
         let obj = Object::Dictionary(page);
-        let (role, desc, details) = classify_object(&doc, 3, &obj);
+        let (role, desc, details) = classify_object(&doc, 3, &obj, &doc.get_pages());
         assert_eq!(role, "Page");
         assert!(desc.contains("page 1") || desc.contains("page"));
         assert!(details.iter().any(|(k, _)| k == "MediaBox"));
@@ -16532,7 +16533,7 @@ mod tests {
         let stream = Stream::new(dict, vec![0u8; 50]);
         let obj = Object::Stream(stream);
 
-        let (role, desc, details) = classify_object(&doc, 7, &obj);
+        let (role, desc, details) = classify_object(&doc, 7, &obj, &doc.get_pages());
         assert_eq!(role, "Image");
         assert!(desc.contains("100x200"));
         assert!(details.iter().any(|(k, v)| k == "Width" && v == "100"));
@@ -16551,7 +16552,7 @@ mod tests {
         ]));
         let obj = Object::Dictionary(dict);
 
-        let (role, desc, _) = classify_object(&doc, 8, &obj);
+        let (role, desc, _) = classify_object(&doc, 8, &obj, &doc.get_pages());
         assert_eq!(role, "Annotation");
         assert!(desc.contains("Link"));
     }
@@ -16564,7 +16565,7 @@ mod tests {
         dict.set("S", Object::Name(b"URI".to_vec()));
         let obj = Object::Dictionary(dict);
 
-        let (role, desc, details) = classify_object(&doc, 9, &obj);
+        let (role, desc, details) = classify_object(&doc, 9, &obj, &doc.get_pages());
         assert_eq!(role, "Action");
         assert!(desc.contains("URI"));
         assert!(details.iter().any(|(k, v)| k == "Action Type" && v == "URI"));
@@ -16574,7 +16575,7 @@ mod tests {
     fn classify_object_integer() {
         let doc = Document::new();
         let obj = Object::Integer(42);
-        let (role, desc, _) = classify_object(&doc, 5, &obj);
+        let (role, desc, _) = classify_object(&doc, 5, &obj, &doc.get_pages());
         assert_eq!(role, "Integer");
         assert!(desc.contains("42"));
     }
@@ -16583,7 +16584,7 @@ mod tests {
     fn classify_object_string() {
         let doc = Document::new();
         let obj = Object::String(b"hello".to_vec(), StringFormat::Literal);
-        let (role, desc, _) = classify_object(&doc, 5, &obj);
+        let (role, desc, _) = classify_object(&doc, 5, &obj, &doc.get_pages());
         assert_eq!(role, "String");
         assert!(desc.contains("hello"));
     }
@@ -16592,7 +16593,7 @@ mod tests {
     fn classify_object_array() {
         let doc = Document::new();
         let obj = Object::Array(vec![Object::Integer(1), Object::Integer(2)]);
-        let (role, desc, _) = classify_object(&doc, 5, &obj);
+        let (role, desc, _) = classify_object(&doc, 5, &obj, &doc.get_pages());
         assert_eq!(role, "Array");
         assert!(desc.contains("2 items"));
     }
@@ -16605,7 +16606,7 @@ mod tests {
         dict.set("Bar", Object::Integer(2));
         let obj = Object::Dictionary(dict);
 
-        let (role, desc, details) = classify_object(&doc, 5, &obj);
+        let (role, desc, details) = classify_object(&doc, 5, &obj, &doc.get_pages());
         assert_eq!(role, "Generic");
         assert!(desc.contains("dictionary"));
         assert!(details.iter().any(|(k, _)| k == "Keys"));
@@ -16619,7 +16620,7 @@ mod tests {
         dict.set("FontName", Object::Name(b"Helvetica".to_vec()));
         let obj = Object::Dictionary(dict);
 
-        let (role, desc, _) = classify_object(&doc, 5, &obj);
+        let (role, desc, _) = classify_object(&doc, 5, &obj, &doc.get_pages());
         assert_eq!(role, "Font Descriptor");
         assert!(desc.contains("Helvetica"));
     }
@@ -16632,7 +16633,7 @@ mod tests {
         dict.set("BaseEncoding", Object::Name(b"WinAnsiEncoding".to_vec()));
         let obj = Object::Dictionary(dict);
 
-        let (role, desc, _) = classify_object(&doc, 5, &obj);
+        let (role, desc, _) = classify_object(&doc, 5, &obj, &doc.get_pages());
         assert_eq!(role, "Encoding");
         assert!(desc.contains("WinAnsiEncoding"));
     }
@@ -16645,7 +16646,7 @@ mod tests {
         dict.set("CA", Object::Real(0.5));
         let obj = Object::Dictionary(dict);
 
-        let (role, desc, _) = classify_object(&doc, 5, &obj);
+        let (role, desc, _) = classify_object(&doc, 5, &obj, &doc.get_pages());
         assert_eq!(role, "Graphics State");
         assert!(desc.contains("extended graphics state"));
     }
@@ -16661,7 +16662,7 @@ mod tests {
         ]));
         let obj = Object::Dictionary(dict);
 
-        let (role, desc, details) = classify_object(&doc, 5, &obj);
+        let (role, desc, details) = classify_object(&doc, 5, &obj, &doc.get_pages());
         assert_eq!(role, "Form XObject");
         assert!(desc.contains("form XObject"));
         assert!(details.iter().any(|(k, _)| k == "BBox"));
@@ -16675,7 +16676,7 @@ mod tests {
         dict.set("Count", Object::Integer(5));
         let obj = Object::Dictionary(dict);
 
-        let (role, _, details) = classify_object(&doc, 2, &obj);
+        let (role, _, details) = classify_object(&doc, 2, &obj, &doc.get_pages());
         assert_eq!(role, "Page Tree");
         assert!(details.iter().any(|(k, v)| k == "Count" && v == "5"));
     }
@@ -16714,7 +16715,7 @@ mod tests {
         doc.objects.insert((1, 0), Object::Dictionary(catalog));
         doc.trailer.set("Root", Object::Reference((1, 0)));
 
-        let assoc = find_page_associations(&doc, 5);
+        let assoc = find_page_associations(&doc, 5, &doc.get_pages());
         assert_eq!(assoc, vec![1]);
     }
 
@@ -16740,7 +16741,7 @@ mod tests {
         doc.objects.insert((1, 0), Object::Dictionary(catalog));
         doc.trailer.set("Root", Object::Reference((1, 0)));
 
-        let assoc = find_page_associations(&doc, 5);
+        let assoc = find_page_associations(&doc, 5, &doc.get_pages());
         assert!(assoc.is_empty());
     }
 
@@ -16871,7 +16872,7 @@ mod tests {
         let mut dict = Dictionary::new();
         dict.set("Type", Object::Name(b"XRef".to_vec()));
         let obj = Object::Dictionary(dict);
-        let (role, desc, _) = classify_object(&doc, 5, &obj);
+        let (role, desc, _) = classify_object(&doc, 5, &obj, &doc.get_pages());
         assert_eq!(role, "XRef Stream");
         assert!(desc.contains("cross-reference stream"));
     }
@@ -16882,7 +16883,7 @@ mod tests {
         let mut dict = Dictionary::new();
         dict.set("Type", Object::Name(b"ObjStm".to_vec()));
         let obj = Object::Dictionary(dict);
-        let (role, desc, _) = classify_object(&doc, 5, &obj);
+        let (role, desc, _) = classify_object(&doc, 5, &obj, &doc.get_pages());
         assert_eq!(role, "Object Stream");
         assert!(desc.contains("object stream"));
     }
@@ -16891,7 +16892,7 @@ mod tests {
     fn classify_object_null() {
         let doc = Document::new();
         let obj = Object::Null;
-        let (role, _, _) = classify_object(&doc, 5, &obj);
+        let (role, _, _) = classify_object(&doc, 5, &obj, &doc.get_pages());
         assert_eq!(role, "Null");
     }
 
@@ -16899,7 +16900,7 @@ mod tests {
     fn classify_object_boolean() {
         let doc = Document::new();
         let obj = Object::Boolean(true);
-        let (role, desc, _) = classify_object(&doc, 5, &obj);
+        let (role, desc, _) = classify_object(&doc, 5, &obj, &doc.get_pages());
         assert_eq!(role, "Boolean");
         assert!(desc.contains("true"));
     }
@@ -16908,7 +16909,7 @@ mod tests {
     fn classify_object_real() {
         let doc = Document::new();
         let obj = Object::Real(2.72);
-        let (role, desc, _) = classify_object(&doc, 5, &obj);
+        let (role, desc, _) = classify_object(&doc, 5, &obj, &doc.get_pages());
         assert_eq!(role, "Real");
         assert!(desc.contains("2.72"));
     }
@@ -16917,7 +16918,7 @@ mod tests {
     fn classify_object_name() {
         let doc = Document::new();
         let obj = Object::Name(b"Test".to_vec());
-        let (role, desc, _) = classify_object(&doc, 5, &obj);
+        let (role, desc, _) = classify_object(&doc, 5, &obj, &doc.get_pages());
         assert_eq!(role, "Name");
         assert!(desc.contains("Test"));
     }
@@ -16930,7 +16931,7 @@ mod tests {
         dict.set("BaseFont", Object::Name(b"TimesNewRoman".to_vec()));
         let obj = Object::Dictionary(dict);
 
-        let (role, desc, _) = classify_object(&doc, 5, &obj);
+        let (role, desc, _) = classify_object(&doc, 5, &obj, &doc.get_pages());
         assert_eq!(role, "Font");
         assert!(desc.contains("TrueType"));
         assert!(desc.contains("TimesNewRoman"));
@@ -17019,7 +17020,7 @@ mod tests {
         doc.objects.insert((1, 0), Object::Dictionary(catalog));
         doc.trailer.set("Root", Object::Reference((1, 0)));
 
-        let assoc = find_page_associations(&doc, 5);
+        let assoc = find_page_associations(&doc, 5, &doc.get_pages());
         assert_eq!(assoc, vec![1]);
     }
 }
