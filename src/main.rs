@@ -830,7 +830,7 @@ fn decode_stream(stream: &lopdf::Stream) -> (Cow<'_, [u8]>, Option<String>) {
         return (Cow::Borrowed(&stream.content), None);
     }
 
-    let mut data = stream.content.clone();
+    let mut data: Cow<'_, [u8]> = Cow::Borrowed(&stream.content);
     for filter in &filters {
         let result = match filter.as_slice() {
             b"FlateDecode" => {
@@ -846,16 +846,16 @@ fn decode_stream(stream: &lopdf::Stream) -> (Cow<'_, [u8]>, Option<String>) {
             b"RunLengthDecode" => decode_run_length(&data),
             other => {
                 let name = String::from_utf8_lossy(other);
-                return (Cow::Owned(data), Some(format!("unsupported filter: {}", name)));
+                return (Cow::Owned(data.into_owned()), Some(format!("unsupported filter: {}", name)));
             }
         };
         match result {
-            Ok(decoded) => data = decoded,
-            Err(msg) => return (Cow::Owned(data), Some(msg)),
+            Ok(decoded) => data = Cow::Owned(decoded),
+            Err(msg) => return (Cow::Owned(data.into_owned()), Some(msg)),
         }
     }
 
-    (Cow::Owned(data), None)
+    (data, None)
 }
 
 fn format_hex_dump(data: &[u8]) -> String {
@@ -1688,20 +1688,24 @@ fn object_matches(obj: &Object, conditions: &[SearchCondition]) -> bool {
         }
         SearchCondition::HasKey { key } => dict.get(key).is_ok(),
         SearchCondition::ValueContains { text } => {
-            let text_lower = text.to_lowercase();
+            let needle = text.to_lowercase();
+            let needle_bytes = needle.as_bytes();
             dict.iter().any(|(_, v)| {
-                match v {
-                    Object::Name(n) => String::from_utf8_lossy(n).to_lowercase().contains(&text_lower),
-                    Object::String(bytes, _) => String::from_utf8_lossy(bytes).to_lowercase().contains(&text_lower),
-                    _ => false,
-                }
+                let haystack: &[u8] = match v {
+                    Object::Name(n) => n,
+                    Object::String(bytes, _) => bytes,
+                    _ => return false,
+                };
+                // Case-insensitive byte search: compare lowercase bytes
+                haystack.to_ascii_lowercase().windows(needle_bytes.len()).any(|w| w == needle_bytes)
             })
         }
         SearchCondition::StreamContains { text } => {
             if let Object::Stream(stream) = obj {
+                let text_lower = text.to_lowercase();
                 let (decoded, _) = decode_stream(stream);
                 let content_str = String::from_utf8_lossy(&decoded);
-                content_str.to_lowercase().contains(&text.to_lowercase())
+                content_str.to_lowercase().contains(&text_lower)
             } else {
                 false
             }
@@ -1709,11 +1713,11 @@ fn object_matches(obj: &Object, conditions: &[SearchCondition]) -> bool {
         SearchCondition::RegexMatch { pattern } => {
             // Match against dict key names, Name values, String values
             let key_or_value_match = dict.iter().any(|(k, v)| {
-                let key_str = String::from_utf8_lossy(k);
-                if pattern.is_match(&key_str) { return true; }
+                if let Ok(key_str) = std::str::from_utf8(k)
+                    && pattern.is_match(key_str) { return true; }
                 match v {
-                    Object::Name(n) => pattern.is_match(&String::from_utf8_lossy(n)),
-                    Object::String(bytes, _) => pattern.is_match(&String::from_utf8_lossy(bytes)),
+                    Object::Name(n) => std::str::from_utf8(n).is_ok_and(|s| pattern.is_match(s)),
+                    Object::String(bytes, _) => std::str::from_utf8(bytes).is_ok_and(|s| pattern.is_match(s)),
                     _ => false,
                 }
             });
@@ -2387,10 +2391,10 @@ fn collect_form_fields_from_dict(doc: &Document, acroform_dict: &lopdf::Dictiona
         .unwrap_or(false);
 
     let fields_array = match acroform_dict.get(b"Fields") {
-        Ok(Object::Array(arr)) => arr.clone(),
+        Ok(Object::Array(arr)) => arr,
         Ok(Object::Reference(id)) => {
             match doc.get_object(*id) {
-                Ok(Object::Array(arr)) => arr.clone(),
+                Ok(Object::Array(arr)) => arr,
                 _ => return (Some(acroform_id), need_appearances, vec![]),
             }
         }
@@ -2412,7 +2416,7 @@ fn collect_form_fields_from_dict(doc: &Document, acroform_dict: &lopdf::Dictiona
     }
 
     let mut fields = Vec::new();
-    for field_obj in &fields_array {
+    for field_obj in fields_array {
         if let Ok(field_id) = field_obj.as_reference() {
             collect_field_recursive(doc, field_id, "", &widget_to_page, &mut fields);
         }
@@ -4609,19 +4613,17 @@ fn collect_security(doc: &Document, file_path: Option<&std::path::Path>) -> Secu
     }
 }
 
+fn dict_int(dict: &lopdf::Dictionary, key: &[u8], default: i64) -> i64 {
+    dict.get(key).ok()
+        .and_then(|o| if let Object::Integer(i) = o { Some(*i) } else { None })
+        .unwrap_or(default)
+}
+
 fn build_security_info(dict: &lopdf::Dictionary, encrypt_ref: Option<ObjectId>) -> SecurityInfo {
-    let v = dict.get(b"V").ok()
-        .and_then(|o| if let Object::Integer(i) = o { Some(*i) } else { None })
-        .unwrap_or(0);
-    let r = dict.get(b"R").ok()
-        .and_then(|o| if let Object::Integer(i) = o { Some(*i) } else { None })
-        .unwrap_or(0);
-    let length = dict.get(b"Length").ok()
-        .and_then(|o| if let Object::Integer(i) = o { Some(*i) } else { None })
-        .unwrap_or(40);
-    let p = dict.get(b"P").ok()
-        .and_then(|o| if let Object::Integer(i) = o { Some(*i) } else { None })
-        .unwrap_or(0);
+    let v = dict_int(dict, b"V", 0);
+    let r = dict_int(dict, b"R", 0);
+    let length = dict_int(dict, b"Length", 40);
+    let p = dict_int(dict, b"P", 0);
 
     SecurityInfo {
         encrypted: true,
@@ -4973,51 +4975,53 @@ fn collect_page_labels(doc: &Document) -> Vec<PageLabelEntry> {
     let mut ranges = walk_number_tree(doc, page_labels_dict);
     ranges.sort_by_key(|(k, _)| *k);
 
+    // Pre-parse ranges into (range_start, style, prefix, start_val) tuples
+    let parsed_ranges: Vec<(i64, String, String, i64)> = ranges.iter().map(|(range_key, value)| {
+        let label_dict = match value {
+            Object::Dictionary(d) => Some(d),
+            Object::Reference(id) => doc.get_object(*id).ok().and_then(|o| {
+                if let Object::Dictionary(d) = o { Some(d) } else { None }
+            }),
+            _ => None,
+        };
+        match label_dict {
+            Some(d) => {
+                let s = d.get(b"S").ok()
+                    .and_then(|v| v.as_name().ok().map(|n| String::from_utf8_lossy(n).into_owned()))
+                    .unwrap_or_else(|| "-".to_string());
+                let p = d.get(b"P").ok()
+                    .map(|v| match v {
+                        Object::String(bytes, _) => String::from_utf8_lossy(bytes).into_owned(),
+                        _ => String::new(),
+                    })
+                    .unwrap_or_default();
+                let st = d.get(b"St").ok()
+                    .and_then(|v| if let Object::Integer(i) = v { Some(*i) } else { None })
+                    .unwrap_or(1);
+                (*range_key, s, p, st)
+            }
+            None => (*range_key, "D".to_string(), String::new(), 1),
+        }
+    }).collect();
+
     let page_count = doc.get_pages().len() as u32;
 
     for phys in 0..page_count {
-        // Find the applicable range: the last range entry whose key <= phys
-        let rule = ranges.iter().rev().find(|(k, _)| *k as u32 <= phys);
-        let (range_start, style, prefix, start_val) = match rule {
-            Some((range_key, value)) => {
-                let label_dict = match value {
-                    Object::Dictionary(d) => Some(d),
-                    Object::Reference(id) => doc.get_object(*id).ok().and_then(|o| {
-                        if let Object::Dictionary(d) = o { Some(d) } else { None }
-                    }),
-                    _ => None,
-                };
-                match label_dict {
-                    Some(d) => {
-                        let s = d.get(b"S").ok()
-                            .and_then(|v| v.as_name().ok().map(|n| String::from_utf8_lossy(n).into_owned()))
-                            .unwrap_or_else(|| "-".to_string());
-                        let p = d.get(b"P").ok()
-                            .map(|v| match v {
-                                Object::String(bytes, _) => String::from_utf8_lossy(bytes).into_owned(),
-                                _ => String::new(),
-                            })
-                            .unwrap_or_default();
-                        let st = d.get(b"St").ok()
-                            .and_then(|v| if let Object::Integer(i) = v { Some(*i) } else { None })
-                            .unwrap_or(1);
-                        (*range_key, s, p, st)
-                    }
-                    None => (*range_key, "D".to_string(), String::new(), 1),
-                }
-            }
-            None => (0, "D".to_string(), String::new(), 1),
-        };
+        // Find the applicable range: the last parsed range whose key <= phys
+        let (range_start, style, prefix, start_val) = parsed_ranges.iter().rev()
+            .find(|(k, _, _, _)| *k as u32 <= phys)
+            .map(|(k, s, p, st)| (*k, s.as_str(), p.as_str(), *st))
+            .unwrap_or((0, "D", "", 1));
 
         let offset = phys as i64 - range_start;
         let value = start_val + offset;
-        let label = format_page_label(&style, &prefix, value);
+        let label = format_page_label(style, prefix, value);
 
         entries.push(PageLabelEntry {
             physical_page: phys + 1,
             label,
-            style: style.clone(),
-            prefix: prefix.clone(),
+            style: style.to_string(),
+            prefix: prefix.to_string(),
             start: start_val,
         });
     }
@@ -5170,10 +5174,11 @@ fn collect_links(doc: &Document, page_filter: Option<&PageSpec>) -> Vec<LinkInfo
                 _ => continue,
             };
 
-            let subtype = annot_dict.get(b"Subtype").ok()
-                .and_then(|v| v.as_name().ok().map(|n| String::from_utf8_lossy(n).into_owned()));
+            let is_link = annot_dict.get(b"Subtype").ok()
+                .and_then(|v| v.as_name().ok())
+                .is_some_and(|n| n == b"Link");
 
-            if subtype.as_deref() != Some("Link") { continue; }
+            if !is_link { continue; }
 
             let rect = annot_dict.get(b"Rect").ok()
                 .map(format_dict_value)
@@ -5496,9 +5501,9 @@ fn collect_layers(doc: &Document) -> Vec<OcgInfo> {
     };
 
     let oc_props = match catalog.get(b"OCProperties").ok() {
-        Some(Object::Dictionary(d)) => d.clone(),
+        Some(Object::Dictionary(d)) => d,
         Some(Object::Reference(id)) => match doc.get_object(*id).ok() {
-            Some(Object::Dictionary(d)) => d.clone(),
+            Some(Object::Dictionary(d)) => d,
             _ => return Vec::new(),
         },
         _ => return Vec::new(),
@@ -5506,22 +5511,23 @@ fn collect_layers(doc: &Document) -> Vec<OcgInfo> {
 
     // Get OCGs array
     let ocgs_arr = match oc_props.get(b"OCGs").ok() {
-        Some(Object::Array(a)) => a.clone(),
+        Some(Object::Array(a)) => a,
         Some(Object::Reference(id)) => match doc.get_object(*id).ok() {
-            Some(Object::Array(a)) => a.clone(),
+            Some(Object::Array(a)) => a,
             _ => return Vec::new(),
         },
         _ => return Vec::new(),
     };
 
     // Get default config /D
+    let empty_dict = lopdf::Dictionary::new();
     let d_dict = match oc_props.get(b"D").ok() {
-        Some(Object::Dictionary(d)) => d.clone(),
+        Some(Object::Dictionary(d)) => d,
         Some(Object::Reference(id)) => match doc.get_object(*id).ok() {
-            Some(Object::Dictionary(d)) => d.clone(),
-            _ => lopdf::Dictionary::new(),
+            Some(Object::Dictionary(d)) => d,
+            _ => &empty_dict,
         },
-        _ => lopdf::Dictionary::new(),
+        _ => &empty_dict,
     };
 
     let base_state = d_dict.get(b"BaseState").ok()
@@ -5529,8 +5535,8 @@ fn collect_layers(doc: &Document) -> Vec<OcgInfo> {
         .unwrap_or_else(|| "ON".to_string());
 
     // Collect ON/OFF override sets
-    let on_set: BTreeSet<ObjectId> = extract_id_set(&d_dict, b"ON");
-    let off_set: BTreeSet<ObjectId> = extract_id_set(&d_dict, b"OFF");
+    let on_set: BTreeSet<ObjectId> = extract_id_set(d_dict, b"ON");
+    let off_set: BTreeSet<ObjectId> = extract_id_set(d_dict, b"OFF");
 
     // Build page_id -> page_num lookup
     let pages = doc.get_pages();
@@ -5550,7 +5556,7 @@ fn collect_layers(doc: &Document) -> Vec<OcgInfo> {
 
     // Build OcgInfo for each OCG
     let mut layers = Vec::new();
-    for item in &ocgs_arr {
+    for item in ocgs_arr {
         let ocg_id = match item {
             Object::Reference(id) => *id,
             _ => continue,
@@ -5594,9 +5600,9 @@ fn extract_id_set(dict: &lopdf::Dictionary, key: &[u8]) -> BTreeSet<ObjectId> {
 fn scan_page_for_ocgs(doc: &Document, page_dict: &lopdf::Dictionary, page_num: u32, ocg_pages: &mut BTreeMap<ObjectId, Vec<u32>>) {
     // Look for Resources -> Properties which holds OCG references
     let resources = match page_dict.get(b"Resources").ok() {
-        Some(Object::Dictionary(d)) => d.clone(),
+        Some(Object::Dictionary(d)) => d,
         Some(Object::Reference(id)) => match doc.get_object(*id).ok() {
-            Some(Object::Dictionary(d)) => d.clone(),
+            Some(Object::Dictionary(d)) => d,
             _ => return,
         },
         _ => {
@@ -5604,9 +5610,9 @@ fn scan_page_for_ocgs(doc: &Document, page_dict: &lopdf::Dictionary, page_num: u
             if let Ok(Object::Reference(parent_id)) = page_dict.get(b"Parent") {
                 if let Ok(Object::Dictionary(parent)) = doc.get_object(*parent_id) {
                     match parent.get(b"Resources").ok() {
-                        Some(Object::Dictionary(d)) => d.clone(),
+                        Some(Object::Dictionary(d)) => d,
                         Some(Object::Reference(id)) => match doc.get_object(*id).ok() {
-                            Some(Object::Dictionary(d)) => d.clone(),
+                            Some(Object::Dictionary(d)) => d,
                             _ => return,
                         },
                         _ => return,
@@ -5621,9 +5627,9 @@ fn scan_page_for_ocgs(doc: &Document, page_dict: &lopdf::Dictionary, page_num: u
     };
 
     let props = match resources.get(b"Properties").ok() {
-        Some(Object::Dictionary(d)) => d.clone(),
+        Some(Object::Dictionary(d)) => d,
         Some(Object::Reference(id)) => match doc.get_object(*id).ok() {
-            Some(Object::Dictionary(d)) => d.clone(),
+            Some(Object::Dictionary(d)) => d,
             _ => return,
         },
         _ => return,
@@ -14055,8 +14061,8 @@ mod tests {
         assert!(parsed["pages"].is_array());
         let page = &parsed["pages"][0];
         assert_eq!(page["page_number"], 1);
-        assert!(page["fonts"].as_array().unwrap().len() > 0);
-        assert!(page["xobjects"].as_array().unwrap().len() > 0);
+        assert!(!page["fonts"].as_array().unwrap().is_empty());
+        assert!(!page["xobjects"].as_array().unwrap().is_empty());
     }
 
     #[test]
@@ -16981,10 +16987,10 @@ mod tests {
     #[test]
     fn classify_object_real() {
         let doc = Document::new();
-        let obj = Object::Real(3.14);
+        let obj = Object::Real(2.72);
         let (role, desc, _) = classify_object(&doc, 5, &obj);
         assert_eq!(role, "Real");
-        assert!(desc.contains("3.14"));
+        assert!(desc.contains("2.72"));
     }
 
     #[test]
