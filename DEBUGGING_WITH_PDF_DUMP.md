@@ -13,6 +13,12 @@ Use `pdf-dump` instead of writing Python scripts whenever you need to:
 - Track down a specific object (form field, annotation, image, font)
 - Understand the object graph and reference structure
 - Extract raw stream content (content streams, embedded images, etc.)
+- Debug hyperlinks and navigation actions
+- Investigate encryption and permission restrictions
+- Examine page labeling and numbering schemes
+- Find embedded file attachments
+- Inspect layers (Optional Content Groups) and tagged structure
+- Diagnose font encoding problems causing garbled text
 
 ## PDF structure primer
 
@@ -21,11 +27,11 @@ A PDF file consists of:
 - **Objects** identified by `(object_number, generation)` pairs, e.g., `5 0` means object 5, generation 0. `pdf-dump` assumes generation 0 for all command-line arguments.
 - **Object types**: null, boolean, integer, real, name (`/Type`), string (`(Hello)`), array (`[...]`), dictionary (`<< /Key Value >>`), stream (dictionary + byte content), and reference (`5 0 R`).
 - **Trailer**: the entry point. Contains `/Root` (the document catalog) and optionally `/Info` (metadata).
-- **Catalog** (`/Root`): points to `/Pages` (page tree), `/AcroForm` (forms), `/Outlines` (bookmarks), etc.
+- **Catalog** (`/Root`): points to `/Pages` (page tree), `/AcroForm` (forms), `/Outlines` (bookmarks), `/Names` (name trees for embedded files, destinations, etc.), `/OCProperties` (layers), `/StructTreeRoot` (tagged structure), `/PageLabels` (page numbering), etc.
 - **Page tree**: `/Pages` dict with `/Kids` array pointing to individual `/Page` objects (or nested `/Pages` nodes).
-- **Page**: dictionary with `/MediaBox` (dimensions), `/Contents` (content stream reference), `/Resources` (fonts, images, etc.).
+- **Page**: dictionary with `/MediaBox` (dimensions), `/Contents` (content stream reference), `/Resources` (fonts, images, etc.), `/Annots` (annotations including links).
 - **Content streams**: instructions that draw the page. Use operators like `BT`/`ET` (text blocks), `Tf` (set font), `Tj`/`TJ` (show text), `cm` (transform matrix), `Do` (draw XObject).
-- **Streams**: any object with both a dictionary and binary content. Streams can be compressed with filters (FlateDecode, LZWDecode, ASCII85Decode, ASCIIHexDecode). Multiple filters can be chained in a pipeline.
+- **Streams**: any object with both a dictionary and binary content. Streams can be compressed with filters (FlateDecode, LZWDecode, ASCII85Decode, ASCIIHexDecode, RunLengthDecode). Multiple filters can be chained in a pipeline.
 
 ## Recommended workflows
 
@@ -40,6 +46,12 @@ pdf-dump file.pdf --summary
 
 Metadata gives you version, page count, producer, and catalog properties. Summary gives a one-line-per-object table so you can see what types of objects exist and how large they are.
 
+For a quick structural health check:
+
+```bash
+pdf-dump file.pdf --validate
+```
+
 ### 2. Understanding document structure
 
 Use `--tree` for a quick visual map of the object graph:
@@ -51,9 +63,17 @@ pdf-dump file.pdf --tree --depth 3    # limit depth for large files
 
 This shows the reference tree from the trailer downward — which objects point to which, via which keys. Revisited nodes are marked to prevent infinite output.
 
+For a human-readable explanation of any specific object:
+
+```bash
+pdf-dump file.pdf --info 42
+```
+
+This classifies the object (Font, Page, Image, Catalog, etc.), shows domain-specific details, page associations, and both forward and reverse references.
+
 ### 3. Finding specific objects
 
-Search by type, key, or value:
+Search by type, key, value, stream content, or regex:
 
 ```bash
 pdf-dump file.pdf --search Type=Font
@@ -61,11 +81,13 @@ pdf-dump file.pdf --search Type=Annot
 pdf-dump file.pdf --search key=AcroForm
 pdf-dump file.pdf --search Subtype=Image
 pdf-dump file.pdf --search value=Helvetica
+pdf-dump file.pdf --search stream=text           # search inside decoded streams
+pdf-dump file.pdf --search "regex=D:20(23|24)"   # regex across values
 ```
 
 Multiple conditions are ANDed: `--search Type=Font,Subtype=Type1`
 
-For compact results, add `--summary`:
+For compact results, add `--summary` (includes matched key/value in output):
 
 ```bash
 pdf-dump file.pdf --search Type=Font --summary
@@ -91,6 +113,32 @@ For binary streams, add `--hex`:
 pdf-dump file.pdf --object 42 --decode-streams --hex
 ```
 
+To see references expanded inline (showing target summaries instead of bare `N 0 R`):
+
+```bash
+pdf-dump file.pdf --object 42 --deref
+```
+
+To see the raw undecoded stream bytes (useful for debugging broken filter chains):
+
+```bash
+pdf-dump file.pdf --object 42 --raw
+pdf-dump file.pdf --object 42 --raw --hex
+pdf-dump file.pdf --object 42 --raw --truncate 256
+```
+
+To see full bidirectional reference context (what the object references + what references it):
+
+```bash
+pdf-dump file.pdf --object 42 --context
+```
+
+Inspect multiple objects at once:
+
+```bash
+pdf-dump file.pdf --object 1,5,10-15
+```
+
 ### 5. Debugging a specific page
 
 Dump only the objects reachable from page N:
@@ -98,6 +146,7 @@ Dump only the objects reachable from page N:
 ```bash
 pdf-dump file.pdf --page 1
 pdf-dump file.pdf --page 1 --decode-streams
+pdf-dump file.pdf --page 1 --deref          # with references expanded
 ```
 
 Extract text from that page:
@@ -106,20 +155,39 @@ Extract text from that page:
 pdf-dump file.pdf --text --page 1
 ```
 
+See the exact drawing operators:
+
+```bash
+pdf-dump file.pdf --operators --page 1
+```
+
+See the page's resource maps (fonts, images, graphics state):
+
+```bash
+pdf-dump file.pdf --resources --page 1
+```
+
 ### 6. Font problems
 
-List all fonts with embedding status:
+List all fonts with full encoding diagnostics:
 
 ```bash
 pdf-dump file.pdf --fonts
 ```
 
-Output columns: Obj#, BaseFont, Subtype (Type1, TrueType, Type0, CIDFontType2), Encoding, and whether the font program is embedded (with the object number of the font file if so).
+Output includes: Obj#, BaseFont, Subtype (Type1, TrueType, Type0, CIDFontType2), Encoding, embedded status, and encoding diagnostics:
+
+- **ToUnicode**: whether a `/ToUnicode` CMap exists and its object number
+- **FirstChar/LastChar**: the character code range and `/Widths` array length
+- **Differences**: custom encoding entries from the `/Differences` array (first 5 shown with total count)
+- **CIDSystemInfo**: for Type0/CID fonts, the Registry-Ordering-Supplement values
 
 Common issues:
 - **Missing embedded font**: the font shows `Embedded: No` but the viewer doesn't have it installed. Look for `/FontDescriptor` and check if `/FontFile`, `/FontFile2`, or `/FontFile3` exists.
-- **Wrong encoding**: text appears garbled. Check the `/Encoding` value and whether a `/ToUnicode` CMap exists.
+- **Wrong encoding**: text appears garbled. Check the `/Encoding` value and whether `/ToUnicode` exists.
 - **Subset font name**: names like `ABCDEF+Helvetica` indicate a subset. The prefix before `+` is arbitrary.
+- **Width mismatches**: if the `/Widths` array length doesn't match `LastChar - FirstChar + 1`, glyph metrics will be wrong. The `--validate` check catches this.
+- **CID fonts without ToUnicode**: `Identity-H` encoding without a ToUnicode CMap means glyph IDs are raw CID values — text extraction will produce garbage.
 
 ### 7. Image problems
 
@@ -139,7 +207,18 @@ pdf-dump file.pdf --extract-object 42 --output image_raw.bin
 
 The extracted data is the decoded stream. For JPEG images (DCTDecode filter), the output is a valid JPEG file. For FlateDecode images, the output is raw pixel data.
 
-### 8. Comparing two PDFs
+### 8. Hyperlinks and navigation
+
+List all links with their actions and targets:
+
+```bash
+pdf-dump file.pdf --links
+pdf-dump file.pdf --links --page 1     # just page 1
+```
+
+This shows every URI, GoTo, GoToR, and Named action with source page number and target. Much faster than `--search "Subtype=Link"` followed by manual inspection of each annotation.
+
+### 9. Comparing two PDFs
 
 When code generates a PDF and the output changes:
 
@@ -151,7 +230,7 @@ pdf-dump old.pdf --diff new.pdf --json        # structured output
 
 The diff compares metadata, page dictionaries, resource dictionaries, decoded content streams, and fonts. It works at the semantic level (by page structure) rather than by raw object IDs, so it handles renumbered objects correctly.
 
-### 9. Structural validation
+### 10. Structural validation
 
 Check for common PDF problems:
 
@@ -159,17 +238,22 @@ Check for common PDF problems:
 pdf-dump file.pdf --validate
 ```
 
-Checks performed:
+Checks performed (10 total):
 - **Broken references**: objects referenced but not present in the file
 - **Unreachable objects**: objects that exist but aren't reachable from `/Root`
 - **Missing required keys**: pages without `/MediaBox` (considering inheritance), catalog without `/Pages`
 - **Stream length mismatches**: declared `/Length` vs actual byte count
 - **Page tree integrity**: `/Count` matches actual page count, all pages reachable
 - **Empty streams**: streams with 0 bytes (possible corruption)
+- **Content stream syntax**: can the operators be parsed without errors?
+- **Font requirements**: `/BaseFont` present, `/FirstChar`/`/LastChar` consistent with `/Widths` array length
+- **Page tree cycles**: circular reference detection in `/Parent` chains
+- **Names tree structure**: validates `/Names` tree nodes are well-formed
+- **Duplicate objects**: detects multiple objects sharing the same object number
 
 Severity levels: `[ERROR]`, `[WARN]`, `[INFO]`, `[OK]`
 
-### 10. Reverse reference lookup
+### 11. Reverse reference lookup
 
 "What points to object 42?"
 
@@ -178,6 +262,112 @@ pdf-dump file.pdf --refs-to 42
 ```
 
 Reports every object containing a reference to the target, along with the dictionary key path. Useful for understanding how an object fits into the document structure.
+
+For bidirectional context (forward + reverse refs + the object itself) in one command:
+
+```bash
+pdf-dump file.pdf --object 42 --context
+```
+
+### 12. Form fields
+
+List all form fields with their properties:
+
+```bash
+pdf-dump file.pdf --forms
+```
+
+Shows fully qualified field names, field types (Tx=text, Btn=button, Ch=choice, Sig=signature), current values, flags, and page numbers. Walks hierarchical field trees so nested fields appear with their full path.
+
+For deeper inspection, find the AcroForm:
+
+```bash
+pdf-dump file.pdf --search key=AcroForm
+```
+
+Then inspect individual field objects:
+
+```bash
+pdf-dump file.pdf --object <field_id>
+```
+
+Check for `/AP` (appearance streams), `/V` (value), `/FT` (field type), `/Ff` (field flags).
+
+### 13. Annotations
+
+List all annotations grouped by page:
+
+```bash
+pdf-dump file.pdf --annotations
+pdf-dump file.pdf --annotations --page 1-3
+```
+
+Shows subtype (Link, Widget, Text, Highlight, etc.), rectangle, and contents.
+
+### 14. Bookmarks
+
+Show the document outline tree:
+
+```bash
+pdf-dump file.pdf --bookmarks
+```
+
+Displays titles, destinations, and actions with indentation for nested bookmarks.
+
+### 15. Embedded file attachments
+
+List files embedded in the PDF:
+
+```bash
+pdf-dump file.pdf --embedded-files
+```
+
+Shows filename, MIME type, size, and the object number of the EmbeddedFile stream. To extract an embedded file:
+
+```bash
+pdf-dump file.pdf --extract-object <stream_obj_number> --output attachment.bin
+```
+
+### 16. Layers (Optional Content Groups)
+
+List layers and their visibility:
+
+```bash
+pdf-dump file.pdf --layers
+```
+
+Shows each OCG's name, default visibility (ON/OFF), and which pages reference it. When content appears to be "missing" visually, hidden layers are often the cause.
+
+### 17. Tagged structure
+
+Show the logical structure tree for tagged (accessible) PDFs:
+
+```bash
+pdf-dump file.pdf --structure
+pdf-dump file.pdf --structure --depth 3
+```
+
+Displays element roles (Document, H1, P, Table, Figure, etc.), page refs, MCIDs, titles, and alt text. One of the richest signals for understanding document layout without visual rendering.
+
+### 18. Page labels
+
+Show the page numbering scheme:
+
+```bash
+pdf-dump file.pdf --page-labels
+```
+
+Displays the physical-to-logical page number mapping (e.g., pages 1-4 use roman numerals `i, ii, iii, iv`, pages 5+ use decimal starting at 1). Essential when "page 5" means different things to the user vs the PDF.
+
+### 19. Encryption and permissions
+
+Check security restrictions:
+
+```bash
+pdf-dump file.pdf --security
+```
+
+Shows the encryption algorithm, key length, revision, and decoded permission flags (print: yes/no, copy: yes/no, modify: yes/no, etc.). Useful for understanding why a PDF can't be fully parsed or why certain operations are restricted.
 
 ## Using JSON mode
 
@@ -198,7 +388,7 @@ Every PDF object maps to a JSON object with a `type` field:
 | Array | `"array"` | `"items": [...]` |
 | Dictionary | `"dictionary"` | `"entries": {"Key": ...}` |
 | Stream | `"stream"` | `"dict": {...}`, optional `"content"` (text), `"content_hex"` (hex), `"content_binary"` (binary summary), `"decode_warning"` |
-| Reference | `"reference"` | `"object_number": N, "generation": G` |
+| Reference | `"reference"` | `"object_number": N, `"generation": G`. With `--deref`, gains a `"resolved"` field. |
 
 ### Mode-specific JSON structures
 
@@ -310,6 +500,28 @@ Every PDF object maps to a JSON object with a `type` field:
 }
 ```
 
+**Info** (`--info N --json`):
+```json
+{
+  "object_number": N,
+  "role": "Font",
+  "details": {...},
+  "page_associations": [...],
+  "forward_refs": [...],
+  "reverse_refs": [...]
+}
+```
+
+**Object context** (`--object N --context --json`):
+```json
+{
+  "object_number": N,
+  "object": {...},
+  "forward_refs": [{"key": "/Font", "object_number": 5, ...}],
+  "reverse_refs": [{"source_object": 1, "key": "/Resources", ...}]
+}
+```
+
 ## Stream filter support
 
 `pdf-dump` decodes these stream filters (applied sequentially for filter pipelines):
@@ -320,12 +532,13 @@ Every PDF object maps to a JSON object with a `type` field:
 | ASCII85Decode | Base-85 text encoding |
 | ASCIIHexDecode | Hex-encoded bytes |
 | LZWDecode | LZW compression (legacy) |
+| RunLengthDecode | Run-length encoded data |
 
 Unsupported filters (DCTDecode/JPEG, JPXDecode/JPEG2000, JBIG2Decode, CCITTFaxDecode) are reported as warnings. When an unsupported filter is encountered in a pipeline, decoding stops and returns what was decoded so far.
 
 ## Content stream operators quick reference
 
-When viewing decoded content streams (`--decode-streams` or `--text`), these are the most common operators:
+When viewing decoded content streams (`--decode-streams`, `--operators`, or `--text`), these are the most common operators:
 
 ### Text operators
 | Operator | Meaning |
@@ -365,10 +578,12 @@ When viewing decoded content streams (`--decode-streams` or `--text`), these are
 
 ### "Text is garbled or shows wrong characters"
 
-1. Check what font is being used: `pdf-dump file.pdf --fonts`
-2. Look at the font's `/Encoding` and whether `/ToUnicode` exists
+1. Check what fonts are being used and their encoding diagnostics: `pdf-dump file.pdf --fonts`
+2. Look at the font's `/Encoding`, whether `/ToUnicode` exists, and whether `/Widths` is consistent with `/FirstChar`/`/LastChar`
 3. If the font uses `Identity-H` encoding without a ToUnicode CMap, the glyph IDs are raw CID values, not Unicode — text extraction will produce garbage
-4. Check the content stream to see the raw operator calls: `pdf-dump file.pdf --page N --decode-streams`
+4. Check the content stream to see the raw operator calls: `pdf-dump file.pdf --operators --page N`
+5. For a quick overview of the object: `pdf-dump file.pdf --info <font_obj_number>`
+6. Run validation to catch font issues automatically: `pdf-dump file.pdf --validate`
 
 ### "Page appears blank"
 
@@ -376,19 +591,20 @@ When viewing decoded content streams (`--decode-streams` or `--text`), these are
 2. Verify the content stream isn't empty: `pdf-dump file.pdf --object <contents_id> --decode-streams`
 3. Check that the content stream decodes successfully (look for `[WARNING: ...]` in output)
 4. The drawing commands might be off-page — check `/MediaBox` dimensions vs the coordinates used in the content stream
+5. Check if content is on a hidden layer: `pdf-dump file.pdf --layers`
 
 ### "Image doesn't appear"
 
 1. Find the image object: `pdf-dump file.pdf --images`
-2. Check the page's `/Resources` dictionary for an `/XObject` entry referencing the image
-3. Verify the content stream contains a `Do` operator referencing the right name
+2. Check the page's `/Resources` dictionary for an `/XObject` entry referencing the image: `pdf-dump file.pdf --resources --page N`
+3. Verify the content stream contains a `Do` operator referencing the right name: `pdf-dump file.pdf --operators --page N`
 4. Check the image stream's filter — if using an unsupported filter, it may not be the cause of the rendering problem
 
 ### "PDF won't open / is corrupted"
 
 1. Run validation: `pdf-dump file.pdf --validate`
 2. Check the summary for anomalies: `pdf-dump file.pdf --summary`
-3. Look for broken references, missing required keys, or stream length mismatches
+3. Look for broken references, missing required keys, stream length mismatches, content stream syntax errors, or page tree cycles
 4. If the file won't load at all, the problem is likely in the cross-reference table or file structure, which is below pdf-dump's parsing layer (lopdf handles that)
 
 ### "Two PDFs look different but should be the same"
@@ -399,22 +615,57 @@ When viewing decoded content streams (`--decode-streams` or `--text`), these are
 
 ### "Form fields aren't working"
 
-1. Find the AcroForm: `pdf-dump file.pdf --search key=AcroForm`
-2. Find field objects: `pdf-dump file.pdf --search Type=Annot`
-3. Look at a specific field's properties: `pdf-dump file.pdf --object <field_id>`
-4. Check for `/AP` (appearance streams), `/V` (value), `/FT` (field type)
+1. List all form fields: `pdf-dump file.pdf --forms`
+2. Check field types, values, and flags in the output
+3. For deeper inspection: `pdf-dump file.pdf --object <field_id>`
+4. Check for `/AP` (appearance streams), `/V` (value), `/FT` (field type), `/Ff` (field flags)
+5. Run validation to check for structural issues: `pdf-dump file.pdf --validate`
+
+### "Link doesn't work / goes to wrong place"
+
+1. List all links: `pdf-dump file.pdf --links`
+2. Filter to the page in question: `pdf-dump file.pdf --links --page N`
+3. Check the action type (URI, GoTo, GoToR, Named) and target
+4. For GoTo actions, verify the destination page exists: `pdf-dump file.pdf --page-labels` to reconcile physical vs logical page numbers
+
+### "Content is missing but the file seems fine"
+
+1. Check for hidden layers: `pdf-dump file.pdf --layers`
+2. Check if content is in an embedded file: `pdf-dump file.pdf --embedded-files`
+3. Look at the page's resources to see what's available: `pdf-dump file.pdf --resources --page N`
+4. Check annotations (some content lives in annotation appearance streams): `pdf-dump file.pdf --annotations --page N`
 
 ### "PDF is too large"
 
-1. List images to find large ones: `pdf-dump file.pdf --images`
-2. Check the summary for unusually large stream objects: `pdf-dump file.pdf --summary`
-3. Look for unreachable objects wasting space: `pdf-dump file.pdf --validate`
+1. Check document statistics: `pdf-dump file.pdf --stats`
+2. List images to find large ones: `pdf-dump file.pdf --images`
+3. Check the summary for unusually large stream objects: `pdf-dump file.pdf --summary`
+4. Look for unreachable objects wasting space: `pdf-dump file.pdf --validate`
+5. Check for embedded files: `pdf-dump file.pdf --embedded-files`
+
+### "Page numbers don't match"
+
+1. Check the page label mapping: `pdf-dump file.pdf --page-labels`
+2. PDFs often use roman numerals for preface pages, then restart numbering at 1 — the physical page number (what pdf-dump uses for `--page N`) may differ from the logical label shown in the viewer
+
+### "PDF has restricted permissions"
+
+1. Check encryption and permissions: `pdf-dump file.pdf --security`
+2. The output shows which operations are allowed (print, copy, modify, etc.)
+3. If the PDF is encrypted and can't be fully parsed, this tells you why
 
 ## Tips
 
 - Always use `--json` when you need to parse the output programmatically or pass it to another tool.
-- Use `--depth N` with the default dump or `--tree` to avoid drowning in output from large files. Start with `--depth 2` and increase as needed.
+- Use `--depth N` with the default dump, `--tree`, or `--structure` to avoid drowning in output from large files. Start with `--depth 2` and increase as needed.
 - Combine `--decode-streams --truncate 200 --hex` when inspecting binary streams — you get enough to identify the format without flooding the terminal.
 - Object numbers are stable within a single file but meaningless across different files. Use `--diff` instead of comparing object numbers between two PDFs.
 - The `--search` syntax is case-insensitive on values. `Type=font` matches `/Type /Font`.
-- When `--text` produces garbage, the issue is almost always font encoding (CID fonts without ToUnicode), not a bug in pdf-dump.
+- Use `regex=<pattern>` in search for powerful pattern matching: `--search "regex=D:20(23|24)"` finds date-stamped objects.
+- When `--text` produces garbage, the issue is almost always font encoding (CID fonts without ToUnicode). Use `--fonts` to check encoding diagnostics.
+- Use `--info N` for a quick human-readable explanation of any object — saves multiple round trips of `--object` + `--refs-to`.
+- Use `--object N --context` for bidirectional reference context in a single command.
+- Use `--deref` with `--object` or `--page` to see reference targets inline, avoiding follow-up `--object` calls.
+- Use `--raw` to see undecoded stream bytes when debugging broken filter chains ("is the compressed data itself corrupt?").
+- Start with `--validate` when investigating any "broken PDF" report — it catches 10 categories of structural problems automatically.
+- Use `--operators --page N` instead of `--page N --decode-streams` when you only need to see the drawing instructions without the full object dump.

@@ -67,7 +67,7 @@ Prints PDF version, object count, page count, `/Info` dictionary fields (Title, 
 
 ### `--object N` / `-o N`
 
-Prints a single object by number (generation 0) without following any references.
+Prints one or more objects by number (generation 0) without following references. Accepts single numbers, comma-separated lists, ranges, or mixed: `--object 5`, `--object 1,5,10`, `--object 10-15`, `--object 1,5,10-15`.
 
 ### `--page N` or `--page N-M`
 
@@ -75,20 +75,22 @@ Dumps the object subtree for a specific page or page range (1-based). Only follo
 
 ### `--search <expr>`
 
-Find objects matching key/value criteria. Conditions are comma-separated and ANDed.
+Find objects matching key/value/stream/regex criteria. Conditions are comma-separated and ANDed.
 
 ```
 pdf-dump file.pdf --search Type=Font              # objects where /Type = /Font
 pdf-dump file.pdf --search key=MediaBox            # objects containing a /MediaBox key
 pdf-dump file.pdf --search value=Hello             # objects with a string containing "Hello"
+pdf-dump file.pdf --search stream=text             # search inside decoded stream content
+pdf-dump file.pdf --search "regex=D:20(23|24)"     # regex match across values
 pdf-dump file.pdf --search Type=Font,Subtype=Type1 # both conditions must match
 ```
 
-Combine with `--summary` for compact output: `pdf-dump file.pdf --search Type=Font --summary`
+Combine with `--summary` for compact output (includes matched key/value): `pdf-dump file.pdf --search Type=Font --summary`
 
 ### `--text`
 
-Extracts readable text from page content streams (Tj, TJ, ', " operators). Outputs text page by page.
+Extracts readable text from page content streams (Tj, TJ, ', " operators). Outputs text page by page. Uses `Td`/`TD` positioning to insert line breaks where the PDF moves to a new line.
 
 ```
 pdf-dump file.pdf --text               # all pages
@@ -96,15 +98,125 @@ pdf-dump file.pdf --text --page 3      # just page 3
 pdf-dump file.pdf --text --page 1-5    # pages 1 through 5
 ```
 
-Limitations: no font encoding or ToUnicode mapping; text appears in content stream order, not visual order.
+Limitations: no font encoding or ToUnicode mapping; text order follows content stream with basic positioning, not full visual reflow.
+
+### `--operators`
+
+Shows all content stream operators for each page. Useful for seeing the exact drawing instructions.
+
+```
+pdf-dump file.pdf --operators              # all pages
+pdf-dump file.pdf --operators --page 3     # just page 3
+pdf-dump file.pdf --operators --json
+```
+
+### `--resources`
+
+Shows page resource maps: fonts, XObjects, ExtGState, ColorSpaces with details. Handles resource inheritance from parent pages.
+
+```
+pdf-dump file.pdf --resources              # all pages
+pdf-dump file.pdf --resources --page 1     # just page 1
+pdf-dump file.pdf --resources --json
+```
 
 ### `--fonts`
 
-Lists every font in the document: object number, BaseFont, Subtype, Encoding, and whether the font is embedded.
+Lists every font in the document with encoding diagnostics: object number, BaseFont, Subtype, Encoding, embedded status, ToUnicode CMap presence, FirstChar/LastChar/Widths consistency, Differences entries, and CIDSystemInfo for CID fonts.
+
+```
+pdf-dump file.pdf --fonts
+pdf-dump file.pdf --fonts --json
+```
 
 ### `--images`
 
 Lists every image: object number, dimensions, color space, bits per component, filter, and stream size.
+
+### `--forms`
+
+Lists AcroForm fields with fully qualified names, field types (Tx/Btn/Ch/Sig), values, flags, and page numbers. Walks hierarchical field trees.
+
+```
+pdf-dump file.pdf --forms
+pdf-dump file.pdf --forms --json
+```
+
+### `--links`
+
+Extracts all hyperlinks and GoTo actions. Lists every URI, GoTo, GoToR, and Named action with source page number and target. Can be filtered to specific pages.
+
+```
+pdf-dump file.pdf --links                  # all pages
+pdf-dump file.pdf --links --page 1         # just page 1
+pdf-dump file.pdf --links --json
+```
+
+### `--annotations`
+
+Lists all annotations in the document, grouped by page. Shows subtype, rectangle, and contents. Can be filtered to specific pages.
+
+```
+pdf-dump file.pdf --annotations              # all pages
+pdf-dump file.pdf --annotations --page 1     # just page 1
+pdf-dump file.pdf --annotations --page 1-3   # pages 1-3
+pdf-dump file.pdf --annotations --json
+```
+
+### `--bookmarks`
+
+Shows the document's bookmark (outline) tree. Displays titles, destinations (/Dest arrays, /Fit types), and actions (GoTo, URI, etc.) with proper indentation for nested bookmarks.
+
+```
+pdf-dump file.pdf --bookmarks
+pdf-dump file.pdf --bookmarks --json
+```
+
+### `--embedded-files`
+
+Lists file attachments embedded in the PDF. Shows filename, MIME type, size, and the object number of the EmbeddedFile stream (which `--extract-object` can extract).
+
+```
+pdf-dump file.pdf --embedded-files
+pdf-dump file.pdf --embedded-files --json
+```
+
+### `--layers` / `--ocg`
+
+Lists Optional Content Groups (layers) with name, default visibility (ON/OFF), and page references. Reads `/OCProperties` from the catalog. Useful for debugging hidden content in engineering drawings, maps, or multi-language documents.
+
+```
+pdf-dump file.pdf --layers
+pdf-dump file.pdf --ocg --json
+```
+
+### `--structure`
+
+Shows the tagged PDF logical structure tree from `/StructTreeRoot`. Displays element roles (heading, paragraph, table, figure), page refs, MCIDs, titles, and alt text. Supports `--depth N` to limit tree depth. Cycle detection prevents infinite output.
+
+```
+pdf-dump file.pdf --structure
+pdf-dump file.pdf --structure --depth 3
+pdf-dump file.pdf --structure --json
+```
+
+### `--page-labels`
+
+Shows the physical-to-logical page number mapping defined by the `/PageLabels` number tree. Displays label style (decimal, roman, alphabetic), prefix, and starting value for each range.
+
+```
+pdf-dump file.pdf --page-labels
+pdf-dump file.pdf --page-labels --json
+```
+
+### `--security`
+
+Shows encryption and permissions info from the `/Encrypt` dictionary: algorithm, key length, revision, and permissions bitfield decoded to human-readable flags (print, copy, modify, etc.).
+
+```
+pdf-dump file.pdf --security
+pdf-dump file.pdf --security --json
+```
 
 ### `--tree`
 
@@ -114,6 +226,7 @@ Shows the object graph as an indented reference tree. Displays object IDs, types
 pdf-dump file.pdf --tree --depth 3    # limit to 3 levels
 pdf-dump file.pdf --tree --dot        # GraphViz DOT output
 pdf-dump file.pdf --tree --dot --depth 2  # DOT with depth limit
+pdf-dump file.pdf --tree --json
 ```
 
 ### `--stats`
@@ -134,33 +247,35 @@ pdf-dump file.pdf --xref
 pdf-dump file.pdf --xref --json
 ```
 
-### `--bookmarks`
-
-Shows the document's bookmark (outline) tree. Displays titles, destinations (/Dest arrays, /Fit types), and actions (GoTo, URI, etc.) with proper indentation for nested bookmarks.
-
-```
-pdf-dump file.pdf --bookmarks
-pdf-dump file.pdf --bookmarks --json
-```
-
-### `--annotations`
-
-Lists all annotations in the document, grouped by page. Shows subtype, rectangle, and contents. Can be filtered to specific pages.
-
-```
-pdf-dump file.pdf --annotations              # all pages
-pdf-dump file.pdf --annotations --page 1     # just page 1
-pdf-dump file.pdf --annotations --page 1-3   # pages 1-3
-pdf-dump file.pdf --annotations --json
-```
-
 ### `--refs-to N`
 
 Reverse reference lookup. Finds every object that contains a reference to object N, and reports which dictionary key holds that reference.
 
+### `--info N`
+
+Human-readable object role explanation. Classifies the object (Font, Page, Image, Catalog, etc.) with domain-specific details, shows page associations, and lists both forward and reverse references. Think of it as a one-stop "tell me about this object" command.
+
+```
+pdf-dump file.pdf --info 42
+pdf-dump file.pdf --info 42 --json
+```
+
 ### `--validate`
 
-Structural health check. Reports broken references, unreachable objects, missing required keys, stream length mismatches, and page tree integrity issues.
+Structural health check. Runs 10 validation checks:
+
+- **Broken references**: objects referenced but not present in the file
+- **Unreachable objects**: objects that exist but aren't reachable from `/Root`
+- **Missing required keys**: pages without `/MediaBox` (considering inheritance), catalog without `/Pages`
+- **Stream length mismatches**: declared `/Length` vs actual byte count
+- **Page tree integrity**: `/Count` matches actual page count, all pages reachable
+- **Content stream syntax**: can the operators be parsed without errors?
+- **Font requirements**: `/BaseFont` present, `/FirstChar`/`/LastChar` consistent with `/Widths` array length
+- **Page tree cycles**: circular reference detection in `/Parent` chains
+- **Names tree structure**: validates `/Names` tree nodes are well-formed
+- **Duplicate objects**: detects multiple objects sharing the same object number
+
+Severity levels: `[ERROR]`, `[WARN]`, `[INFO]`, `[OK]`
 
 ### `--extract-object N --output <path>`
 
@@ -172,16 +287,19 @@ Structural comparison of two PDFs. Compares metadata, page dictionaries, resourc
 
 ## Modifier flags
 
-These combine with any mode:
+These combine with mode flags:
 
 | Flag | Effect |
 |------|--------|
 | `--json` | Structured JSON output. Works with every mode. |
 | `--decode-streams` | Decompress and display stream contents (FlateDecode, ASCII85Decode, ASCIIHexDecode, LZWDecode, RunLengthDecode). |
-| `--hex` | Show binary streams as hex dump (use with `--decode-streams`). |
+| `--hex` | Show binary streams as hex dump (use with `--decode-streams` or `--raw`). |
 | `--truncate N` | Limit binary stream output to N bytes. |
-| `--depth N` | Limit traversal depth (0 = root only). Works with dump, page, tree. |
+| `--depth N` | Limit traversal depth (0 = root only). Works with dump, page, tree, structure. |
 | `--dot` | Output tree as GraphViz DOT format (use with `--tree`). |
+| `--deref` | Inline-expand references to show target summaries (use with `--object` or `--page`). |
+| `--raw` | Show raw undecoded stream bytes (use with `--object`; conflicts with `--decode-streams`). |
+| `--context` | Show bidirectional reference context (use with `--object`). |
 
 ## Examples
 
@@ -195,6 +313,12 @@ Find all image XObjects as JSON:
 
 ```
 pdf-dump file.pdf --search Subtype=Image --json
+```
+
+Search with a regex pattern:
+
+```
+pdf-dump file.pdf --search "regex=D:20(23|24)"
 ```
 
 Compare two versions of a PDF, page 1 only:
@@ -221,17 +345,68 @@ Generate a DOT graph for visualization:
 pdf-dump file.pdf --tree --dot | dot -Tpng -o tree.png
 ```
 
+Get a human-readable explanation of what an object is:
+
+```
+pdf-dump file.pdf --info 42
+```
+
+See an object with full bidirectional reference context:
+
+```
+pdf-dump file.pdf --object 42 --context
+```
+
+Inspect an object with references expanded inline:
+
+```
+pdf-dump file.pdf --object 42 --deref
+```
+
+View raw undecoded stream bytes as hex:
+
+```
+pdf-dump file.pdf --object 42 --raw --hex
+```
+
+List embedded file attachments:
+
+```
+pdf-dump file.pdf --embedded-files
+```
+
+Show page label mapping:
+
+```
+pdf-dump file.pdf --page-labels
+```
+
+Check encryption and permissions:
+
+```
+pdf-dump file.pdf --security
+```
+
 Show document statistics:
 
 ```
 pdf-dump file.pdf --stats
 ```
 
-List bookmarks and annotations:
+List bookmarks, annotations, links, and forms:
 
 ```
 pdf-dump file.pdf --bookmarks
 pdf-dump file.pdf --annotations --page 1-3
+pdf-dump file.pdf --links
+pdf-dump file.pdf --forms
+```
+
+Show layers and tagged structure:
+
+```
+pdf-dump file.pdf --layers
+pdf-dump file.pdf --structure --depth 3
 ```
 
 ## For Claude Code users
