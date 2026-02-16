@@ -11,7 +11,8 @@ pub(crate) struct OpsResult {
     pub warnings: Vec<String>,
 }
 
-pub(crate) fn get_page_operations(doc: &Document, page_id: ObjectId) -> Vec<lopdf::content::Operation> {
+#[cfg(test)]
+fn get_page_operations(doc: &Document, page_id: ObjectId) -> Vec<lopdf::content::Operation> {
     get_page_operations_with_warnings(doc, page_id).operations
 }
 

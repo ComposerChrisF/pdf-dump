@@ -10,7 +10,8 @@ pub(crate) struct TextResult {
     pub warnings: Vec<String>,
 }
 
-pub(crate) fn extract_text_from_page(doc: &Document, page_id: ObjectId) -> String {
+#[cfg(test)]
+fn extract_text_from_page(doc: &Document, page_id: ObjectId) -> String {
     extract_text_from_page_with_warnings(doc, page_id).text
 }
 
