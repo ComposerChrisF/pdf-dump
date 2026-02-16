@@ -5480,7 +5480,7 @@ fn collect_layers(doc: &Document) -> Vec<OcgInfo> {
         .and_then(|o| resolve_dict(doc, o))
         .unwrap_or(&empty_dict);
 
-    let base_state = d_dict.get(b"BaseState").ok()
+    let base_state: &str = &d_dict.get(b"BaseState").ok()
         .and_then(name_to_string)
         .unwrap_or_else(|| "ON".to_string());
 
@@ -5525,7 +5525,7 @@ fn collect_layers(doc: &Document) -> Vec<OcgInfo> {
         } else if on_set.contains(&ocg_id) {
             "ON".to_string()
         } else {
-            base_state.clone()
+            base_state.to_string()
         };
 
         let page_numbers = ocg_pages.remove(&ocg_id).unwrap_or_default();
@@ -5667,17 +5667,17 @@ fn collect_structure_tree(doc: &Document) -> (bool, Vec<StructElemInfo>) {
 
 fn collect_struct_children(doc: &Document, dict: &lopdf::Dictionary, page_lookup: &BTreeMap<ObjectId, u32>, visited: &mut BTreeSet<ObjectId>) -> Vec<StructElemInfo> {
     let k = match dict.get(b"K").ok() {
-        Some(v) => v.clone(),
+        Some(v) => v,
         None => return Vec::new(),
     };
 
-    let items = match &k {
-        Object::Array(arr) => arr.clone(),
-        _ => vec![k],
+    let items: &[Object] = match k {
+        Object::Array(arr) => arr,
+        other => std::slice::from_ref(other),
     };
 
     let mut result = Vec::new();
-    for item in &items {
+    for item in items {
         match item {
             Object::Reference(id) => {
                 if visited.contains(id) { continue; }
