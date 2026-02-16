@@ -859,13 +859,14 @@ fn decode_stream(stream: &lopdf::Stream) -> (Cow<'_, [u8]>, Option<String>) {
 }
 
 fn format_hex_dump(data: &[u8]) -> String {
+    use std::fmt::Write;
     let mut result = String::new();
     for (offset, chunk) in data.chunks(16).enumerate() {
         // Offset column
-        result.push_str(&format!("{:08x}  ", offset * 16));
+        write!(result, "{:08x}  ", offset * 16).unwrap();
         // Hex bytes: first 8
         for (i, &b) in chunk.iter().enumerate() {
-            result.push_str(&format!("{:02x} ", b));
+            write!(result, "{:02x} ", b).unwrap();
             if i == 7 { result.push(' '); }
         }
         // Pad if less than 16 bytes
@@ -1673,6 +1674,19 @@ fn object_matches(obj: &Object, conditions: &[SearchCondition]) -> bool {
         _ => return false,
     };
 
+    // Lazily decode stream content once for conditions that need it
+    let needs_stream = conditions.iter().any(|c| matches!(c, SearchCondition::StreamContains { .. } | SearchCondition::RegexMatch { .. }));
+    let decoded_content = if needs_stream {
+        if let Object::Stream(stream) = obj {
+            let (decoded, _) = decode_stream(stream);
+            Some(decoded)
+        } else {
+            None
+        }
+    } else {
+        None
+    };
+
     conditions.iter().all(|cond| match cond {
         SearchCondition::KeyEquals { key, value } => {
             dict.get(key).ok().is_some_and(|v| {
@@ -1701,10 +1715,9 @@ fn object_matches(obj: &Object, conditions: &[SearchCondition]) -> bool {
             })
         }
         SearchCondition::StreamContains { text } => {
-            if let Object::Stream(stream) = obj {
+            if let Some(ref decoded) = decoded_content {
                 let text_lower = text.to_lowercase();
-                let (decoded, _) = decode_stream(stream);
-                let content_str = String::from_utf8_lossy(&decoded);
+                let content_str = String::from_utf8_lossy(decoded);
                 content_str.to_lowercase().contains(&text_lower)
             } else {
                 false
@@ -1723,9 +1736,8 @@ fn object_matches(obj: &Object, conditions: &[SearchCondition]) -> bool {
             });
             if key_or_value_match { return true; }
             // Also match decoded stream content
-            if let Object::Stream(stream) = obj {
-                let (decoded, _) = decode_stream(stream);
-                let content_str = String::from_utf8_lossy(&decoded);
+            if let Some(ref decoded) = decoded_content {
+                let content_str = String::from_utf8_lossy(decoded);
                 pattern.is_match(&content_str)
             } else {
                 false
@@ -3741,9 +3753,9 @@ fn check_font_requirements(doc: &Document, issues: &mut Vec<ValidationIssue>) {
         if !is_font { continue; }
 
         let subtype = dict.get(b"Subtype").ok()
-            .and_then(|v| v.as_name().ok().map(|n| String::from_utf8_lossy(n).into_owned()));
+            .and_then(|v| v.as_name().ok());
 
-        let needs_basefont = matches!(subtype.as_deref(), Some("Type1") | Some("TrueType") | Some("Type0") | Some("CIDFontType0") | Some("CIDFontType2"));
+        let needs_basefont = matches!(subtype, Some(b"Type1") | Some(b"TrueType") | Some(b"Type0") | Some(b"CIDFontType0") | Some(b"CIDFontType2"));
         if needs_basefont && dict.get(b"BaseFont").is_err() {
             issues.push(ValidationIssue {
                 level: ValidationLevel::Warn,
@@ -3836,7 +3848,7 @@ fn check_names_tree_structure(doc: &Document, issues: &mut Vec<ValidationIssue>)
             _ => continue,
         };
         let key_name = String::from_utf8_lossy(key);
-        validate_name_tree_node(doc, subtree, &key_name, &mut BTreeSet::new(), issues);
+        validate_name_tree_node(doc, subtree, &key_name, &mut BTreeSet::new(), issues, 0);
     }
 }
 
@@ -3846,7 +3858,16 @@ fn validate_name_tree_node(
     tree_name: &str,
     visited: &mut BTreeSet<ObjectId>,
     issues: &mut Vec<ValidationIssue>,
+    depth: usize,
 ) {
+    if depth > 50 {
+        issues.push(ValidationIssue {
+            level: ValidationLevel::Warn,
+            message: format!("Name tree '{}': exceeded maximum depth (50)", tree_name),
+        });
+        return;
+    }
+
     let has_names = dict.get(b"Names").is_ok();
     let has_kids = dict.get(b"Kids").is_ok();
 
@@ -3882,7 +3903,7 @@ fn validate_name_tree_node(
             }
             visited.insert(kid_id);
             if let Ok(Object::Dictionary(kid_dict)) = doc.get_object(kid_id) {
-                validate_name_tree_node(doc, kid_dict, tree_name, visited, issues);
+                validate_name_tree_node(doc, kid_dict, tree_name, visited, issues, depth + 1);
             }
         }
     }
@@ -4177,13 +4198,17 @@ struct OutlineItem {
 }
 
 fn collect_outline_items(doc: &Document, first_id: ObjectId) -> Vec<OutlineItem> {
+    let mut visited = BTreeSet::new();
+    collect_outline_items_inner(doc, first_id, &mut visited)
+}
+
+fn collect_outline_items_inner(doc: &Document, first_id: ObjectId, visited: &mut BTreeSet<ObjectId>) -> Vec<OutlineItem> {
     let mut items = Vec::new();
     let mut current_id = Some(first_id);
-    let mut seen = BTreeSet::new();
 
     while let Some(id) = current_id {
-        if seen.contains(&id) { break; }
-        seen.insert(id);
+        if visited.contains(&id) { break; }
+        visited.insert(id);
 
         let dict = match doc.get_object(id) {
             Ok(Object::Dictionary(d)) => d,
@@ -4201,7 +4226,7 @@ fn collect_outline_items(doc: &Document, first_id: ObjectId) -> Vec<OutlineItem>
 
         let children = dict.get(b"First").ok()
             .and_then(|v| v.as_reference().ok())
-            .map(|child_id| collect_outline_items(doc, child_id))
+            .map(|child_id| collect_outline_items_inner(doc, child_id, visited))
             .unwrap_or_default();
 
         items.push(OutlineItem { object_id: id, title, destination, children });
@@ -5065,15 +5090,15 @@ fn print_page_labels_json(writer: &mut impl Write, doc: &Document) {
 struct LinkInfo {
     page_num: u32,
     object_id: ObjectId,
-    link_type: String,
+    link_type: Cow<'static, str>,
     target: String,
     rect: String,
 }
 
-fn classify_link(doc: &Document, dict: &lopdf::Dictionary) -> (String, String) {
+fn classify_link(doc: &Document, dict: &lopdf::Dictionary) -> (Cow<'static, str>, String) {
     // Check /Dest first (direct destination)
     if let Ok(dest) = dict.get(b"Dest") {
-        return ("GoTo".to_string(), format_dest_value(doc, dest));
+        return (Cow::Borrowed("GoTo"), format_dest_value(doc, dest));
     }
     // Check /A (action dictionary)
     if let Ok(action_obj) = dict.get(b"A") {
@@ -5082,22 +5107,21 @@ fn classify_link(doc: &Document, dict: &lopdf::Dictionary) -> (String, String) {
             Object::Reference(id) => {
                 match doc.get_object(*id) {
                     Ok(Object::Dictionary(d)) => d,
-                    _ => return ("Unknown".to_string(), format!("{} {} R", id.0, id.1)),
+                    _ => return (Cow::Borrowed("Unknown"), format!("{} {} R", id.0, id.1)),
                 }
             }
-            _ => return ("Unknown".to_string(), "-".to_string()),
+            _ => return (Cow::Borrowed("Unknown"), "-".to_string()),
         };
         let action_type = action_dict.get(b"S").ok()
-            .and_then(|v| v.as_name().ok().map(|n| String::from_utf8_lossy(n).into_owned()))
-            .unwrap_or_else(|| "Unknown".to_string());
-        match action_type.as_str() {
-            "GoTo" => {
+            .and_then(|v| v.as_name().ok());
+        match action_type {
+            Some(b"GoTo") => {
                 let target = action_dict.get(b"D").ok()
                     .map(|d| format_dest_value(doc, d))
                     .unwrap_or_else(|| "?".to_string());
-                ("GoTo".to_string(), target)
+                (Cow::Borrowed("GoTo"), target)
             }
-            "GoToR" => {
+            Some(b"GoToR") => {
                 let file = action_dict.get(b"F").ok()
                     .map(|v| match v {
                         Object::String(bytes, _) => String::from_utf8_lossy(bytes).into_owned(),
@@ -5107,39 +5131,40 @@ fn classify_link(doc: &Document, dict: &lopdf::Dictionary) -> (String, String) {
                 let dest = action_dict.get(b"D").ok()
                     .map(|d| format_dest_value(doc, d))
                     .unwrap_or_default();
-                ("GoToR".to_string(), format!("{} {}", file, dest).trim().to_string())
+                (Cow::Borrowed("GoToR"), format!("{} {}", file, dest).trim().to_string())
             }
-            "URI" => {
+            Some(b"URI") => {
                 let uri = action_dict.get(b"URI").ok()
                     .map(|v| match v {
                         Object::String(bytes, _) => String::from_utf8_lossy(bytes).into_owned(),
                         _ => "?".to_string(),
                     })
                     .unwrap_or_else(|| "?".to_string());
-                ("URI".to_string(), uri)
+                (Cow::Borrowed("URI"), uri)
             }
-            "Named" => {
+            Some(b"Named") => {
                 let n = action_dict.get(b"N").ok()
                     .map(|v| match v {
                         Object::Name(n) => String::from_utf8_lossy(n).into_owned(),
                         _ => "?".to_string(),
                     })
                     .unwrap_or_else(|| "?".to_string());
-                ("Named".to_string(), n)
+                (Cow::Borrowed("Named"), n)
             }
-            "Launch" => {
+            Some(b"Launch") => {
                 let f = action_dict.get(b"F").ok()
                     .map(|v| match v {
                         Object::String(bytes, _) => String::from_utf8_lossy(bytes).into_owned(),
                         _ => "?".to_string(),
                     })
                     .unwrap_or_else(|| "?".to_string());
-                ("Launch".to_string(), f)
+                (Cow::Borrowed("Launch"), f)
             }
-            other => (other.to_string(), "-".to_string()),
+            Some(other) => (Cow::Owned(String::from_utf8_lossy(other).into_owned()), "-".to_string()),
+            None => (Cow::Borrowed("Unknown"), "-".to_string()),
         }
     } else {
-        ("Unknown".to_string(), "-".to_string())
+        (Cow::Borrowed("Unknown"), "-".to_string())
     }
 }
 
@@ -5268,30 +5293,29 @@ fn tree_node_label(obj: &Object) -> String {
     }
 }
 
-fn collect_refs_with_paths(obj: &Object) -> Vec<(String, ObjectId)> {
+fn collect_refs_from_dict(dict: &lopdf::Dictionary) -> Vec<(String, ObjectId)> {
     let mut refs = Vec::new();
+    for (key, val) in dict.iter() {
+        let key_str = format!("/{}", String::from_utf8_lossy(key));
+        collect_refs_recursive(val, &key_str, &mut refs);
+    }
+    refs
+}
+
+fn collect_refs_with_paths(obj: &Object) -> Vec<(String, ObjectId)> {
     match obj {
-        Object::Dictionary(dict) => {
-            for (key, val) in dict.iter() {
-                let key_str = format!("/{}", String::from_utf8_lossy(key));
-                collect_refs_recursive(val, &key_str, &mut refs);
-            }
-        }
-        Object::Stream(stream) => {
-            for (key, val) in stream.dict.iter() {
-                let key_str = format!("/{}", String::from_utf8_lossy(key));
-                collect_refs_recursive(val, &key_str, &mut refs);
-            }
-        }
+        Object::Dictionary(dict) => collect_refs_from_dict(dict),
+        Object::Stream(stream) => collect_refs_from_dict(&stream.dict),
         Object::Array(arr) => {
+            let mut refs = Vec::new();
             for (i, val) in arr.iter().enumerate() {
                 let key_str = format!("[{}]", i);
                 collect_refs_recursive(val, &key_str, &mut refs);
             }
+            refs
         }
-        _ => {}
+        _ => Vec::new(),
     }
-    refs
 }
 
 fn collect_refs_recursive(obj: &Object, path: &str, refs: &mut Vec<(String, ObjectId)>) {
@@ -5314,8 +5338,7 @@ fn print_tree(writer: &mut impl Write, doc: &Document, config: &DumpConfig) {
     writeln!(writer, "Trailer").unwrap();
 
     let mut visited = BTreeSet::new();
-    let trailer_obj = Object::Dictionary(doc.trailer.clone());
-    let trailer_refs = collect_refs_with_paths(&trailer_obj);
+    let trailer_refs = collect_refs_from_dict(&doc.trailer);
 
     for (path, ref_id) in trailer_refs {
         print_tree_node(writer, ref_id, doc, &mut visited, 1, &path, config);
@@ -5357,8 +5380,7 @@ fn print_tree_node(writer: &mut impl Write, obj_id: ObjectId, doc: &Document, vi
 
 fn print_tree_json(writer: &mut impl Write, doc: &Document, config: &DumpConfig) {
     let mut visited = BTreeSet::new();
-    let trailer_obj = Object::Dictionary(doc.trailer.clone());
-    let trailer_refs = collect_refs_with_paths(&trailer_obj);
+    let trailer_refs = collect_refs_from_dict(&doc.trailer);
 
     let children: Vec<Value> = trailer_refs.iter()
         .map(|(path, ref_id)| tree_node_to_json(*ref_id, doc, &mut visited, 1, path, config))
@@ -5434,8 +5456,7 @@ fn print_tree_dot(writer: &mut impl Write, doc: &Document, config: &DumpConfig) 
     writeln!(writer, "  \"trailer\" [label=\"Trailer\"];").unwrap();
 
     let mut visited = BTreeSet::new();
-    let trailer_obj = Object::Dictionary(doc.trailer.clone());
-    let trailer_refs = collect_refs_with_paths(&trailer_obj);
+    let trailer_refs = collect_refs_from_dict(&doc.trailer);
 
     for (path, ref_id) in trailer_refs {
         emit_dot_node(writer, ref_id, doc, &mut visited, 1, &path, "trailer", config);
