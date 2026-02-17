@@ -136,8 +136,19 @@ pub(crate) fn print_overview(writer: &mut impl Write, doc: &Document) {
     writeln!(writer, "Objects:     {}", doc.objects.len()).unwrap();
     writeln!(writer, "Pages:       {}", doc.get_pages().len()).unwrap();
 
-    // Encryption status
-    let encrypted = doc.trailer.get(b"Encrypt").is_ok();
+    // Encryption status (also check XRef streams for /Encrypt, since lopdf
+    // strips the trailer key after decryption but leaves the XRef stream intact)
+    let encrypted = doc.trailer.get(b"Encrypt").is_ok()
+        || doc.objects.values().any(|obj| {
+            if let Object::Stream(s) = obj {
+                s.dict.get(b"Type").ok()
+                    .and_then(|v| v.as_name().ok())
+                    .is_some_and(|n| n == b"XRef")
+                && s.dict.get(b"Encrypt").is_ok()
+            } else {
+                false
+            }
+        });
     writeln!(writer, "Encrypted:   {}", if encrypted { "yes" } else { "no" }).unwrap();
 
     // /Info fields
@@ -255,7 +266,17 @@ pub(crate) fn print_overview_json(writer: &mut impl Write, doc: &Document) {
         }
     }
 
-    let encrypted = doc.trailer.get(b"Encrypt").is_ok();
+    let encrypted = doc.trailer.get(b"Encrypt").is_ok()
+        || doc.objects.values().any(|obj| {
+            if let Object::Stream(s) = obj {
+                s.dict.get(b"Type").ok()
+                    .and_then(|v| v.as_name().ok())
+                    .is_some_and(|n| n == b"XRef")
+                && s.dict.get(b"Encrypt").is_ok()
+            } else {
+                false
+            }
+        });
 
     let bookmark_count = count_bookmarks(doc);
     let (_, _, form_fields) = collect_form_fields(doc);
@@ -534,6 +555,68 @@ mod tests {
         assert_eq!(objects.len(), 2);
         // Check that detail field is populated
         assert!(objects.iter().any(|o| o["type"] == "Font"));
+    }
+
+    fn build_minimal_doc_with_xref_encrypt() -> Document {
+        let mut doc = Document::new();
+        // Minimal valid structure
+        let mut pages = Dictionary::new();
+        pages.set(b"Type", Object::Name(b"Pages".to_vec()));
+        pages.set(b"Count", Object::Integer(0));
+        pages.set(b"Kids", Object::Array(vec![]));
+        doc.objects.insert((1, 0), Object::Dictionary(pages));
+
+        let mut catalog = Dictionary::new();
+        catalog.set(b"Type", Object::Name(b"Catalog".to_vec()));
+        catalog.set(b"Pages", Object::Reference((1, 0)));
+        doc.objects.insert((2, 0), Object::Dictionary(catalog));
+        doc.trailer.set(b"Root", Object::Reference((2, 0)));
+
+        // XRef stream with /Encrypt key (simulating post-decryption state)
+        let mut xref_dict = Dictionary::new();
+        xref_dict.set(b"Type", Object::Name(b"XRef".to_vec()));
+        xref_dict.set(b"Encrypt", Object::Reference((99, 0)));
+        let xref_stream = Stream::new(xref_dict, vec![]);
+        doc.objects.insert((3, 0), Object::Stream(xref_stream));
+
+        doc
+    }
+
+    #[test]
+    fn overview_shows_encrypted_for_xref_stream_with_encrypt() {
+        let doc = build_minimal_doc_with_xref_encrypt();
+        let out = output_of(|w| print_overview(w, &doc));
+        assert!(out.contains("Encrypted:   yes"),
+            "Should detect encryption via XRef stream, got: {}", out);
+    }
+
+    #[test]
+    fn overview_json_shows_encrypted_for_xref_stream_with_encrypt() {
+        let doc = build_minimal_doc_with_xref_encrypt();
+        let out = output_of(|w| print_overview_json(w, &doc));
+        let parsed: Value = serde_json::from_str(&out).expect("Should be valid JSON");
+        assert_eq!(parsed["encrypted"], true,
+            "JSON should show encrypted: true via XRef stream");
+    }
+
+    #[test]
+    fn overview_shows_not_encrypted_when_no_encrypt() {
+        let mut doc = Document::new();
+        let mut pages = Dictionary::new();
+        pages.set(b"Type", Object::Name(b"Pages".to_vec()));
+        pages.set(b"Count", Object::Integer(0));
+        pages.set(b"Kids", Object::Array(vec![]));
+        doc.objects.insert((1, 0), Object::Dictionary(pages));
+
+        let mut catalog = Dictionary::new();
+        catalog.set(b"Type", Object::Name(b"Catalog".to_vec()));
+        catalog.set(b"Pages", Object::Reference((1, 0)));
+        doc.objects.insert((2, 0), Object::Dictionary(catalog));
+        doc.trailer.set(b"Root", Object::Reference((2, 0)));
+
+        let out = output_of(|w| print_overview(w, &doc));
+        assert!(out.contains("Encrypted:   no"),
+            "Should show not encrypted, got: {}", out);
     }
 
 }

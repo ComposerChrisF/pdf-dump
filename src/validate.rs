@@ -27,9 +27,10 @@ pub(crate) struct ValidationReport {
 
 pub(crate) fn validate_pdf(doc: &Document) -> ValidationReport {
     let mut issues = Vec::new();
+    let xref_ids = collect_xref_stream_ids(doc);
 
-    check_broken_references(doc, &mut issues);
-    check_unreachable_objects(doc, &mut issues);
+    check_broken_references(doc, &xref_ids, &mut issues);
+    check_unreachable_objects(doc, &xref_ids, &mut issues);
     check_required_keys(doc, &mut issues);
     check_stream_lengths(doc, &mut issues);
     check_page_tree(doc, &mut issues);
@@ -46,8 +47,24 @@ pub(crate) fn validate_pdf(doc: &Document) -> ValidationReport {
     ValidationReport { issues, error_count, warn_count, info_count }
 }
 
-fn check_broken_references(doc: &Document, issues: &mut Vec<ValidationIssue>) {
+fn collect_xref_stream_ids(doc: &Document) -> BTreeSet<ObjectId> {
+    let mut ids = BTreeSet::new();
+    for (&id, object) in &doc.objects {
+        if let Object::Stream(s) = object {
+            let is_xref = s.dict.get(b"Type").ok()
+                .and_then(|v| v.as_name().ok())
+                .is_some_and(|n| n == b"XRef");
+            if is_xref {
+                ids.insert(id);
+            }
+        }
+    }
+    ids
+}
+
+fn check_broken_references(doc: &Document, xref_ids: &BTreeSet<ObjectId>, issues: &mut Vec<ValidationIssue>) {
     for (&(obj_num, generation), object) in &doc.objects {
+        if xref_ids.contains(&(obj_num, generation)) { continue; }
         let broken = collect_broken_refs(object, doc);
         for (ref_num, ref_generation) in broken {
             issues.push(ValidationIssue {
@@ -119,9 +136,10 @@ pub(crate) fn collect_reachable_ids(doc: &Document) -> BTreeSet<ObjectId> {
     visited
 }
 
-fn check_unreachable_objects(doc: &Document, issues: &mut Vec<ValidationIssue>) {
+fn check_unreachable_objects(doc: &Document, xref_ids: &BTreeSet<ObjectId>, issues: &mut Vec<ValidationIssue>) {
     let reachable = collect_reachable_ids(doc);
     for &(obj_num, generation) in doc.objects.keys() {
+        if xref_ids.contains(&(obj_num, generation)) { continue; }
         if !reachable.contains(&(obj_num, generation)) {
             issues.push(ValidationIssue {
                 level: ValidationLevel::Warn,
@@ -474,6 +492,7 @@ mod tests {
     use serde_json::{Value};
     use lopdf::Object;
     use lopdf::Document;
+    use std::collections::BTreeSet;
 
     #[test]
     fn validate_empty_doc_reports_missing_root() {
@@ -491,7 +510,7 @@ mod tests {
         doc.objects.insert((1, 0), Object::Dictionary(dict));
 
         let mut issues = Vec::new();
-        check_broken_references(&doc, &mut issues);
+        check_broken_references(&doc, &BTreeSet::new(), &mut issues);
         assert_eq!(issues.len(), 1);
         assert!(issues[0].message.contains("99"));
     }
@@ -505,7 +524,7 @@ mod tests {
         doc.objects.insert((1, 0), Object::Dictionary(dict));
 
         let mut issues = Vec::new();
-        check_broken_references(&doc, &mut issues);
+        check_broken_references(&doc, &BTreeSet::new(), &mut issues);
         assert!(issues.is_empty());
     }
 
@@ -540,7 +559,7 @@ mod tests {
         doc.trailer.set(b"Root", Object::Reference((1, 0)));
 
         let mut issues = Vec::new();
-        check_unreachable_objects(&doc, &mut issues);
+        check_unreachable_objects(&doc, &BTreeSet::new(), &mut issues);
         assert_eq!(issues.len(), 1);
         assert!(issues[0].message.contains("2 0"));
     }
@@ -941,7 +960,7 @@ mod tests {
         doc.trailer.set(b"Root", Object::Reference((1, 0)));
 
         let mut issues = Vec::new();
-        check_unreachable_objects(&doc, &mut issues);
+        check_unreachable_objects(&doc, &BTreeSet::new(), &mut issues);
         assert!(issues.is_empty());
     }
 
@@ -954,7 +973,7 @@ mod tests {
         // No trailer refs → all unreachable
 
         let mut issues = Vec::new();
-        check_unreachable_objects(&doc, &mut issues);
+        check_unreachable_objects(&doc, &BTreeSet::new(), &mut issues);
         assert_eq!(issues.len(), 3);
         assert!(issues.iter().all(|i| i.level == ValidationLevel::Warn));
     }
@@ -1196,6 +1215,72 @@ mod tests {
         let mut issues = Vec::new();
         check_duplicate_objects(&doc, &mut issues);
         assert!(issues.is_empty());
+    }
+
+    #[test]
+    fn xref_stream_with_removed_encrypt_not_reported() {
+        // Simulate what lopdf does after decrypting: removes the Encrypt object
+        // but leaves the XRef stream with a stale /Encrypt reference.
+        let mut doc = Document::new();
+
+        // Minimal valid doc structure
+        let mut pages = Dictionary::new();
+        pages.set(b"Type", Object::Name(b"Pages".to_vec()));
+        pages.set(b"Count", Object::Integer(0));
+        pages.set(b"Kids", Object::Array(vec![]));
+        doc.objects.insert((1, 0), Object::Dictionary(pages));
+
+        let mut catalog = Dictionary::new();
+        catalog.set(b"Type", Object::Name(b"Catalog".to_vec()));
+        catalog.set(b"Pages", Object::Reference((1, 0)));
+        doc.objects.insert((2, 0), Object::Dictionary(catalog));
+        doc.trailer.set(b"Root", Object::Reference((2, 0)));
+
+        // XRef stream with dangling /Encrypt reference (obj 201 was removed)
+        let mut xref_dict = Dictionary::new();
+        xref_dict.set(b"Type", Object::Name(b"XRef".to_vec()));
+        xref_dict.set(b"Size", Object::Integer(203));
+        xref_dict.set(b"Root", Object::Reference((2, 0)));
+        xref_dict.set(b"Encrypt", Object::Reference((201, 0)));
+        let xref_stream = Stream::new(xref_dict, vec![]);
+        doc.objects.insert((202, 0), Object::Stream(xref_stream));
+
+        let report = validate_pdf(&doc);
+
+        // Should NOT report broken ref from XRef stream
+        assert!(!report.issues.iter().any(|i|
+            i.level == ValidationLevel::Error && i.message.contains("201")),
+            "XRef stream's dangling /Encrypt ref should be skipped");
+
+        // Should NOT report XRef stream as unreachable
+        assert!(!report.issues.iter().any(|i|
+            i.level == ValidationLevel::Warn && i.message.contains("202")),
+            "XRef stream should not be flagged as unreachable");
+    }
+
+    #[test]
+    fn collect_xref_stream_ids_finds_xref() {
+        let mut doc = Document::new();
+        let mut xref_dict = Dictionary::new();
+        xref_dict.set(b"Type", Object::Name(b"XRef".to_vec()));
+        let xref_stream = Stream::new(xref_dict, vec![]);
+        doc.objects.insert((10, 0), Object::Stream(xref_stream));
+
+        let ids = collect_xref_stream_ids(&doc);
+        assert!(ids.contains(&(10, 0)));
+        assert_eq!(ids.len(), 1);
+    }
+
+    #[test]
+    fn collect_xref_stream_ids_empty_for_no_xref() {
+        let mut doc = Document::new();
+        doc.objects.insert((1, 0), Object::Integer(42));
+        let mut dict = Dictionary::new();
+        dict.set(b"Type", Object::Name(b"Page".to_vec()));
+        doc.objects.insert((2, 0), Object::Dictionary(dict));
+
+        let ids = collect_xref_stream_ids(&doc);
+        assert!(ids.is_empty());
     }
 
 }
