@@ -2,7 +2,7 @@ use lopdf::{Document, Object};
 use serde_json::{json, Value};
 use std::io::Write;
 
-use crate::helpers::{resolve_dict, obj_to_string_lossy, name_to_string, walk_number_tree};
+use crate::helpers::{resolve_dict, obj_to_string_lossy, name_to_string, walk_number_tree, get_catalog};
 
 pub(crate) struct PageLabelEntry {
     pub physical_page: u32,
@@ -58,13 +58,9 @@ fn format_page_label(style: &str, prefix: &str, value: i64) -> String {
 pub(crate) fn collect_page_labels(doc: &Document) -> Vec<PageLabelEntry> {
     let mut entries = Vec::new();
 
-    let root_ref = match doc.trailer.get(b"Root").ok().and_then(|o| o.as_reference().ok()) {
-        Some(id) => id,
+    let catalog = match get_catalog(doc) {
+        Some(c) => c,
         None => return entries,
-    };
-    let catalog = match doc.get_object(root_ref) {
-        Ok(Object::Dictionary(d)) => d,
-        _ => return entries,
     };
 
     let page_labels_dict = match catalog.get(b"PageLabels").ok().and_then(|o| resolve_dict(doc, o)) {
@@ -152,8 +148,9 @@ pub(crate) fn labels_json_value(doc: &Document) -> Value {
 
 #[cfg(test)]
 pub(crate) fn print_page_labels_json(writer: &mut impl Write, doc: &Document) {
+    use crate::helpers::json_pretty;
     let output = labels_json_value(doc);
-    writeln!(writer, "{}", serde_json::to_string_pretty(&output).unwrap()).unwrap();
+    writeln!(writer, "{}", json_pretty(&output)).unwrap();
 }
 
 

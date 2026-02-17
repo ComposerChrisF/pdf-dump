@@ -88,8 +88,9 @@ pub(crate) fn images_json_value(doc: &Document) -> Value {
 
 #[cfg(test)]
 pub(crate) fn print_images_json(writer: &mut impl Write, doc: &Document) {
+    use crate::helpers::json_pretty;
     let output = images_json_value(doc);
-    writeln!(writer, "{}", serde_json::to_string_pretty(&output).unwrap()).unwrap();
+    writeln!(writer, "{}", json_pretty(&output)).unwrap();
 }
 
 

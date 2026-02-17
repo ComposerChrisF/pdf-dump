@@ -4,10 +4,10 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::io::Write;
 
 use crate::types::DumpConfig;
-use crate::helpers::{resolve_dict, obj_to_string_lossy};
+use crate::helpers::{resolve_dict, obj_to_string_lossy, get_catalog};
 
 pub(crate) struct StructElemInfo {
-    pub object_id: ObjectId,
+    pub object_id: Option<ObjectId>,
     pub role: String,
     pub page: Option<u32>,
     pub mcid: Option<i64>,
@@ -17,14 +17,9 @@ pub(crate) struct StructElemInfo {
 }
 
 pub(crate) fn collect_structure_tree(doc: &Document) -> (bool, Vec<StructElemInfo>) {
-    let catalog_id = match doc.trailer.get(b"Root").ok()
-        .and_then(|o| o.as_reference().ok()) {
-        Some(id) => id,
+    let catalog = match get_catalog(doc) {
+        Some(c) => c,
         None => return (false, Vec::new()),
-    };
-    let catalog = match doc.get_object(catalog_id).ok() {
-        Some(Object::Dictionary(d)) => d,
-        _ => return (false, Vec::new()),
     };
 
     // Check MarkInfo
@@ -89,7 +84,7 @@ fn collect_struct_children(doc: &Document, dict: &lopdf::Dictionary, page_lookup
                     let children = collect_struct_children(doc, child_dict, page_lookup, visited);
 
                     result.push(StructElemInfo {
-                        object_id: *id,
+                        object_id: Some(*id),
                         role,
                         page,
                         mcid,
@@ -109,7 +104,7 @@ fn collect_struct_children(doc: &Document, dict: &lopdf::Dictionary, page_lookup
                     };
                     let mcid = extract_mcid(d);
                     result.push(StructElemInfo {
-                        object_id: (0, 0),
+                        object_id: None,
                         role,
                         page: None,
                         mcid,
@@ -174,8 +169,8 @@ fn print_struct_elem(writer: &mut impl Write, elem: &StructElemInfo, depth: usiz
     }
 
     let indent = "  ".repeat(depth);
-    let mut line = if elem.object_id != (0, 0) {
-        format!("{}[{}] /{}", indent, elem.object_id.0, elem.role)
+    let mut line = if let Some(oid) = elem.object_id {
+        format!("{}[{}] /{}", indent, oid.0, elem.role)
     } else {
         format!("{}/{}", indent, elem.role)
     };
@@ -219,17 +214,18 @@ pub(crate) fn structure_json_value(doc: &Document, config: &DumpConfig) -> Value
 
 #[cfg(test)]
 pub(crate) fn print_structure_json(writer: &mut impl Write, doc: &Document, config: &DumpConfig) {
+    use crate::helpers::json_pretty;
     let output = structure_json_value(doc, config);
-    writeln!(writer, "{}", serde_json::to_string_pretty(&output).unwrap()).unwrap();
+    writeln!(writer, "{}", json_pretty(&output)).unwrap();
 }
 
 fn struct_elem_to_json(elem: &StructElemInfo, depth: usize, config: &DumpConfig) -> Value {
     let mut obj = json!({
         "role": elem.role,
     });
-    if elem.object_id != (0, 0) {
-        obj["object_number"] = json!(elem.object_id.0);
-        obj["generation"] = json!(elem.object_id.1);
+    if let Some(oid) = elem.object_id {
+        obj["object_number"] = json!(oid.0);
+        obj["generation"] = json!(oid.1);
     }
     if let Some(page) = elem.page {
         obj["page"] = json!(page);
@@ -245,7 +241,7 @@ fn struct_elem_to_json(elem: &StructElemInfo, depth: usize, config: &DumpConfig)
     }
 
     if let Some(max_depth) = config.depth
-        && depth >= max_depth {
+        && depth > max_depth {
         if !elem.children.is_empty() {
             obj["children_count"] = json!(count_struct_elems(&elem.children));
         }
@@ -436,9 +432,11 @@ mod tests {
         let out = output_of(|w| print_structure_json(w, &doc, &config));
         let parsed: Value = serde_json::from_str(&out).unwrap();
         let root = &parsed["structure"][0];
-        // At depth 0, children should be represented as children_count
-        assert!(root.get("children_count").is_some());
-        assert!(root.get("children").is_none());
+        // depth=0 shows root element fully; its children (depth 1) are truncated
+        assert!(root.get("children").is_some(), "root should have children array at depth 0");
+        let child = &root["children"][0];
+        assert!(child.get("children_count").is_some(), "child at depth 1 should be truncated");
+        assert!(child.get("children").is_none(), "child at depth 1 should not have children array");
     }
 
     #[test]

@@ -1,4 +1,5 @@
 use lopdf::{Document, Object, ObjectId};
+use serde_json::Value;
 use std::collections::BTreeSet;
 
 use crate::types::PageSpec;
@@ -169,6 +170,18 @@ fn walk_name_tree_inner(
             }
         }
     }
+}
+
+pub(crate) fn get_catalog(doc: &Document) -> Option<&lopdf::Dictionary> {
+    let root_ref = doc.trailer.get(b"Root").ok()?.as_reference().ok()?;
+    match doc.get_object(root_ref).ok()? {
+        Object::Dictionary(d) => Some(d),
+        _ => None,
+    }
+}
+
+pub(crate) fn json_pretty(value: &Value) -> String {
+    serde_json::to_string_pretty(value).expect("JSON serialization of Value")
 }
 
 pub(crate) fn walk_number_tree(doc: &Document, dict: &lopdf::Dictionary) -> Vec<(i64, Object)> {

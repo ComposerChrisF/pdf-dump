@@ -50,6 +50,7 @@ pub(crate) fn extract_text_from_page_with_warnings(doc: &Document, page_id: Obje
             }
             Ok(_) => {
                 warnings.push(format!("Content stream {} {} is not a stream object", cid.0, cid.1));
+                decode_failed = true;
             }
             Err(_) => {
                 warnings.push(format!("Content stream {} {} not found", cid.0, cid.1));
@@ -277,8 +278,9 @@ pub(crate) fn text_json_value(doc: &Document, page_filter: Option<&PageSpec>) ->
 
 #[cfg(test)]
 pub(crate) fn print_text_json(writer: &mut impl Write, doc: &Document, page_filter: Option<&PageSpec>) {
+    use crate::helpers::json_pretty;
     let output = text_json_value(doc, page_filter);
-    writeln!(writer, "{}", serde_json::to_string_pretty(&output).unwrap()).unwrap();
+    writeln!(writer, "{}", json_pretty(&output)).unwrap();
 }
 
 

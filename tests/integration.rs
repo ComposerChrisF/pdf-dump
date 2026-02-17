@@ -540,7 +540,7 @@ fn json_page_mode() {
     assert!(output.status.success());
     let stdout = String::from_utf8_lossy(&output.stdout);
     let parsed: serde_json::Value = serde_json::from_str(&stdout).expect("Should be valid JSON");
-    assert_eq!(parsed["page_number"], 1);
+    assert_eq!(parsed["pages"][0]["page_number"], 1);
 }
 
 // ── Search mode integration tests ────────────────────────────────────

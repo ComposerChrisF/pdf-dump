@@ -3,6 +3,8 @@ use serde_json::{json, Value};
 use std::collections::BTreeSet;
 use std::io::Write;
 
+use crate::helpers::get_catalog;
+
 
 pub(crate) struct OutlineItem {
     pub object_id: ObjectId,
@@ -125,62 +127,25 @@ fn count_outline_items(items: &[OutlineItem]) -> usize {
     items.iter().map(|item| 1 + count_outline_items(&item.children)).sum()
 }
 
+fn get_first_outline_id(doc: &Document) -> Option<ObjectId> {
+    let catalog = get_catalog(doc)?;
+    let outlines_ref = catalog.get(b"Outlines").ok()?.as_reference().ok()?;
+    let outlines_dict = match doc.get_object(outlines_ref).ok()? {
+        Object::Dictionary(d) => d,
+        _ => return None,
+    };
+    outlines_dict.get(b"First").ok()?.as_reference().ok()
+}
+
 pub(crate) fn count_bookmarks(doc: &Document) -> usize {
-    let root_ref = match doc.trailer.get(b"Root").ok().and_then(|o| o.as_reference().ok()) {
-        Some(id) => id,
-        None => return 0,
-    };
-    let catalog = match doc.get_object(root_ref) {
-        Ok(Object::Dictionary(d)) => d,
-        _ => return 0,
-    };
-    let first_id = catalog.get(b"Outlines").ok()
-        .and_then(|v| v.as_reference().ok())
-        .and_then(|id| doc.get_object(id).ok())
-        .and_then(|obj| if let Object::Dictionary(d) = obj { Some(d) } else { None })
-        .and_then(|d| d.get(b"First").ok())
-        .and_then(|v| v.as_reference().ok());
-    match first_id {
+    match get_first_outline_id(doc) {
         Some(id) => count_outline_items(&collect_outline_items(doc, id)),
         None => 0,
     }
 }
 
 pub(crate) fn print_bookmarks(writer: &mut impl Write, doc: &Document) {
-    let root_ref = match doc.trailer.get(b"Root").ok().and_then(|o| o.as_reference().ok()) {
-        Some(id) => id,
-        None => {
-            wln!(writer, "No bookmarks (no /Root in trailer).");
-            return;
-        }
-    };
-    let catalog = match doc.get_object(root_ref) {
-        Ok(Object::Dictionary(d)) => d,
-        _ => {
-            wln!(writer, "No bookmarks (could not read catalog).");
-            return;
-        }
-    };
-    let outlines_ref = match catalog.get(b"Outlines").ok().and_then(|v| {
-        match v {
-            Object::Reference(id) => Some(*id),
-            _ => None,
-        }
-    }) {
-        Some(id) => id,
-        None => {
-            wln!(writer, "No bookmarks.");
-            return;
-        }
-    };
-    let outlines_dict = match doc.get_object(outlines_ref) {
-        Ok(Object::Dictionary(d)) => d,
-        _ => {
-            wln!(writer, "No bookmarks (could not read /Outlines).");
-            return;
-        }
-    };
-    let first_id = match outlines_dict.get(b"First").ok().and_then(|v| v.as_reference().ok()) {
+    let first_id = match get_first_outline_id(doc) {
         Some(id) => id,
         None => {
             wln!(writer, "No bookmarks.");
@@ -205,22 +170,7 @@ fn print_outline_tree(writer: &mut impl Write, items: &[OutlineItem], depth: usi
 }
 
 pub(crate) fn bookmarks_json_value(doc: &Document) -> Value {
-    let root_ref = match doc.trailer.get(b"Root").ok().and_then(|o| o.as_reference().ok()) {
-        Some(id) => id,
-        None => return json!({"bookmark_count": 0, "bookmarks": []}),
-    };
-    let catalog = match doc.get_object(root_ref) {
-        Ok(Object::Dictionary(d)) => d,
-        _ => return json!({"bookmark_count": 0, "bookmarks": []}),
-    };
-    let first_id = catalog.get(b"Outlines").ok()
-        .and_then(|v| v.as_reference().ok())
-        .and_then(|id| doc.get_object(id).ok())
-        .and_then(|obj| if let Object::Dictionary(d) = obj { Some(d) } else { None })
-        .and_then(|d| d.get(b"First").ok())
-        .and_then(|v| v.as_reference().ok());
-
-    let items = match first_id {
+    let items = match get_first_outline_id(doc) {
         Some(id) => collect_outline_items(doc, id),
         None => vec![],
     };
@@ -248,8 +198,9 @@ pub(crate) fn bookmarks_json_value(doc: &Document) -> Value {
 
 #[cfg(test)]
 pub(crate) fn print_bookmarks_json(writer: &mut impl Write, doc: &Document) {
+    use crate::helpers::json_pretty;
     let output = bookmarks_json_value(doc);
-    writeln!(writer, "{}", serde_json::to_string_pretty(&output).unwrap()).unwrap();
+    writeln!(writer, "{}", json_pretty(&output)).unwrap();
 }
 
 

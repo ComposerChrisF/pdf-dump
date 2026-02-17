@@ -3,7 +3,7 @@ use serde_json::{json, Value};
 use std::collections::{BTreeMap, BTreeSet};
 use std::io::Write;
 
-use crate::helpers::{resolve_dict, resolve_array, name_to_string};
+use crate::helpers::{resolve_dict, resolve_array, name_to_string, obj_to_string_lossy, get_catalog};
 
 pub(crate) struct OcgInfo {
     pub object_id: ObjectId,
@@ -13,14 +13,9 @@ pub(crate) struct OcgInfo {
 }
 
 pub(crate) fn collect_layers(doc: &Document) -> Vec<OcgInfo> {
-    let catalog_id = match doc.trailer.get(b"Root").ok()
-        .and_then(|o| o.as_reference().ok()) {
-        Some(id) => id,
+    let catalog = match get_catalog(doc) {
+        Some(c) => c,
         None => return Vec::new(),
-    };
-    let catalog = match doc.get_object(catalog_id).ok() {
-        Some(Object::Dictionary(d)) => d,
-        _ => return Vec::new(),
     };
 
     let oc_props = match catalog.get(b"OCProperties").ok().and_then(|o| resolve_dict(doc, o)) {
@@ -77,7 +72,7 @@ pub(crate) fn collect_layers(doc: &Document) -> Vec<OcgInfo> {
         };
 
         let name = ocg_dict.get(b"Name").ok()
-            .and_then(|v| if let Object::String(bytes, _) = v { Some(String::from_utf8_lossy(bytes).into_owned()) } else { None })
+            .and_then(obj_to_string_lossy)
             .unwrap_or_else(|| "(unnamed)".to_string());
 
         let default_state = if off_set.contains(&ocg_id) {
@@ -181,8 +176,9 @@ pub(crate) fn layers_json_value(doc: &Document) -> Value {
 
 #[cfg(test)]
 pub(crate) fn print_layers_json(writer: &mut impl Write, doc: &Document) {
+    use crate::helpers::json_pretty;
     let output = layers_json_value(doc);
-    writeln!(writer, "{}", serde_json::to_string_pretty(&output).unwrap()).unwrap();
+    writeln!(writer, "{}", json_pretty(&output)).unwrap();
 }
 
 

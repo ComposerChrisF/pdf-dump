@@ -111,27 +111,17 @@ pub(crate) fn collect_field_recursive(
 
     // Check for Kids
     if let Ok(Object::Array(kids)) = dict.get(b"Kids") {
-        // Check if kids are fields (have T) or widgets (no T)
-        let mut has_field_kids = false;
-        for kid in kids {
-            if let Ok(kid_id) = kid.as_reference()
-                && let Ok(kid_obj) = doc.get_object(kid_id) {
-                let kid_dict = match kid_obj {
-                    Object::Dictionary(d) => d,
-                    Object::Stream(s) => &s.dict,
-                    _ => continue,
-                };
-                if kid_dict.get(b"T").is_ok() {
-                    has_field_kids = true;
-                    break;
-                }
-            }
-        }
+        // Collect kid IDs in one pass, check if any are fields (have /T)
+        let kid_ids: Vec<ObjectId> = kids.iter().filter_map(|k| k.as_reference().ok()).collect();
+        let has_field_kids = kid_ids.iter().any(|kid_id| {
+            doc.get_object(*kid_id).ok().is_some_and(|obj| {
+                let d = match obj { Object::Dictionary(d) => d, Object::Stream(s) => &s.dict, _ => return false };
+                d.get(b"T").is_ok()
+            })
+        });
         if has_field_kids {
-            for kid in kids {
-                if let Ok(kid_id) = kid.as_reference() {
-                    collect_field_recursive(doc, kid_id, &qualified_name, widget_to_page, fields);
-                }
+            for kid_id in kid_ids {
+                collect_field_recursive(doc, kid_id, &qualified_name, widget_to_page, fields);
             }
             return;
         }
@@ -234,8 +224,9 @@ pub(crate) fn forms_json_value(doc: &Document) -> Value {
 
 #[cfg(test)]
 pub(crate) fn print_forms_json(writer: &mut impl Write, doc: &Document) {
+    use crate::helpers::json_pretty;
     let output = forms_json_value(doc);
-    writeln!(writer, "{}", serde_json::to_string_pretty(&output).unwrap()).unwrap();
+    writeln!(writer, "{}", json_pretty(&output)).unwrap();
 }
 
 

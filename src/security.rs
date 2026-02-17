@@ -4,6 +4,7 @@ use std::collections::BTreeMap;
 use std::io::Write;
 use std::path::Path;
 
+
 pub(crate) struct SecurityInfo {
     pub encrypted: bool,
     pub algorithm: String,
@@ -262,8 +263,9 @@ pub(crate) fn security_json_value(doc: &Document, file_path: &Path) -> Value {
 
 #[cfg(test)]
 pub(crate) fn print_security_json(writer: &mut impl Write, doc: &Document, file_path: &Path) {
+    use crate::helpers::json_pretty;
     let output = security_json_value(doc, file_path);
-    writeln!(writer, "{}", serde_json::to_string_pretty(&output).unwrap()).unwrap();
+    writeln!(writer, "{}", json_pretty(&output)).unwrap();
 }
 
 

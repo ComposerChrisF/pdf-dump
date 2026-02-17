@@ -4,7 +4,7 @@ use std::io::Write;
 
 use std::collections::BTreeMap;
 
-use crate::helpers::object_type_label;
+use crate::helpers::{object_type_label, json_pretty};
 use crate::stream::{get_filter_names, decode_stream};
 use crate::validate::validate_pdf;
 use crate::bookmarks::count_bookmarks;
@@ -14,7 +14,7 @@ use crate::embedded::collect_embedded_files;
 use crate::page_labels::collect_page_labels;
 use crate::structure::collect_structure_tree;
 
-pub(crate) fn print_summary(writer: &mut impl Write, doc: &Document) {
+pub(crate) fn print_list(writer: &mut impl Write, doc: &Document) {
     wln!(writer, "PDF {}  |  {} objects\n", doc.version, doc.objects.len());
     wln!(writer, "  {:>4}  {:>3}  {:<13} {:<14} Detail", "Obj#", "Gen", "Kind", "/Type");
 
@@ -92,9 +92,9 @@ pub(crate) fn list_json_value(doc: &Document) -> Value {
 }
 
 #[cfg(test)]
-pub(crate) fn print_summary_json(writer: &mut impl Write, doc: &Document) {
+pub(crate) fn print_list_json(writer: &mut impl Write, doc: &Document) {
     let output = list_json_value(doc);
-    writeln!(writer, "{}", serde_json::to_string_pretty(&output).unwrap()).unwrap();
+    writeln!(writer, "{}", json_pretty(&output)).unwrap();
 }
 
 pub(crate) fn metadata_info(doc: &Document) -> (serde_json::Map<String, Value>, serde_json::Map<String, Value>) {
@@ -398,7 +398,7 @@ pub(crate) fn print_overview_json(writer: &mut impl Write, doc: &Document) {
             "tagged_structure": has_tags,
         },
     });
-    wln!(writer, "{}", serde_json::to_string_pretty(&output).unwrap());
+    wln!(writer, "{}", json_pretty(&output));
 }
 
 
@@ -412,11 +412,11 @@ mod tests {
     use lopdf::Object;
 
     #[test]
-    fn print_summary_shows_version_and_count() {
+    fn print_list_shows_version_and_count() {
         let mut doc = Document::new();
         doc.objects.insert((1, 0), Object::Integer(42));
         let out = output_of(|w| {
-            print_summary(w, &doc);
+            print_list(w, &doc);
         });
         assert!(out.contains("PDF 1.4"));
         assert!(out.contains("1 objects"));
@@ -424,14 +424,14 @@ mod tests {
     }
 
     #[test]
-    fn print_summary_stream_shows_bytes_and_filter() {
+    fn print_list_stream_shows_bytes_and_filter() {
         let mut doc = Document::new();
         let mut dict = Dictionary::new();
         dict.set("Filter", Object::Name(b"FlateDecode".to_vec()));
         let stream = Stream::new(dict, vec![0u8; 100]);
         doc.objects.insert((1, 0), Object::Stream(stream));
         let out = output_of(|w| {
-            print_summary(w, &doc);
+            print_list(w, &doc);
         });
         assert!(out.contains("100 bytes"));
         assert!(out.contains("FlateDecode"));
@@ -439,26 +439,26 @@ mod tests {
     }
 
     #[test]
-    fn print_summary_dict_shows_type_label() {
+    fn print_list_dict_shows_type_label() {
         let mut doc = Document::new();
         let mut dict = Dictionary::new();
         dict.set("Type", Object::Name(b"Page".to_vec()));
         doc.objects.insert((1, 0), Object::Dictionary(dict));
         let out = output_of(|w| {
-            print_summary(w, &doc);
+            print_list(w, &doc);
         });
         assert!(out.contains("Page"));
         assert!(out.contains("Dictionary"));
     }
 
     #[test]
-    fn print_summary_multiple_objects_sorted() {
+    fn print_list_multiple_objects_sorted() {
         let mut doc = Document::new();
         doc.objects.insert((3, 0), Object::Integer(30));
         doc.objects.insert((1, 0), Object::Integer(10));
         doc.objects.insert((2, 0), Object::Integer(20));
         let out = output_of(|w| {
-            print_summary(w, &doc);
+            print_list(w, &doc);
         });
         assert!(out.contains("3 objects"));
         // All three should appear
@@ -469,10 +469,10 @@ mod tests {
     }
 
     #[test]
-    fn print_summary_json_produces_valid_json() {
+    fn print_list_json_produces_valid_json() {
         let mut doc = Document::new();
         doc.objects.insert((1, 0), Object::Integer(42));
-        let out = output_of(|w| print_summary_json(w, &doc));
+        let out = output_of(|w| print_list_json(w, &doc));
         let parsed: Value = serde_json::from_str(&out).expect("Should be valid JSON");
         assert_eq!(parsed["object_count"], 1);
         assert!(parsed["objects"].is_array());
@@ -624,7 +624,7 @@ mod tests {
     }
 
     #[test]
-    fn print_summary_json_includes_detail() {
+    fn print_list_json_includes_detail() {
         let mut doc = Document::new();
         let mut dict = Dictionary::new();
         dict.set("Type", Object::Name(b"Font".to_vec()));
@@ -636,7 +636,7 @@ mod tests {
         );
         doc.objects.insert((2, 0), Object::Stream(stream));
 
-        let out = output_of(|w| print_summary_json(w, &doc));
+        let out = output_of(|w| print_list_json(w, &doc));
         let parsed: Value = serde_json::from_str(&out).expect("Should be valid JSON");
         let objects = parsed["objects"].as_array().unwrap();
         assert_eq!(objects.len(), 2);

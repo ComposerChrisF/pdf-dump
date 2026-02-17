@@ -6,7 +6,7 @@ use std::io::Write;
 
 use crate::types::DumpConfig;
 use crate::stream::decode_stream;
-use crate::helpers::object_type_label;
+use crate::helpers::{object_type_label, json_pretty};
 use crate::object::{object_to_json, print_object, object_header_label};
 use crate::summary::summary_detail;
 
@@ -159,7 +159,7 @@ pub(crate) fn search_objects(writer: &mut impl Write, doc: &Document, conditions
                 let visited = BTreeSet::new();
                 let mut child_refs = BTreeSet::new();
                 print_object(writer, object, doc, &visited, 1, config, false, &mut child_refs);
-                wln!(writer, "\n");
+                wln!(writer);
             }
         }
     }
@@ -182,7 +182,7 @@ pub(crate) fn search_objects_json(writer: &mut impl Write, doc: &Document, expr:
         "match_count": matches.len(),
         "matches": matches,
     });
-    wln!(writer, "{}", serde_json::to_string_pretty(&output).unwrap());
+    wln!(writer, "{}", json_pretty(&output));
 }
 
 

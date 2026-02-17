@@ -2,7 +2,7 @@ use lopdf::{Document, Object, ObjectId};
 use serde_json::{json, Value};
 use std::io::Write;
 
-use crate::helpers::{resolve_dict, obj_to_string_lossy, name_to_string, walk_name_tree};
+use crate::helpers::{resolve_dict, obj_to_string_lossy, name_to_string, walk_name_tree, get_catalog};
 
 pub(crate) struct EmbeddedFileInfo {
     pub name: String,
@@ -16,13 +16,9 @@ pub(crate) struct EmbeddedFileInfo {
 pub(crate) fn collect_embedded_files(doc: &Document) -> Vec<EmbeddedFileInfo> {
     let mut files = Vec::new();
 
-    let root_ref = match doc.trailer.get(b"Root").ok().and_then(|o| o.as_reference().ok()) {
-        Some(id) => id,
+    let catalog = match get_catalog(doc) {
+        Some(c) => c,
         None => return files,
-    };
-    let catalog = match doc.get_object(root_ref) {
-        Ok(Object::Dictionary(d)) => d,
-        _ => return files,
     };
     let names_dict = match catalog.get(b"Names").ok().and_then(|o| resolve_dict(doc, o)) {
         Some(d) => d,
@@ -115,6 +111,7 @@ pub(crate) fn embedded_json_value(doc: &Document) -> Value {
             "size": f.size,
             "object_number": f.object_number,
             "filespec_object": f.filespec_object.0,
+            "filespec_generation": f.filespec_object.1,
         })
     }).collect();
     json!({
@@ -125,8 +122,9 @@ pub(crate) fn embedded_json_value(doc: &Document) -> Value {
 
 #[cfg(test)]
 pub(crate) fn print_embedded_files_json(writer: &mut impl Write, doc: &Document) {
+    use crate::helpers::json_pretty;
     let output = embedded_json_value(doc);
-    writeln!(writer, "{}", serde_json::to_string_pretty(&output).unwrap()).unwrap();
+    writeln!(writer, "{}", json_pretty(&output)).unwrap();
 }
 
 

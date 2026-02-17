@@ -35,8 +35,8 @@ fn find_matches(doc: &Document, pattern: &str, page_filter: Option<&PageSpec>) -
         while let Some(pos) = lower_text[search_start..].find(&lower_pattern) {
             let abs_pos = search_start + pos;
             // Extract context: 40 chars each side
-            let ctx_start = abs_pos.saturating_sub(40);
-            let ctx_end = (abs_pos + pattern.len() + 40).min(text.len());
+            let ctx_start = text.floor_char_boundary(abs_pos.saturating_sub(40));
+            let ctx_end = text.ceil_char_boundary((abs_pos + pattern.len() + 40).min(text.len()));
             let snippet = text[ctx_start..ctx_end].replace('\n', " ");
             let mut formatted = String::new();
             if ctx_start > 0 { formatted.push_str("..."); }
@@ -106,8 +106,9 @@ pub(crate) fn find_text_json_value(doc: &Document, pattern: &str, page_filter: O
 
 #[cfg(test)]
 pub(crate) fn print_find_text_json(writer: &mut impl Write, doc: &Document, pattern: &str, page_filter: Option<&PageSpec>) {
+    use crate::helpers::json_pretty;
     let output = find_text_json_value(doc, pattern, page_filter);
-    writeln!(writer, "{}", serde_json::to_string_pretty(&output).unwrap()).unwrap();
+    writeln!(writer, "{}", json_pretty(&output)).unwrap();
 }
 
 #[cfg(test)]

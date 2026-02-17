@@ -4,14 +4,13 @@ use serde_json::{json, Value};
 use crate::helpers::object_type_label;
 use crate::object::deref_summary;
 
-#[cfg(test)]
-fn collect_references_in_object(obj: &Object, target_id: ObjectId, path: &str) -> Vec<String> {
+pub(crate) fn collect_references_in_object(obj: &Object, target_id: ObjectId, path: &str) -> Vec<String> {
     let mut found = Vec::new();
     collect_references_in_object_into(obj, target_id, path, &mut found);
     found
 }
 
-fn collect_references_in_object_into(obj: &Object, target_id: ObjectId, path: &str, found: &mut Vec<String>) {
+pub(crate) fn collect_references_in_object_into(obj: &Object, target_id: ObjectId, path: &str, found: &mut Vec<String>) {
     match obj {
         Object::Reference(id) if *id == target_id => {
             found.push(path.to_string());
@@ -58,7 +57,7 @@ pub(crate) fn collect_reverse_refs(doc: &Document, target_id: ObjectId) -> Vec<R
                 generation,
                 kind: object.enum_variant(),
                 type_label: object_type_label(object),
-                paths: paths.clone(),
+                paths: std::mem::take(&mut paths),
             });
         }
     }

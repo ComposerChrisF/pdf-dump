@@ -181,8 +181,9 @@ pub(crate) fn annotations_json_value(doc: &Document, page_filter: Option<&PageSp
 
 #[cfg(test)]
 pub(crate) fn print_annotations_json(writer: &mut impl Write, doc: &Document, page_filter: Option<&PageSpec>) {
+    use crate::helpers::json_pretty;
     let output = annotations_json_value(doc, page_filter);
-    writeln!(writer, "{}", serde_json::to_string_pretty(&output).unwrap()).unwrap();
+    writeln!(writer, "{}", json_pretty(&output)).unwrap();
 }
 
 

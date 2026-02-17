@@ -60,6 +60,7 @@ use lopdf::{Document, Object};
 use serde_json::Value;
 use std::io::{self, Write};
 
+use helpers::json_pretty;
 use types::{Args, DocMode, DumpConfig, PageSpec, ResolvedMode, StandaloneMode};
 
 pub fn run() {
@@ -115,7 +116,7 @@ pub fn run() {
             dispatch_default(&mut out, &doc, &config, page_spec.as_ref());
         }
         ResolvedMode::Standalone(mode) => {
-            dispatch_standalone(&mut out, &doc, &config, page_spec.as_ref(), &args, mode);
+            dispatch_standalone(&mut out, &doc, &config, mode);
         }
         ResolvedMode::Combined(modes) => {
             dispatch_combined(&mut out, &doc, &config, page_spec.as_ref(), &args, &modes);
@@ -146,8 +147,6 @@ fn dispatch_standalone(
     out: &mut impl Write,
     doc: &Document,
     config: &DumpConfig,
-    _page_spec: Option<&PageSpec>,
-    _args: &Args,
     mode: StandaloneMode,
 ) {
     match mode {
@@ -184,7 +183,7 @@ fn dispatch_standalone(
         }
         StandaloneMode::Inspect { obj_num } => {
             if config.json {
-                inspect::print_info_json(out, doc, obj_num);
+                inspect::print_info_json(out, doc, obj_num, config);
             } else {
                 inspect::print_info(out, doc, obj_num);
             }
@@ -225,11 +224,11 @@ fn dispatch_combined(
                 map.insert(mode.json_key().to_string(), value);
             }
             let output = Value::Object(map);
-            wln!(out, "{}", serde_json::to_string_pretty(&output).unwrap());
+            wln!(out, "{}", json_pretty(&output));
         } else {
             // Single mode: output directly (unchanged schema)
             let value = build_mode_json_value(&modes[0], doc, config, page_spec, args);
-            wln!(out, "{}", serde_json::to_string_pretty(&value).unwrap());
+            wln!(out, "{}", json_pretty(&value));
         }
     } else {
         for (i, mode) in modes.iter().enumerate() {
@@ -282,7 +281,7 @@ fn dispatch_mode_text(
     args: &Args,
 ) {
     match mode {
-        DocMode::List => summary::print_summary(out, doc),
+        DocMode::List => summary::print_list(out, doc),
         DocMode::Validate => validate::print_validation(out, doc),
         DocMode::Fonts => fonts::print_fonts(out, doc),
         DocMode::Images => images::print_images(out, doc),

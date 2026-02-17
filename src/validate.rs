@@ -4,7 +4,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::io::Write;
 
 use crate::stream::decode_stream;
-use crate::helpers::resolve_dict;
+use crate::helpers::{resolve_dict, get_catalog};
 
 #[derive(PartialEq)]
 pub(crate) enum ValidationLevel {
@@ -28,21 +28,27 @@ pub(crate) struct ValidationReport {
 pub(crate) fn validate_pdf(doc: &Document) -> ValidationReport {
     let mut issues = Vec::new();
     let xref_ids = collect_xref_stream_ids(doc);
+    let pages = doc.get_pages();
 
     check_broken_references(doc, &xref_ids, &mut issues);
     check_unreachable_objects(doc, &xref_ids, &mut issues);
-    check_required_keys(doc, &mut issues);
+    check_required_keys(doc, &pages, &mut issues);
     check_stream_lengths(doc, &mut issues);
-    check_page_tree(doc, &mut issues);
-    check_content_stream_syntax(doc, &mut issues);
+    check_page_tree(doc, &pages, &mut issues);
+    check_content_stream_syntax(doc, &pages, &mut issues);
     check_font_requirements(doc, &mut issues);
-    check_page_tree_cycles(doc, &mut issues);
+    check_page_tree_cycles(doc, &pages, &mut issues);
     check_names_tree_structure(doc, &mut issues);
     check_duplicate_objects(doc, &mut issues);
 
-    let error_count = issues.iter().filter(|i| i.level == ValidationLevel::Error).count();
-    let warn_count = issues.iter().filter(|i| i.level == ValidationLevel::Warn).count();
-    let info_count = issues.iter().filter(|i| i.level == ValidationLevel::Info).count();
+    let (mut error_count, mut warn_count, mut info_count) = (0, 0, 0);
+    for issue in &issues {
+        match issue.level {
+            ValidationLevel::Error => error_count += 1,
+            ValidationLevel::Warn => warn_count += 1,
+            ValidationLevel::Info => info_count += 1,
+        }
+    }
 
     ValidationReport { issues, error_count, warn_count, info_count }
 }
@@ -149,7 +155,7 @@ fn check_unreachable_objects(doc: &Document, xref_ids: &BTreeSet<ObjectId>, issu
     }
 }
 
-fn check_required_keys(doc: &Document, issues: &mut Vec<ValidationIssue>) {
+fn check_required_keys(doc: &Document, pages: &BTreeMap<u32, ObjectId>, issues: &mut Vec<ValidationIssue>) {
     // Catalog must have /Pages
     if let Some(root_ref) = doc.trailer.get(b"Root").ok().and_then(|o| o.as_reference().ok()) {
         if let Ok(Object::Dictionary(catalog)) = doc.get_object(root_ref)
@@ -167,8 +173,7 @@ fn check_required_keys(doc: &Document, issues: &mut Vec<ValidationIssue>) {
     }
 
     // Each page must have /MediaBox (or inherit from parent)
-    let pages = doc.get_pages();
-    for (&page_num, &page_id) in &pages {
+    for (&page_num, &page_id) in pages {
         if !page_has_media_box(doc, page_id) {
             issues.push(ValidationIssue {
                 level: ValidationLevel::Error,
@@ -180,10 +185,10 @@ fn check_required_keys(doc: &Document, issues: &mut Vec<ValidationIssue>) {
 
 fn page_has_media_box(doc: &Document, page_id: ObjectId) -> bool {
     let mut current_id = Some(page_id);
-    let mut depth = 0;
+    let mut visited = BTreeSet::new();
     while let Some(id) = current_id {
-        if depth > 20 { break; } // Guard against cycles
-        depth += 1;
+        if visited.contains(&id) { break; }
+        visited.insert(id);
         if let Ok(obj) = doc.get_object(id) {
             let dict = match obj {
                 Object::Dictionary(d) => d,
@@ -218,13 +223,11 @@ fn check_stream_lengths(doc: &Document, issues: &mut Vec<ValidationIssue>) {
     }
 }
 
-fn check_page_tree(doc: &Document, issues: &mut Vec<ValidationIssue>) {
-    let pages = doc.get_pages();
+fn check_page_tree(doc: &Document, pages: &BTreeMap<u32, ObjectId>, issues: &mut Vec<ValidationIssue>) {
     let actual_count = pages.len();
 
     // Check /Pages /Count
-    if let Some(root_ref) = doc.trailer.get(b"Root").ok().and_then(|o| o.as_reference().ok())
-        && let Ok(Object::Dictionary(catalog)) = doc.get_object(root_ref)
+    if let Some(catalog) = get_catalog(doc)
         && let Ok(pages_ref) = catalog.get(b"Pages").and_then(|o| o.as_reference())
         && let Ok(Object::Dictionary(pages_dict)) = doc.get_object(pages_ref)
         && let Ok(Object::Integer(count)) = pages_dict.get(b"Count")
@@ -237,9 +240,8 @@ fn check_page_tree(doc: &Document, issues: &mut Vec<ValidationIssue>) {
     }
 }
 
-fn check_content_stream_syntax(doc: &Document, issues: &mut Vec<ValidationIssue>) {
-    let pages = doc.get_pages();
-    for (&page_num, &page_id) in &pages {
+fn check_content_stream_syntax(doc: &Document, pages: &BTreeMap<u32, ObjectId>, issues: &mut Vec<ValidationIssue>) {
+    for (&page_num, &page_id) in pages {
         let page_dict = match doc.get_object(page_id) {
             Ok(Object::Dictionary(d)) => d,
             _ => continue,
@@ -314,9 +316,8 @@ fn check_font_requirements(doc: &Document, issues: &mut Vec<ValidationIssue>) {
     }
 }
 
-fn check_page_tree_cycles(doc: &Document, issues: &mut Vec<ValidationIssue>) {
-    let pages = doc.get_pages();
-    for (&page_num, &page_id) in &pages {
+fn check_page_tree_cycles(doc: &Document, pages: &BTreeMap<u32, ObjectId>, issues: &mut Vec<ValidationIssue>) {
+    for (&page_num, &page_id) in pages {
         let mut visited = BTreeSet::new();
         visited.insert(page_id);
         let mut current = doc.get_object(page_id).ok()
@@ -343,13 +344,9 @@ fn check_page_tree_cycles(doc: &Document, issues: &mut Vec<ValidationIssue>) {
 }
 
 fn check_names_tree_structure(doc: &Document, issues: &mut Vec<ValidationIssue>) {
-    let root_ref = match doc.trailer.get(b"Root").ok().and_then(|o| o.as_reference().ok()) {
-        Some(id) => id,
+    let catalog = match get_catalog(doc) {
+        Some(c) => c,
         None => return,
-    };
-    let catalog = match doc.get_object(root_ref) {
-        Ok(Object::Dictionary(d)) => d,
-        _ => return,
     };
     let names_dict = match catalog.get(b"Names").ok().and_then(|o| resolve_dict(doc, o)) {
         Some(d) => d,
@@ -432,7 +429,7 @@ fn check_duplicate_objects(doc: &Document, issues: &mut Vec<ValidationIssue>) {
     for (obj_num, generations) in &seen_numbers {
         if generations.len() > 1 {
             issues.push(ValidationIssue {
-                level: ValidationLevel::Warn,
+                level: ValidationLevel::Info,
                 message: format!("Object {}: multiple generations present ({:?})", obj_num, generations),
             });
         }
@@ -483,8 +480,9 @@ pub(crate) fn validation_json_value(doc: &Document) -> Value {
 
 #[cfg(test)]
 pub(crate) fn print_validation_json(writer: &mut impl Write, doc: &Document) {
+    use crate::helpers::json_pretty;
     let output = validation_json_value(doc);
-    writeln!(writer, "{}", serde_json::to_string_pretty(&output).unwrap()).unwrap();
+    writeln!(writer, "{}", json_pretty(&output)).unwrap();
 }
 
 
@@ -697,7 +695,7 @@ mod tests {
         doc.trailer.set(b"Root", Object::Reference((1, 0)));
 
         let mut issues = Vec::new();
-        check_page_tree(&doc, &mut issues);
+        check_page_tree(&doc, &doc.get_pages(), &mut issues);
         assert_eq!(issues.len(), 1);
         assert!(issues[0].message.contains("/Pages /Count is 5"));
     }
@@ -785,7 +783,7 @@ mod tests {
         doc.trailer.set(b"Root", Object::Reference((1, 0)));
 
         let mut issues = Vec::new();
-        check_required_keys(&doc, &mut issues);
+        check_required_keys(&doc, &doc.get_pages(), &mut issues);
         assert!(issues.iter().any(|i|
             i.level == ValidationLevel::Error && i.message.contains("Catalog missing required /Pages")));
     }
@@ -805,7 +803,7 @@ mod tests {
         doc.trailer.set(b"Root", Object::Reference((1, 0)));
 
         let mut issues = Vec::new();
-        check_required_keys(&doc, &mut issues);
+        check_required_keys(&doc, &doc.get_pages(), &mut issues);
         // No "Catalog missing" errors — may still have MediaBox issues
         assert!(!issues.iter().any(|i| i.message.contains("Catalog missing")));
     }
@@ -928,7 +926,7 @@ mod tests {
         doc.trailer.set(b"Root", Object::Reference((1, 0)));
 
         let mut issues = Vec::new();
-        check_page_tree(&doc, &mut issues);
+        check_page_tree(&doc, &doc.get_pages(), &mut issues);
         assert!(issues.is_empty());
     }
 
@@ -1024,7 +1022,7 @@ mod tests {
         doc.trailer.set("Root", Object::Reference(cat_id));
 
         let mut issues = Vec::new();
-        check_content_stream_syntax(&doc, &mut issues);
+        check_content_stream_syntax(&doc, &doc.get_pages(), &mut issues);
         assert!(issues.is_empty(), "Valid content stream should produce no issues");
     }
 
@@ -1053,7 +1051,7 @@ mod tests {
         doc.trailer.set("Root", Object::Reference(cat_id));
 
         let mut issues = Vec::new();
-        check_content_stream_syntax(&doc, &mut issues);
+        check_content_stream_syntax(&doc, &doc.get_pages(), &mut issues);
         // Note: lopdf's Content::decode is lenient; it may or may not fail on arbitrary bytes.
         // If it does fail, we should get a warning about invalid syntax.
         // If it doesn't fail, that's also acceptable.
@@ -1153,7 +1151,7 @@ mod tests {
         doc.trailer.set("Root", Object::Reference((1, 0)));
 
         let mut issues = Vec::new();
-        check_page_tree_cycles(&doc, &mut issues);
+        check_page_tree_cycles(&doc, &doc.get_pages(), &mut issues);
         assert!(issues.iter().any(|i| i.message.contains("cycle")));
     }
 

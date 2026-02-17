@@ -11,16 +11,7 @@ fn tree_node_label(obj: &Object) -> String {
         Object::Dictionary(dict) => {
             if let Ok(Object::Name(type_name)) = dict.get(b"Type") {
                 let name = String::from_utf8_lossy(type_name);
-                match name.as_ref() {
-                    "Catalog" => "Catalog".to_string(),
-                    "Pages" => "Pages".to_string(),
-                    "Page" => "Page".to_string(),
-                    "Font" => "Font".to_string(),
-                    "Annot" => "Annot".to_string(),
-                    "XObject" => "XObject".to_string(),
-                    "Encoding" => "Encoding".to_string(),
-                    other => other.to_string(),
-                }
+                name.into_owned()
             } else {
                 format!("Dictionary, {} keys", dict.len())
             }
@@ -107,8 +98,9 @@ pub(crate) fn tree_json_value(doc: &Document, config: &DumpConfig) -> Value {
 
 #[cfg(test)]
 pub(crate) fn print_tree_json(writer: &mut impl Write, doc: &Document, config: &DumpConfig) {
+    use crate::helpers::json_pretty;
     let output = tree_json_value(doc, config);
-    writeln!(writer, "{}", serde_json::to_string_pretty(&output).unwrap()).unwrap();
+    writeln!(writer, "{}", json_pretty(&output)).unwrap();
 }
 
 fn tree_node_to_json(obj_id: ObjectId, doc: &Document, visited: &mut BTreeSet<ObjectId>, depth: usize, key_path: &str, config: &DumpConfig) -> Value {

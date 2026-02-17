@@ -5,7 +5,7 @@ use std::io::Write;
 
 use crate::types::DumpConfig;
 use crate::stream::{decode_stream, get_filter_names, is_binary_stream, format_hex_dump};
-use crate::helpers::{format_dict_value, format_operation, object_type_label};
+use crate::helpers::{format_dict_value, format_operation, object_type_label, json_pretty};
 
 pub(crate) fn print_stream_content(writer: &mut impl Write, stream: &lopdf::Stream, indent_str: &str, config: &DumpConfig, is_contents: bool) {
     let (decoded_content, warning) = decode_stream(stream);
@@ -94,7 +94,17 @@ pub(crate) fn print_object(writer: &mut impl Write, obj: &Object, doc: &Document
         Object::Integer(i) => w!(writer, "{}", i),
         Object::Real(r) => w!(writer, "{}", r),
         Object::Name(name) => w!(writer, "/{}", String::from_utf8_lossy(name)),
-        Object::String(bytes, _) => w!(writer, "({})", String::from_utf8_lossy(bytes)),
+        Object::String(bytes, format) => {
+            if *format == lopdf::StringFormat::Hexadecimal {
+                w!(writer, "<");
+                for b in bytes {
+                    w!(writer, "{:02x}", b);
+                }
+                w!(writer, ">");
+            } else {
+                w!(writer, "({})", String::from_utf8_lossy(bytes));
+            }
+        }
         Object::Array(array) => {
             let child_indent = "  ".repeat(indent + 1);
             wln!(writer, "[");
@@ -242,7 +252,7 @@ pub(crate) fn print_objects_json(writer: &mut impl Write, doc: &Document, nums: 
             }
         }
         let output = json!({"objects": items});
-        wln!(writer, "{}", serde_json::to_string_pretty(&output).unwrap());
+        wln!(writer, "{}", json_pretty(&output));
     }
 }
 
@@ -329,11 +339,11 @@ pub(crate) fn print_single_object_json(writer: &mut impl Write, doc: &Document, 
                 "generation": 0,
                 "object": object_to_json(object, doc, config),
             });
-            wln!(writer, "{}", serde_json::to_string_pretty(&output).unwrap());
+            wln!(writer, "{}", json_pretty(&output));
         }
         Err(_) => {
             let output = json!({"error": format!("Object {} not found.", obj_num)});
-            wln!(writer, "{}", serde_json::to_string_pretty(&output).unwrap());
+            wln!(writer, "{}", json_pretty(&output));
         }
     }
 }
@@ -620,7 +630,7 @@ mod tests {
     #[test]
     fn print_object_string_hex_format() {
         let (out, _) = print_obj(&Object::String(b"hex".to_vec(), StringFormat::Hexadecimal));
-        assert_eq!(out, "(hex)");
+        assert_eq!(out, "<686578>");
     }
 
     #[test]

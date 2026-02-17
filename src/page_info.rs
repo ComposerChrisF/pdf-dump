@@ -4,7 +4,7 @@ use std::io::Write;
 
 use crate::types::PageSpec;
 use crate::resources::{collect_page_resources, resource_entries_to_json, PageResources};
-use crate::annotations::collect_annotations;
+use crate::annotations::{collect_annotations, AnnotationInfo};
 use crate::text::extract_text_from_page_with_warnings;
 use crate::helpers::{self, format_dict_value};
 
@@ -24,7 +24,6 @@ struct PageInfo {
     text_preview: String,
     text_extractable: bool,
     full_text: String,
-    #[allow(dead_code)]
     warnings: Vec<String>,
     resources: PageResources,
 }
@@ -51,7 +50,7 @@ fn is_garbled_text(text: &str, warnings: &[String]) -> bool {
     non_printable * 2 > non_ws_count
 }
 
-fn collect_page_info(doc: &Document, page_num: u32, page_id: ObjectId) -> PageInfo {
+fn collect_page_info(doc: &Document, page_num: u32, page_id: ObjectId, annots: &[&AnnotationInfo]) -> PageInfo {
     let page_dict = match doc.get_object(page_id) {
         Ok(Object::Dictionary(d)) => d,
         _ => return PageInfo {
@@ -89,12 +88,10 @@ fn collect_page_info(doc: &Document, page_num: u32, page_id: ObjectId) -> PageIn
     let image_count = res.xobjects.iter().filter(|x| x.detail.starts_with("Image")).count();
     let ext_gstate_count = res.ext_gstate.len();
 
-    // Annotations
-    let spec = PageSpec::Single(page_num);
-    let annots = collect_annotations(doc, Some(&spec));
+    // Annotations (pre-filtered by caller)
     let annotation_count = annots.len();
     let mut subtype_counts = std::collections::BTreeMap::new();
-    for a in &annots {
+    for a in annots {
         *subtype_counts.entry(a.subtype.clone()).or_insert(0usize) += 1;
     }
     let annotation_subtypes: Vec<(String, usize)> = subtype_counts.into_iter().collect();
@@ -144,10 +141,12 @@ pub(crate) fn print_page_info(writer: &mut impl Write, doc: &Document, spec: &Pa
         Ok(list) => list,
         Err(msg) => { eprintln!("Error: {}", msg); return; }
     };
+    let all_annots = collect_annotations(doc, Some(spec));
     for (pn, page_id) in &page_list {
         let pn = *pn;
         let page_id = *page_id;
-        let info = collect_page_info(doc, pn, page_id);
+        let page_annots: Vec<&AnnotationInfo> = all_annots.iter().filter(|a| a.page_num == pn).collect();
+        let info = collect_page_info(doc, pn, page_id, &page_annots);
 
         wln!(writer, "Page {} (Object {} {})", info.page_num, info.object_id.0, info.object_id.1);
         wln!(writer, "  MediaBox:     {}", info.media_box);
@@ -231,23 +230,24 @@ pub(crate) fn print_page_info(writer: &mut impl Write, doc: &Document, spec: &Pa
                 wln!(writer, "  Text preview: {}", info.text_preview);
             }
         }
+        for w in &info.warnings {
+            wln!(writer, "  Warning: {}", w);
+        }
         wln!(writer);
     }
 }
 
-pub(crate) fn print_page_info_json(writer: &mut impl Write, doc: &Document, spec: &PageSpec) {
+pub(crate) fn page_info_json_value(doc: &Document, spec: &PageSpec) -> Value {
     let page_list = match helpers::build_page_list(doc, Some(spec)) {
         Ok(list) => list,
-        Err(msg) => {
-            let output = json!({"error": msg});
-            wln!(writer, "{}", serde_json::to_string_pretty(&output).unwrap());
-            return;
-        }
+        Err(msg) => return json!({"error": msg}),
     };
+    let all_annots = collect_annotations(doc, Some(spec));
     let mut results = Vec::new();
 
     for &(pn, page_id) in &page_list {
-        let info = collect_page_info(doc, pn, page_id);
+        let page_annots: Vec<&AnnotationInfo> = all_annots.iter().filter(|a| a.page_num == pn).collect();
+        let info = collect_page_info(doc, pn, page_id, &page_annots);
 
         let subtypes: Value = info.annotation_subtypes.iter()
             .map(|(s, c)| json!({"subtype": s, "count": c}))
@@ -280,15 +280,18 @@ pub(crate) fn print_page_info_json(writer: &mut impl Write, doc: &Document, spec
         if !info.text_extractable {
             page_json["text_extractable"] = json!(false);
         }
+        if !info.warnings.is_empty() {
+            page_json["warnings"] = json!(info.warnings);
+        }
         results.push(page_json);
     }
 
-    if results.len() == 1 {
-        wln!(writer, "{}", serde_json::to_string_pretty(&results[0]).unwrap());
-    } else {
-        let output = json!({"pages": results});
-        wln!(writer, "{}", serde_json::to_string_pretty(&output).unwrap());
-    }
+    json!({"pages": results})
+}
+
+pub(crate) fn print_page_info_json(writer: &mut impl Write, doc: &Document, spec: &PageSpec) {
+    let output = page_info_json_value(doc, spec);
+    wln!(writer, "{}", helpers::json_pretty(&output));
 }
 
 
@@ -329,10 +332,13 @@ mod tests {
         let doc = build_two_page_doc();
         let out = output_of(|w| print_page_info_json(w, &doc, &PageSpec::Single(1)));
         let val: serde_json::Value = serde_json::from_str(&out).unwrap();
-        assert_eq!(val["page_number"], 1);
-        assert!(val.get("media_box").is_some());
-        assert!(val.get("fonts").is_some());
-        assert!(val.get("text").is_some());
+        let pages = val["pages"].as_array().unwrap();
+        assert_eq!(pages.len(), 1);
+        let page = &pages[0];
+        assert_eq!(page["page_number"], 1);
+        assert!(page.get("media_box").is_some());
+        assert!(page.get("fonts").is_some());
+        assert!(page.get("text").is_some());
     }
 
     #[test]
@@ -365,7 +371,8 @@ mod tests {
         let doc = build_two_page_doc();
         let out = output_of(|w| print_page_info_json(w, &doc, &PageSpec::Single(1)));
         let val: serde_json::Value = serde_json::from_str(&out).unwrap();
-        let res = &val["resources"];
+        let page = &val["pages"][0];
+        let res = &page["resources"];
         assert!(res.is_object());
         assert!(res["fonts"].is_array());
         assert!(res["xobjects"].is_array());

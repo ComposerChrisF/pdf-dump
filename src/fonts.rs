@@ -252,8 +252,9 @@ pub(crate) fn fonts_json_value(doc: &Document) -> Value {
 
 #[cfg(test)]
 pub(crate) fn print_fonts_json(writer: &mut impl Write, doc: &Document) {
+    use crate::helpers::json_pretty;
     let output = fonts_json_value(doc);
-    writeln!(writer, "{}", serde_json::to_string_pretty(&output).unwrap()).unwrap();
+    writeln!(writer, "{}", json_pretty(&output)).unwrap();
 }
 
 

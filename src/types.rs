@@ -375,6 +375,8 @@ pub(crate) fn parse_object_spec(s: &str) -> Result<Vec<u32>, String> {
     if result.is_empty() {
         return Err("Empty object specification".to_string());
     }
+    result.sort_unstable();
+    result.dedup();
     Ok(result)
 }
 
