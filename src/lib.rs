@@ -9,11 +9,9 @@ pub(crate) mod text;
 pub(crate) mod operators;
 pub(crate) mod resources;
 pub(crate) mod forms;
-pub(crate) mod diff;
 pub(crate) mod fonts;
 pub(crate) mod images;
 pub(crate) mod validate;
-pub(crate) mod stats;
 pub(crate) mod bookmarks;
 pub(crate) mod annotations;
 pub(crate) mod security;
@@ -22,92 +20,33 @@ pub(crate) mod page_labels;
 pub(crate) mod tree;
 pub(crate) mod layers;
 pub(crate) mod structure;
-pub(crate) mod info;
+pub(crate) mod inspect;
 pub(crate) mod page_info;
+pub(crate) mod find_text;
 
 use clap::Parser;
 use lopdf::{Document, Object};
-use std::collections::BTreeSet;
+use serde_json::Value;
 use std::io::{self, Write};
 
-use types::{Args, DumpConfig, PageSpec, parse_object_spec};
+use types::{Args, DocMode, DumpConfig, PageSpec, ResolvedMode, StandaloneMode};
 
 pub fn run() {
     let args = Args::parse();
 
-    // Mutual exclusivity check
-    // --list alone is a mode; with --search it becomes a modifier
-    // --page alone is a mode; with --text it becomes a filter
-    let mode_count = [
-        args.extract_stream.is_some(),
-        args.object.is_some(),
-        args.list && args.search.is_none(),
-        args.page.is_some() && !args.text && !args.annotations && !args.operators && !args.resources,
-        args.search.is_some(),
-        args.text,
-        args.operators,
-        args.resources,
-        args.forms,
-        args.refs_to.is_some(),
-        args.fonts,
-        args.images,
-        args.validate,
-        args.tree,
-        args.stats,
-        args.bookmarks,
-        args.annotations && args.page.is_none(),
-        args.security,
-        args.embedded_files,
-        args.page_labels,
-        args.layers,
-        args.tags,
-        args.info.is_some(),
-        args.dump,
-    ].iter().filter(|&&b| b).count();
-    if mode_count > 1 {
-        eprintln!("Error: Only one mode flag may be used at a time.");
+    let resolved = args.resolve_mode().unwrap_or_else(|e| {
+        eprintln!("Error: {}", e);
         std::process::exit(1);
-    }
+    });
 
-    // --raw validation: requires --object, conflicts with --decode-streams
+    // Modifier validation
     if args.raw {
-        if args.object.is_none() {
+        if !matches!(resolved, ResolvedMode::Standalone(StandaloneMode::Object { .. })) {
             eprintln!("Error: --raw requires --object.");
             std::process::exit(1);
         }
-        if args.decode_streams {
-            eprintln!("Error: --raw and --decode-streams cannot be used together.");
-            std::process::exit(1);
-        }
-    }
-
-    // --diff validation: only works with default mode, --page, and --json
-    if args.diff.is_some() {
-        let incompatible = args.object.is_some()
-            || (args.list && args.search.is_none())
-            || args.extract_stream.is_some()
-            || args.search.is_some()
-            || args.text
-            || args.refs_to.is_some()
-            || args.fonts
-            || args.images
-            || args.validate
-            || args.tree
-            || args.stats
-            || args.bookmarks
-            || args.annotations
-            || args.operators
-            || args.resources
-            || args.forms
-            || args.security
-            || args.embedded_files
-            || args.page_labels
-            || args.layers
-            || args.tags
-            || args.info.is_some()
-            || args.dump;
-        if incompatible {
-            eprintln!("Error: --diff can only be combined with --page and --json.");
+        if args.decode {
+            eprintln!("Error: --raw and --decode cannot be used together.");
             std::process::exit(1);
         }
     }
@@ -122,7 +61,7 @@ pub fn run() {
     };
 
     let config = DumpConfig {
-        decode_streams: args.decode_streams,
+        decode: args.decode,
         truncate: args.truncate,
         json: args.json,
         hex: args.hex,
@@ -138,258 +77,205 @@ pub fn run() {
         })
     });
 
-    let object_nums = args.object.as_deref().map(|s| {
-        parse_object_spec(s).unwrap_or_else(|e| {
-            eprintln!("Error: {}", e);
-            std::process::exit(1);
-        })
-    });
+    let mut out = io::stdout().lock();
 
-    // --diff mode: load second doc and compare
-    if let Some(ref diff_path) = args.diff {
-        let doc2 = match Document::load(diff_path) {
-            Ok(doc) => doc,
-            Err(e) => {
-                eprintln!("Error: Failed to load second PDF file '{}'.", diff_path.display());
-                eprintln!("Reason: {}", e);
-                std::process::exit(1);
-            }
-        };
-        let result = diff::compare_pdfs(&doc, &doc2, page_spec.as_ref());
-        let mut out = io::stdout().lock();
-        if config.json {
-            diff::print_diff_json(&mut out, &result, &args.file, diff_path);
-        } else {
-            diff::print_diff(&mut out, &result, &args.file, diff_path);
+    match resolved {
+        ResolvedMode::Default => {
+            dispatch_default(&mut out, &doc, &config, page_spec.as_ref());
         }
-        return;
+        ResolvedMode::Standalone(mode) => {
+            dispatch_standalone(&mut out, &doc, &config, page_spec.as_ref(), &args, mode);
+        }
+        ResolvedMode::Combined(modes) => {
+            dispatch_combined(&mut out, &doc, &config, page_spec.as_ref(), &args, &modes);
+        }
     }
+}
 
-    if let Some(object_id) = args.extract_stream {
-        let output_path = args.output.as_ref().unwrap();
-        let object_id = (object_id, 0);
-        match doc.get_object(object_id) {
-            Ok(Object::Stream(s)) => {
-                let (decoded_content, warning) = stream::decode_stream(s);
-                if let Some(warn) = &warning {
-                    eprintln!("Warning: {}", warn);
+fn dispatch_default(
+    out: &mut impl Write,
+    doc: &Document,
+    config: &DumpConfig,
+    page_spec: Option<&PageSpec>,
+) {
+    if let Some(spec) = page_spec {
+        if config.json {
+            page_info::print_page_info_json(out, doc, spec);
+        } else {
+            page_info::print_page_info(out, doc, spec);
+        }
+    } else if config.json {
+        summary::print_overview_json(out, doc);
+    } else {
+        summary::print_overview(out, doc);
+    }
+}
+
+fn dispatch_standalone(
+    out: &mut impl Write,
+    doc: &Document,
+    config: &DumpConfig,
+    page_spec: Option<&PageSpec>,
+    args: &Args,
+    mode: StandaloneMode,
+) {
+    match mode {
+        StandaloneMode::ExtractStream { obj_num, ref output } => {
+            let object_id = (obj_num, 0);
+            match doc.get_object(object_id) {
+                Ok(Object::Stream(s)) => {
+                    let (decoded_content, warning) = stream::decode_stream(s);
+                    if let Some(warn) = &warning {
+                        eprintln!("Warning: {}", warn);
+                    }
+                    if let Err(e) = std::fs::write(output, &*decoded_content) {
+                        eprintln!("Error writing to output file: {}", e);
+                        std::process::exit(1);
+                    }
+                    writeln!(out, "Successfully extracted object {} to '{}'.", obj_num, output.display()).unwrap();
                 }
-                if let Err(e) = std::fs::write(output_path, &*decoded_content) {
-                    eprintln!("Error writing to output file: {}", e);
+                Ok(_) => {
+                    eprintln!("Error: Object {} is not a stream and cannot be extracted to a file.", obj_num);
                     std::process::exit(1);
                 }
-                println!("Successfully extracted object {} to '{}'.", object_id.0, output_path.display());
-            }
-            Ok(_) => {
-                eprintln!("Error: Object {} is not a stream and cannot be extracted to a file.", object_id.0);
-                std::process::exit(1);
-            }
-            Err(_) => {
-                eprintln!("Error: Object {} not found in the document.", object_id.0);
-                std::process::exit(1);
+                Err(_) => {
+                    eprintln!("Error: Object {} not found in the document.", obj_num);
+                    std::process::exit(1);
+                }
             }
         }
-    } else if let Some(ref search_expr) = args.search {
-        let conditions = match search::parse_search_expr(search_expr) {
-            Ok(c) => c,
-            Err(e) => {
-                eprintln!("Error: Invalid search expression: {}", e);
-                std::process::exit(1);
-            }
-        };
-        let mut out = io::stdout().lock();
-        if config.json {
-            search::search_objects_json(&mut out, &doc, search_expr, &conditions, &config);
-        } else {
-            search::search_objects(&mut out, &doc, &conditions, &config, args.list);
-        }
-    } else if args.text {
-        let mut out = io::stdout().lock();
-        if config.json {
-            text::print_text_json(&mut out, &doc, page_spec.as_ref());
-        } else {
-            text::print_text(&mut out, &doc, page_spec.as_ref());
-        }
-    } else if args.operators {
-        let mut out = io::stdout().lock();
-        if config.json {
-            operators::print_operators_json(&mut out, &doc, page_spec.as_ref());
-        } else {
-            operators::print_operators(&mut out, &doc, page_spec.as_ref());
-        }
-    } else if args.resources {
-        let mut out = io::stdout().lock();
-        if config.json {
-            resources::print_resources_json(&mut out, &doc, page_spec.as_ref());
-        } else {
-            resources::print_resources(&mut out, &doc, page_spec.as_ref());
-        }
-    } else if args.forms {
-        let mut out = io::stdout().lock();
-        if config.json {
-            forms::print_forms_json(&mut out, &doc);
-        } else {
-            forms::print_forms(&mut out, &doc);
-        }
-    } else if let Some(info_num) = args.info {
-        let mut out = io::stdout().lock();
-        if config.json {
-            info::print_info_json(&mut out, &doc, info_num);
-        } else {
-            info::print_info(&mut out, &doc, info_num);
-        }
-    } else if let Some(target) = args.refs_to {
-        let mut out = io::stdout().lock();
-        if config.json {
-            refs::print_refs_to_json(&mut out, &doc, target);
-        } else {
-            refs::print_refs_to(&mut out, &doc, target);
-        }
-    } else if args.fonts {
-        let mut out = io::stdout().lock();
-        if config.json {
-            fonts::print_fonts_json(&mut out, &doc);
-        } else {
-            fonts::print_fonts(&mut out, &doc);
-        }
-    } else if args.images {
-        let mut out = io::stdout().lock();
-        if config.json {
-            images::print_images_json(&mut out, &doc);
-        } else {
-            images::print_images(&mut out, &doc);
-        }
-    } else if args.validate {
-        let mut out = io::stdout().lock();
-        if config.json {
-            validate::print_validation_json(&mut out, &doc);
-        } else {
-            validate::print_validation(&mut out, &doc);
-        }
-    } else if args.stats {
-        let mut out = io::stdout().lock();
-        if config.json {
-            stats::print_stats_json(&mut out, &doc);
-        } else {
-            stats::print_stats(&mut out, &doc);
-        }
-    } else if args.bookmarks {
-        let mut out = io::stdout().lock();
-        if config.json {
-            bookmarks::print_bookmarks_json(&mut out, &doc);
-        } else {
-            bookmarks::print_bookmarks(&mut out, &doc);
-        }
-    } else if args.annotations {
-        let mut out = io::stdout().lock();
-        if config.json {
-            annotations::print_annotations_json(&mut out, &doc, page_spec.as_ref());
-        } else {
-            annotations::print_annotations(&mut out, &doc, page_spec.as_ref());
-        }
-    } else if args.security {
-        let mut out = io::stdout().lock();
-        if config.json {
-            security::print_security_json(&mut out, &doc, &args.file);
-        } else {
-            security::print_security(&mut out, &doc, &args.file);
-        }
-    } else if args.embedded_files {
-        let mut out = io::stdout().lock();
-        if config.json {
-            embedded::print_embedded_files_json(&mut out, &doc);
-        } else {
-            embedded::print_embedded_files(&mut out, &doc);
-        }
-    } else if args.page_labels {
-        let mut out = io::stdout().lock();
-        if config.json {
-            page_labels::print_page_labels_json(&mut out, &doc);
-        } else {
-            page_labels::print_page_labels(&mut out, &doc);
-        }
-    } else if args.layers {
-        let mut out = io::stdout().lock();
-        if config.json {
-            layers::print_layers_json(&mut out, &doc);
-        } else {
-            layers::print_layers(&mut out, &doc);
-        }
-    } else if args.tags {
-        let mut out = io::stdout().lock();
-        if config.json {
-            structure::print_structure_json(&mut out, &doc, &config);
-        } else {
-            structure::print_structure(&mut out, &doc, &config);
-        }
-    } else if args.tree {
-        let mut out = io::stdout().lock();
-        if args.dot {
-            tree::print_tree_dot(&mut out, &doc, &config);
-        } else if config.json {
-            tree::print_tree_json(&mut out, &doc, &config);
-        } else {
-            tree::print_tree(&mut out, &doc, &config);
-        }
-    } else if let Some(ref nums) = object_nums {
-        let mut out = io::stdout().lock();
-        if config.json {
-            object::print_objects_json(&mut out, &doc, nums, &config);
-        } else {
-            object::print_objects(&mut out, &doc, nums, &config);
-        }
-    } else if args.list {
-        let mut out = io::stdout().lock();
-        if config.json {
-            summary::print_summary_json(&mut out, &doc);
-        } else {
-            summary::print_summary(&mut out, &doc);
-        }
-    } else if let Some(ref spec) = page_spec {
-        let mut out = io::stdout().lock();
-        if config.json {
-            page_info::print_page_info_json(&mut out, &doc, spec);
-        } else {
-            page_info::print_page_info(&mut out, &doc, spec);
-        }
-    } else if args.dump {
-        let mut out = io::stdout().lock();
-        if config.json {
-            object::dump_json(&mut out, &doc, &config);
-        } else {
-            writeln!(out, "Trailer:").unwrap();
-            let visited_for_print = BTreeSet::new();
-            let mut trailer_refs = BTreeSet::new();
-            object::print_object(
-                &mut out,
-                &Object::Dictionary(doc.trailer.clone()),
-                &doc,
-                &visited_for_print,
-                1,
-                &config,
-                false,
-                &mut trailer_refs,
-            );
-
-            writeln!(out, "\n\n================================\n").unwrap();
-
-            let mut visited_for_traverse = BTreeSet::new();
-            if let Some(root_id) = doc.trailer.get(b"Root").ok()
-                .and_then(|o| o.as_reference().ok())
-            {
-                object::dump_object_and_children(&mut out, root_id, &doc, &mut visited_for_traverse, &config, false, 0);
+        StandaloneMode::Object { ref nums } => {
+            if config.json {
+                object::print_objects_json(out, doc, nums, config);
             } else {
-                eprintln!("Warning: /Root not found or not a reference in trailer.");
+                object::print_objects(out, doc, nums, config);
             }
+        }
+        StandaloneMode::Inspect { obj_num } => {
+            if config.json {
+                inspect::print_info_json(out, doc, obj_num);
+            } else {
+                inspect::print_info(out, doc, obj_num);
+            }
+        }
+        StandaloneMode::Search { ref expr, list_modifier } => {
+            let conditions = match search::parse_search_expr(expr) {
+                Ok(c) => c,
+                Err(e) => {
+                    eprintln!("Error: Invalid search expression: {}", e);
+                    std::process::exit(1);
+                }
+            };
+            if config.json {
+                search::search_objects_json(out, doc, expr, &conditions, config);
+            } else {
+                search::search_objects(out, doc, &conditions, config, list_modifier);
+            }
+        }
+    }
+    let _ = (page_spec, args); // acknowledge unused params for future use
+}
+
+fn dispatch_combined(
+    out: &mut impl Write,
+    doc: &Document,
+    config: &DumpConfig,
+    page_spec: Option<&PageSpec>,
+    args: &Args,
+    modes: &[DocMode],
+) {
+    let multi = modes.len() > 1;
+
+    if config.json {
+        if multi {
+            // Multiple modes: wrap in { "key": value, ... }
+            let mut map = serde_json::Map::new();
+            for mode in modes {
+                let value = build_mode_json_value(mode, doc, config, page_spec, args);
+                map.insert(mode.json_key().to_string(), value);
+            }
+            let output = Value::Object(map);
+            writeln!(out, "{}", serde_json::to_string_pretty(&output).unwrap()).unwrap();
+        } else {
+            // Single mode: output directly (unchanged schema)
+            let value = build_mode_json_value(&modes[0], doc, config, page_spec, args);
+            writeln!(out, "{}", serde_json::to_string_pretty(&value).unwrap()).unwrap();
         }
     } else {
-        // Default: overview mode
-        let mut out = io::stdout().lock();
-        if config.json {
-            summary::print_overview_json(&mut out, &doc);
-        } else {
-            summary::print_overview(&mut out, &doc);
+        for (i, mode) in modes.iter().enumerate() {
+            if multi {
+                if i > 0 {
+                    writeln!(out).unwrap();
+                }
+                writeln!(out, "=== {} ===", mode.label()).unwrap();
+            }
+            dispatch_mode_text(out, mode, doc, config, page_spec, args);
         }
+    }
+}
+
+fn build_mode_json_value(
+    mode: &DocMode,
+    doc: &Document,
+    config: &DumpConfig,
+    page_spec: Option<&PageSpec>,
+    args: &Args,
+) -> Value {
+    match mode {
+        DocMode::List => summary::list_json_value(doc),
+        DocMode::Validate => validate::validation_json_value(doc),
+        DocMode::Fonts => fonts::fonts_json_value(doc),
+        DocMode::Images => images::images_json_value(doc),
+        DocMode::Forms => forms::forms_json_value(doc),
+        DocMode::Bookmarks => bookmarks::bookmarks_json_value(doc),
+        DocMode::Annotations => annotations::annotations_json_value(doc, page_spec),
+        DocMode::Text => text::text_json_value(doc, page_spec),
+        DocMode::Operators => operators::operators_json_value(doc, page_spec),
+        DocMode::Tags => structure::structure_json_value(doc, config),
+        DocMode::Tree => tree::tree_json_value(doc, config),
+        DocMode::FindText => find_text::find_text_json_value(doc, args.find_text.as_deref().unwrap_or(""), page_spec),
+        DocMode::Detail(sub) => match sub {
+            types::DetailSub::Security => security::security_json_value(doc, &args.file),
+            types::DetailSub::Embedded => embedded::embedded_json_value(doc),
+            types::DetailSub::Labels => page_labels::labels_json_value(doc),
+            types::DetailSub::Layers => layers::layers_json_value(doc),
+        },
+    }
+}
+
+fn dispatch_mode_text(
+    out: &mut impl Write,
+    mode: &DocMode,
+    doc: &Document,
+    config: &DumpConfig,
+    page_spec: Option<&PageSpec>,
+    args: &Args,
+) {
+    match mode {
+        DocMode::List => summary::print_summary(out, doc),
+        DocMode::Validate => validate::print_validation(out, doc),
+        DocMode::Fonts => fonts::print_fonts(out, doc),
+        DocMode::Images => images::print_images(out, doc),
+        DocMode::Forms => forms::print_forms(out, doc),
+        DocMode::Bookmarks => bookmarks::print_bookmarks(out, doc),
+        DocMode::Annotations => annotations::print_annotations(out, doc, page_spec),
+        DocMode::Text => text::print_text(out, doc, page_spec),
+        DocMode::Operators => operators::print_operators(out, doc, page_spec),
+        DocMode::Tags => structure::print_structure(out, doc, config),
+        DocMode::FindText => find_text::print_find_text(out, doc, args.find_text.as_deref().unwrap_or(""), page_spec),
+        DocMode::Tree => {
+            if args.dot {
+                tree::print_tree_dot(out, doc, config);
+            } else {
+                tree::print_tree(out, doc, config);
+            }
+        }
+        DocMode::Detail(sub) => match sub {
+            types::DetailSub::Security => security::print_security(out, doc, &args.file),
+            types::DetailSub::Embedded => embedded::print_embedded_files(out, doc),
+            types::DetailSub::Labels => page_labels::print_page_labels(out, doc),
+            types::DetailSub::Layers => layers::print_layers(out, doc),
+        },
     }
 }
 
@@ -415,7 +301,7 @@ pub(crate) mod test_utils {
 
     pub fn default_config() -> DumpConfig {
         DumpConfig {
-            decode_streams: false,
+            decode: false,
             truncate: None,
             json: false,
             hex: false,
@@ -440,7 +326,7 @@ pub(crate) mod test_utils {
     }
 
     pub fn json_config() -> DumpConfig {
-        DumpConfig { decode_streams: false, truncate: None, json: true, hex: false, depth: None, deref: false, raw: false }
+        DumpConfig { decode: false, truncate: None, json: true, hex: false, depth: None, deref: false, raw: false }
     }
 
     pub fn build_two_page_doc() -> Document {

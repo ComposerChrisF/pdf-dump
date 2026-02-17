@@ -133,7 +133,7 @@ pub(crate) fn print_page_labels(writer: &mut impl Write, doc: &Document) {
     }
 }
 
-pub(crate) fn print_page_labels_json(writer: &mut impl Write, doc: &Document) {
+pub(crate) fn labels_json_value(doc: &Document) -> Value {
     let labels = collect_page_labels(doc);
     let items: Vec<Value> = labels.iter().map(|e| {
         json!({
@@ -144,10 +144,15 @@ pub(crate) fn print_page_labels_json(writer: &mut impl Write, doc: &Document) {
             "start": e.start,
         })
     }).collect();
-    let output = json!({
+    json!({
         "page_count": items.len(),
         "page_labels": items,
-    });
+    })
+}
+
+#[cfg(test)]
+pub(crate) fn print_page_labels_json(writer: &mut impl Write, doc: &Document) {
+    let output = labels_json_value(doc);
     writeln!(writer, "{}", serde_json::to_string_pretty(&output).unwrap()).unwrap();
 }
 

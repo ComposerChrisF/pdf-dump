@@ -459,7 +459,7 @@ pub(crate) fn print_validation(writer: &mut impl Write, doc: &Document) {
         report.error_count, report.warn_count, report.info_count).unwrap();
 }
 
-pub(crate) fn print_validation_json(writer: &mut impl Write, doc: &Document) {
+pub(crate) fn validation_json_value(doc: &Document) -> Value {
     let report = validate_pdf(doc);
 
     let issues: Vec<Value> = report.issues.iter().map(|i| {
@@ -473,12 +473,17 @@ pub(crate) fn print_validation_json(writer: &mut impl Write, doc: &Document) {
         })
     }).collect();
 
-    let output = json!({
+    json!({
         "error_count": report.error_count,
         "warning_count": report.warn_count,
         "info_count": report.info_count,
         "issues": issues,
-    });
+    })
+}
+
+#[cfg(test)]
+pub(crate) fn print_validation_json(writer: &mut impl Write, doc: &Document) {
+    let output = validation_json_value(doc);
     writeln!(writer, "{}", serde_json::to_string_pretty(&output).unwrap()).unwrap();
 }
 

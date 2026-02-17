@@ -204,20 +204,14 @@ fn print_outline_tree(writer: &mut impl Write, items: &[OutlineItem], depth: usi
     }
 }
 
-pub(crate) fn print_bookmarks_json(writer: &mut impl Write, doc: &Document) {
+pub(crate) fn bookmarks_json_value(doc: &Document) -> Value {
     let root_ref = match doc.trailer.get(b"Root").ok().and_then(|o| o.as_reference().ok()) {
         Some(id) => id,
-        None => {
-            writeln!(writer, "{}", serde_json::to_string_pretty(&json!({"bookmark_count": 0, "bookmarks": []})).unwrap()).unwrap();
-            return;
-        }
+        None => return json!({"bookmark_count": 0, "bookmarks": []}),
     };
     let catalog = match doc.get_object(root_ref) {
         Ok(Object::Dictionary(d)) => d,
-        _ => {
-            writeln!(writer, "{}", serde_json::to_string_pretty(&json!({"bookmark_count": 0, "bookmarks": []})).unwrap()).unwrap();
-            return;
-        }
+        _ => return json!({"bookmark_count": 0, "bookmarks": []}),
     };
     let first_id = catalog.get(b"Outlines").ok()
         .and_then(|v| v.as_reference().ok())
@@ -246,10 +240,15 @@ pub(crate) fn print_bookmarks_json(writer: &mut impl Write, doc: &Document) {
         }).collect()
     }
 
-    let output = json!({
+    json!({
         "bookmark_count": total,
         "bookmarks": items_to_json(&items),
-    });
+    })
+}
+
+#[cfg(test)]
+pub(crate) fn print_bookmarks_json(writer: &mut impl Write, doc: &Document) {
+    let output = bookmarks_json_value(doc);
     writeln!(writer, "{}", serde_json::to_string_pretty(&output).unwrap()).unwrap();
 }
 

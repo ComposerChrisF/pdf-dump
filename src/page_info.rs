@@ -3,7 +3,7 @@ use serde_json::{json, Value};
 use std::io::Write;
 
 use crate::types::PageSpec;
-use crate::resources::collect_page_resources;
+use crate::resources::{collect_page_resources, resource_entries_to_json, PageResources};
 use crate::annotations::collect_annotations;
 use crate::text::extract_text_from_page_with_warnings;
 use crate::helpers::format_dict_value;
@@ -22,6 +22,29 @@ struct PageInfo {
     content_stream_count: usize,
     content_stream_bytes: usize,
     text_preview: String,
+    text_extractable: bool,
+    resources: PageResources,
+}
+
+/// Returns true if the text appears to be garbled / non-extractable.
+/// Heuristic: more than 50% of non-whitespace chars are outside ASCII printable range (0x20..=0x7E).
+fn is_garbled_text(text: &str, warnings: &[String]) -> bool {
+    // If warnings mention CID or encoding issues, treat as garbled
+    for w in warnings {
+        let lower = w.to_lowercase();
+        if lower.contains("cid") || lower.contains("encoding") || lower.contains("tounicode") {
+            // Only if there is actually some text (otherwise it's just empty)
+            if !text.trim().is_empty() {
+                return true;
+            }
+        }
+    }
+    let non_ws: Vec<char> = text.chars().filter(|c| !c.is_whitespace()).collect();
+    if non_ws.is_empty() {
+        return false;
+    }
+    let non_printable = non_ws.iter().filter(|&&c| !('\x20'..='\x7E').contains(&c)).count();
+    non_printable * 2 > non_ws.len()
 }
 
 fn collect_page_info(doc: &Document, page_num: u32, page_id: ObjectId) -> PageInfo {
@@ -34,6 +57,10 @@ fn collect_page_info(doc: &Document, page_num: u32, page_id: ObjectId) -> PageIn
             annotation_count: 0, annotation_subtypes: vec![],
             content_stream_count: 0, content_stream_bytes: 0,
             text_preview: String::new(),
+            text_extractable: true,
+            resources: PageResources {
+                fonts: vec![], xobjects: vec![], ext_gstate: vec![], color_spaces: vec![],
+            },
         },
     };
 
@@ -82,11 +109,14 @@ fn collect_page_info(doc: &Document, page_num: u32, page_id: ObjectId) -> PageIn
 
     // Text preview
     let text_result = extract_text_from_page_with_warnings(doc, page_id);
-    let text_preview = if text_result.text.len() > 200 {
+    let garbled = is_garbled_text(&text_result.text, &text_result.warnings);
+    let (text_preview, text_extractable) = if garbled {
+        ("(text not extractable \u{2014} fonts lack Unicode mappings)".to_string(), false)
+    } else if text_result.text.len() > 200 {
         let truncated: String = text_result.text.chars().take(200).collect();
-        format!("{}...", truncated.trim())
+        (format!("{}...", truncated.trim()), true)
     } else {
-        text_result.text.trim().to_string()
+        (text_result.text.trim().to_string(), true)
     };
 
     PageInfo {
@@ -96,6 +126,8 @@ fn collect_page_info(doc: &Document, page_num: u32, page_id: ObjectId) -> PageIn
         annotation_count, annotation_subtypes,
         content_stream_count, content_stream_bytes,
         text_preview,
+        text_extractable,
+        resources: res,
     }
 }
 
@@ -120,16 +152,53 @@ pub(crate) fn print_page_info(writer: &mut impl Write, doc: &Document, spec: &Pa
             writeln!(writer, "  Rotate:       {}", r).unwrap();
         }
 
-        // Resources summary
-        if !info.font_names.is_empty() {
-            writeln!(writer, "  Fonts:        {} ({})", info.font_names.len(),
-                info.font_names.join(", ")).unwrap();
+        // Resources detail
+        if !info.resources.fonts.is_empty() {
+            writeln!(writer, "  Fonts:        {}", info.resources.fonts.len()).unwrap();
+            for e in &info.resources.fonts {
+                let obj_str = match e.object_id {
+                    Some(id) => format!("obj {}", id.0),
+                    None => "inline".to_string(),
+                };
+                writeln!(writer, "    {:<12} -> {} ({})", e.name, obj_str, e.detail).unwrap();
+            }
         }
-        if info.image_count > 0 {
-            writeln!(writer, "  Images:       {}", info.image_count).unwrap();
+        if !info.resources.xobjects.is_empty() {
+            let image_count = info.resources.xobjects.iter()
+                .filter(|x| x.detail.starts_with("Image")).count();
+            let form_count = info.resources.xobjects.len() - image_count;
+            let mut label_parts = Vec::new();
+            if image_count > 0 { label_parts.push(format!("{} image{}", image_count, if image_count == 1 { "" } else { "s" })); }
+            if form_count > 0 { label_parts.push(format!("{} form{}", form_count, if form_count == 1 { "" } else { "s" })); }
+            writeln!(writer, "  XObjects:     {} ({})", info.resources.xobjects.len(),
+                label_parts.join(", ")).unwrap();
+            for e in &info.resources.xobjects {
+                let obj_str = match e.object_id {
+                    Some(id) => format!("obj {}", id.0),
+                    None => "inline".to_string(),
+                };
+                writeln!(writer, "    {:<12} -> {} ({})", e.name, obj_str, e.detail).unwrap();
+            }
         }
-        if info.ext_gstate_count > 0 {
-            writeln!(writer, "  ExtGState:    {}", info.ext_gstate_count).unwrap();
+        if !info.resources.ext_gstate.is_empty() {
+            writeln!(writer, "  ExtGState:    {}", info.resources.ext_gstate.len()).unwrap();
+            for e in &info.resources.ext_gstate {
+                let obj_str = match e.object_id {
+                    Some(id) => format!("obj {}", id.0),
+                    None => "inline".to_string(),
+                };
+                writeln!(writer, "    {:<12} -> {} ({})", e.name, obj_str, e.detail).unwrap();
+            }
+        }
+        if !info.resources.color_spaces.is_empty() {
+            writeln!(writer, "  ColorSpaces:  {}", info.resources.color_spaces.len()).unwrap();
+            for e in &info.resources.color_spaces {
+                if let Some(id) = e.object_id {
+                    writeln!(writer, "    {:<12} -> obj {} ({})", e.name, id.0, e.detail).unwrap();
+                } else {
+                    writeln!(writer, "    {:<12} -> {}", e.name, e.detail).unwrap();
+                }
+            }
         }
 
         // Annotations
@@ -150,7 +219,11 @@ pub(crate) fn print_page_info(writer: &mut impl Write, doc: &Document, spec: &Pa
 
         // Text preview
         if !info.text_preview.is_empty() {
-            writeln!(writer, "  Text preview: \"{}\"", info.text_preview).unwrap();
+            if info.text_extractable {
+                writeln!(writer, "  Text preview: \"{}\"", info.text_preview).unwrap();
+            } else {
+                writeln!(writer, "  Text preview: {}", info.text_preview).unwrap();
+            }
         }
         writeln!(writer).unwrap();
     }
@@ -176,7 +249,14 @@ pub(crate) fn print_page_info_json(writer: &mut impl Write, doc: &Document, spec
             .map(|(s, c)| json!({"subtype": s, "count": c}))
             .collect();
 
-        results.push(json!({
+        let resources_json = json!({
+            "fonts": resource_entries_to_json(&info.resources.fonts),
+            "xobjects": resource_entries_to_json(&info.resources.xobjects),
+            "ext_gstate": resource_entries_to_json(&info.resources.ext_gstate),
+            "color_spaces": resource_entries_to_json(&info.resources.color_spaces),
+        });
+
+        let mut page_json = json!({
             "page_number": info.page_num,
             "object_number": info.object_id.0,
             "generation": info.object_id.1,
@@ -191,7 +271,12 @@ pub(crate) fn print_page_info_json(writer: &mut impl Write, doc: &Document, spec
             "content_stream_count": info.content_stream_count,
             "content_stream_bytes": info.content_stream_bytes,
             "text": text_result.text,
-        }));
+            "resources": resources_json,
+        });
+        if !info.text_extractable {
+            page_json["text_extractable"] = json!(false);
+        }
+        results.push(page_json);
     }
 
     if results.len() == 1 {
@@ -259,5 +344,91 @@ mod tests {
         let doc = build_page_doc_with_content(b"BT /F1 12 Tf (Hello World) Tj ET");
         let out = output_of(|w| print_page_info(w, &doc, &PageSpec::Single(1)));
         assert!(out.contains("Text preview:") || out.contains("Hello World"));
+    }
+
+    #[test]
+    fn page_info_shows_font_detail() {
+        let doc = build_two_page_doc();
+        let out = output_of(|w| print_page_info(w, &doc, &PageSpec::Single(1)));
+        // Should show font entry with object ID and detail
+        assert!(out.contains("/F1"));
+        assert!(out.contains("obj "));
+        assert!(out.contains("Helvetica"));
+    }
+
+    #[test]
+    fn page_info_json_has_resources() {
+        let doc = build_two_page_doc();
+        let out = output_of(|w| print_page_info_json(w, &doc, &PageSpec::Single(1)));
+        let val: serde_json::Value = serde_json::from_str(&out).unwrap();
+        let res = &val["resources"];
+        assert!(res.is_object());
+        assert!(res["fonts"].is_array());
+        assert!(res["xobjects"].is_array());
+        assert!(res["ext_gstate"].is_array());
+        assert!(res["color_spaces"].is_array());
+        // The font entry should have detail
+        let fonts = res["fonts"].as_array().unwrap();
+        assert_eq!(fonts.len(), 1);
+        assert_eq!(fonts[0]["name"], "/F1");
+        assert!(fonts[0]["detail"].as_str().unwrap().contains("Helvetica"));
+    }
+
+    #[test]
+    fn page_info_with_xobjects() {
+        use lopdf::{Dictionary, Stream};
+
+        let mut doc = Document::new();
+
+        // Create an image XObject
+        let mut img_dict = Dictionary::new();
+        img_dict.set("Type", Object::Name(b"XObject".to_vec()));
+        img_dict.set("Subtype", Object::Name(b"Image".to_vec()));
+        img_dict.set("Width", Object::Integer(100));
+        img_dict.set("Height", Object::Integer(200));
+        img_dict.set("ColorSpace", Object::Name(b"DeviceRGB".to_vec()));
+        let img_stream = Stream::new(img_dict, vec![0u8; 10]);
+        let img_id = doc.add_object(Object::Stream(img_stream));
+
+        let content = Stream::new(Dictionary::new(), b"BT (test) Tj ET".to_vec());
+        let content_id = doc.add_object(Object::Stream(content));
+
+        let mut xobjects = Dictionary::new();
+        xobjects.set("Im1", Object::Reference(img_id));
+        let mut resources = Dictionary::new();
+        resources.set("XObject", Object::Dictionary(xobjects));
+
+        let mut pages_dict = Dictionary::new();
+        pages_dict.set("Type", Object::Name(b"Pages".to_vec()));
+        pages_dict.set("Count", Object::Integer(1));
+        pages_dict.set("Kids", Object::Array(vec![]));
+        let pages_id = doc.add_object(Object::Dictionary(pages_dict));
+
+        let mut page = Dictionary::new();
+        page.set("Type", Object::Name(b"Page".to_vec()));
+        page.set("Parent", Object::Reference(pages_id));
+        page.set("Contents", Object::Reference(content_id));
+        page.set("Resources", Object::Dictionary(resources));
+        page.set("MediaBox", Object::Array(vec![
+            Object::Integer(0), Object::Integer(0),
+            Object::Integer(612), Object::Integer(792),
+        ]));
+        let page_id = doc.add_object(Object::Dictionary(page));
+
+        if let Ok(Object::Dictionary(d)) = doc.get_object_mut(pages_id) {
+            d.set("Kids", Object::Array(vec![Object::Reference(page_id)]));
+        }
+
+        let mut catalog = Dictionary::new();
+        catalog.set("Type", Object::Name(b"Catalog".to_vec()));
+        catalog.set("Pages", Object::Reference(pages_id));
+        let catalog_id = doc.add_object(Object::Dictionary(catalog));
+        doc.trailer.set("Root", Object::Reference(catalog_id));
+
+        let out = output_of(|w| print_page_info(w, &doc, &PageSpec::Single(1)));
+        assert!(out.contains("XObjects:"));
+        assert!(out.contains("1 image"));
+        assert!(out.contains("/Im1"));
+        assert!(out.contains("Image, 100x200, DeviceRGB"));
     }
 }

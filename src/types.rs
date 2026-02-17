@@ -1,18 +1,106 @@
-use clap::Parser;
+use clap::{Parser, ValueEnum};
 use std::path::PathBuf;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, ValueEnum)]
+pub(crate) enum DetailSub {
+    /// Encryption and permission details
+    Security,
+    /// Embedded file attachments
+    Embedded,
+    /// Page label numbering scheme
+    Labels,
+    /// Optional content groups (layers)
+    Layers,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub(crate) enum DocMode {
+    List,
+    Validate,
+    Fonts,
+    Images,
+    Forms,
+    Bookmarks,
+    Annotations,
+    Text,
+    Operators,
+    Tags,
+    Tree,
+    FindText,
+    Detail(DetailSub),
+}
+
+impl DocMode {
+    pub fn label(&self) -> &'static str {
+        match self {
+            DocMode::List => "List",
+            DocMode::Validate => "Validate",
+            DocMode::Fonts => "Fonts",
+            DocMode::Images => "Images",
+            DocMode::Forms => "Forms",
+            DocMode::Bookmarks => "Bookmarks",
+            DocMode::Annotations => "Annotations",
+            DocMode::Text => "Text",
+            DocMode::Operators => "Operators",
+            DocMode::Tags => "Tags",
+            DocMode::Tree => "Tree",
+            DocMode::FindText => "Find Text",
+            DocMode::Detail(DetailSub::Security) => "Security",
+            DocMode::Detail(DetailSub::Embedded) => "Embedded Files",
+            DocMode::Detail(DetailSub::Labels) => "Page Labels",
+            DocMode::Detail(DetailSub::Layers) => "Layers",
+        }
+    }
+
+    pub fn json_key(&self) -> &'static str {
+        match self {
+            DocMode::List => "list",
+            DocMode::Validate => "validate",
+            DocMode::Fonts => "fonts",
+            DocMode::Images => "images",
+            DocMode::Forms => "forms",
+            DocMode::Bookmarks => "bookmarks",
+            DocMode::Annotations => "annotations",
+            DocMode::Text => "text",
+            DocMode::Operators => "operators",
+            DocMode::Tags => "tags",
+            DocMode::Tree => "tree",
+            DocMode::FindText => "find_text",
+            DocMode::Detail(DetailSub::Security) => "security",
+            DocMode::Detail(DetailSub::Embedded) => "embedded_files",
+            DocMode::Detail(DetailSub::Labels) => "page_labels",
+            DocMode::Detail(DetailSub::Layers) => "layers",
+        }
+    }
+}
+
+pub(crate) enum StandaloneMode {
+    Object { nums: Vec<u32> },
+    Inspect { obj_num: u32 },
+    Search { expr: String, list_modifier: bool },
+    ExtractStream { obj_num: u32, output: PathBuf },
+}
+
+pub(crate) enum ResolvedMode {
+    Default,
+    Combined(Vec<DocMode>),
+    Standalone(StandaloneMode),
+}
 
 /// Dumps the internal structure of a PDF file.
 #[derive(Parser, Debug)]
 #[command(author, version, about, long_about = None, after_long_help = "\
 Common workflows:
-  pdf-dump file.pdf                     Overview (metadata + validation + stats)
-  pdf-dump file.pdf --text              Extract all text
-  pdf-dump file.pdf --text --page 3     Extract text from page 3
-  pdf-dump file.pdf --page 3            Page 3 info (dimensions, resources, text preview)
-  pdf-dump file.pdf --info 5            Explain object 5
-  pdf-dump file.pdf --search Type=Font  Find all font objects
-  pdf-dump file.pdf --validate --json   Validation results as JSON
-  pdf-dump file.pdf --list              One-line listing of every object
+  pdf-dump file.pdf                      Overview (metadata + validation + stats)
+  pdf-dump file.pdf --text               Extract all text
+  pdf-dump file.pdf --text --page 3      Extract text from page 3
+  pdf-dump file.pdf --find-text \"word\"   Search for text across pages
+  pdf-dump file.pdf --page 3             Page 3 info (dimensions, resources, text preview)
+  pdf-dump file.pdf --inspect 5          Explain object 5
+  pdf-dump file.pdf --search Type=Font   Find all font objects
+  pdf-dump file.pdf --validate --json    Validation results as JSON
+  pdf-dump file.pdf --fonts --images     Combine multiple modes
+  pdf-dump file.pdf --list               One-line listing of every object
 ")]
 pub(crate) struct Args {
     /// Path to the PDF file
@@ -24,10 +112,6 @@ pub(crate) struct Args {
     /// Print a one-line listing of every object
     #[arg(short = 's', long, help_heading = "Overview")]
     pub list: bool,
-
-    /// Show document statistics (object types, stream sizes, filter usage)
-    #[arg(long, help_heading = "Overview")]
-    pub stats: bool,
 
     /// Run structural validation checks on the PDF
     #[arg(long, help_heading = "Overview")]
@@ -43,9 +127,9 @@ pub(crate) struct Args {
     #[arg(long, help_heading = "Content")]
     pub operators: bool,
 
-    /// Show page resource map (fonts, images, graphics states, color spaces)
+    /// Search for text across pages (case-insensitive substring match)
     #[arg(long, help_heading = "Content")]
-    pub resources: bool,
+    pub find_text: Option<String>,
 
     /// List all fonts in the document
     #[arg(long, help_heading = "Content")]
@@ -69,14 +153,6 @@ pub(crate) struct Args {
     #[arg(long, help_heading = "Structure")]
     pub tags: bool,
 
-    /// Show optional content groups (layers)
-    #[arg(long, alias = "ocg", help_heading = "Structure")]
-    pub layers: bool,
-
-    /// Show page labels (logical page numbering)
-    #[arg(long, help_heading = "Structure")]
-    pub page_labels: bool,
-
     // ── Annotations & Forms ──────────────────────────────────────────
 
     /// Show annotations with link targets (all pages, or filtered with --page)
@@ -95,31 +171,17 @@ pub(crate) struct Args {
 
     /// Show a human-readable explanation of an object's role, with full content
     #[arg(long, help_heading = "Objects")]
-    pub info: Option<u32>,
-
-    /// Find all objects that reference a given object number
-    #[arg(long, help_heading = "Objects")]
-    pub refs_to: Option<u32>,
+    pub inspect: Option<u32>,
 
     /// Search for objects matching an expression (e.g. Type=Font, key=MediaBox, value=Hello)
     #[arg(long, help_heading = "Objects")]
     pub search: Option<String>,
 
-    // ── Security & Files ─────────────────────────────────────────────
+    // ── Detail ────────────────────────────────────────────────────────
 
-    /// Show encryption and permission details
-    #[arg(long, help_heading = "Security & Files")]
-    pub security: bool,
-
-    /// List embedded files (file attachments)
-    #[arg(long, help_heading = "Security & Files")]
-    pub embedded_files: bool,
-
-    // ── Comparison ───────────────────────────────────────────────────
-
-    /// Compare structurally with a second PDF file
-    #[arg(long, help_heading = "Comparison")]
-    pub diff: Option<PathBuf>,
+    /// Show detail: security, embedded, labels, layers
+    #[arg(long, value_enum, help_heading = "Detail")]
+    pub detail: Vec<DetailSub>,
 
     // ── Export ────────────────────────────────────────────────────────
 
@@ -130,10 +192,6 @@ pub(crate) struct Args {
     /// Output file for extracted stream
     #[arg(long, requires = "extract_stream", help_heading = "Export")]
     pub output: Option<PathBuf>,
-
-    /// Full depth-first dump of all reachable objects from /Root
-    #[arg(long, help_heading = "Objects")]
-    pub dump: bool,
 
     // ── Modifiers ────────────────────────────────────────────────────
 
@@ -147,7 +205,7 @@ pub(crate) struct Args {
 
     /// Decode and print the content of streams
     #[arg(long, help_heading = "Modifiers")]
-    pub decode_streams: bool,
+    pub decode: bool,
 
     /// Inline-expand references to show target summaries (use with --object or --page)
     #[arg(long, help_heading = "Modifiers")]
@@ -174,9 +232,74 @@ pub(crate) struct Args {
     pub dot: bool,
 }
 
+impl Args {
+    pub fn resolve_mode(&self) -> Result<ResolvedMode, String> {
+        // Collect standalone modes
+        let mut standalone: Vec<StandaloneMode> = Vec::new();
+
+        if let Some(obj_num) = self.extract_stream {
+            let output = self.output.clone().unwrap();
+            standalone.push(StandaloneMode::ExtractStream { obj_num, output });
+        }
+        if let Some(ref spec) = self.object {
+            let nums = parse_object_spec(spec)?;
+            standalone.push(StandaloneMode::Object { nums });
+        }
+        if let Some(obj_num) = self.inspect {
+            standalone.push(StandaloneMode::Inspect { obj_num });
+        }
+        if let Some(ref expr) = self.search {
+            standalone.push(StandaloneMode::Search {
+                expr: expr.clone(),
+                list_modifier: self.list,
+            });
+        }
+
+        // Collect document-level modes
+        let mut doc_modes: Vec<DocMode> = Vec::new();
+
+        // When --search is active, --list is consumed as a search modifier, not a DocMode
+        if self.list && self.search.is_none() {
+            doc_modes.push(DocMode::List);
+        }
+        if self.validate { doc_modes.push(DocMode::Validate); }
+        if self.fonts { doc_modes.push(DocMode::Fonts); }
+        if self.images { doc_modes.push(DocMode::Images); }
+        if self.forms { doc_modes.push(DocMode::Forms); }
+        if self.bookmarks { doc_modes.push(DocMode::Bookmarks); }
+        if self.annotations { doc_modes.push(DocMode::Annotations); }
+        if self.text { doc_modes.push(DocMode::Text); }
+        if self.operators { doc_modes.push(DocMode::Operators); }
+        if self.tags { doc_modes.push(DocMode::Tags); }
+        if self.tree { doc_modes.push(DocMode::Tree); }
+        if self.find_text.is_some() { doc_modes.push(DocMode::FindText); }
+        for sub in &self.detail {
+            doc_modes.push(DocMode::Detail(*sub));
+        }
+
+        // Validate: can't mix standalone + document modes
+        if !standalone.is_empty() && !doc_modes.is_empty() {
+            return Err("Cannot combine standalone mode (--object, --inspect, --search, --extract-stream) with document-level modes.".to_string());
+        }
+
+        // Validate: at most one standalone mode
+        if standalone.len() > 1 {
+            return Err("Only one standalone mode may be used at a time (--object, --inspect, --search, --extract-stream).".to_string());
+        }
+
+        if let Some(mode) = standalone.into_iter().next() {
+            Ok(ResolvedMode::Standalone(mode))
+        } else if !doc_modes.is_empty() {
+            Ok(ResolvedMode::Combined(doc_modes))
+        } else {
+            Ok(ResolvedMode::Default)
+        }
+    }
+}
+
 #[derive(Clone, Copy)]
 pub(crate) struct DumpConfig {
-    pub decode_streams: bool,
+    pub decode: bool,
     pub truncate: Option<usize>,
     pub json: bool,
     pub hex: bool,

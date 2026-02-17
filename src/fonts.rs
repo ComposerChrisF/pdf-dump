@@ -209,7 +209,7 @@ pub(crate) fn print_fonts(writer: &mut impl Write, doc: &Document) {
     }
 }
 
-pub(crate) fn print_fonts_json(writer: &mut impl Write, doc: &Document) {
+pub(crate) fn fonts_json_value(doc: &Document) -> Value {
     let fonts = collect_fonts(doc);
     let items: Vec<Value> = fonts.iter().map(|f| {
         let mut obj = json!({
@@ -244,10 +244,15 @@ pub(crate) fn print_fonts_json(writer: &mut impl Write, doc: &Document) {
         }
         obj
     }).collect();
-    let output = json!({
+    json!({
         "font_count": items.len(),
         "fonts": items,
-    });
+    })
+}
+
+#[cfg(test)]
+pub(crate) fn print_fonts_json(writer: &mut impl Write, doc: &Document) {
+    let output = fonts_json_value(doc);
     writeln!(writer, "{}", serde_json::to_string_pretty(&output).unwrap()).unwrap();
 }
 

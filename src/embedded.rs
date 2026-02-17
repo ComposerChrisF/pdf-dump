@@ -105,7 +105,7 @@ pub(crate) fn print_embedded_files(writer: &mut impl Write, doc: &Document) {
     }
 }
 
-pub(crate) fn print_embedded_files_json(writer: &mut impl Write, doc: &Document) {
+pub(crate) fn embedded_json_value(doc: &Document) -> Value {
     let files = collect_embedded_files(doc);
     let items: Vec<Value> = files.iter().map(|f| {
         json!({
@@ -117,10 +117,15 @@ pub(crate) fn print_embedded_files_json(writer: &mut impl Write, doc: &Document)
             "filespec_object": f.filespec_object.0,
         })
     }).collect();
-    let output = json!({
+    json!({
         "embedded_file_count": items.len(),
         "embedded_files": items,
-    });
+    })
+}
+
+#[cfg(test)]
+pub(crate) fn print_embedded_files_json(writer: &mut impl Write, doc: &Document) {
+    let output = embedded_json_value(doc);
     writeln!(writer, "{}", serde_json::to_string_pretty(&output).unwrap()).unwrap();
 }
 

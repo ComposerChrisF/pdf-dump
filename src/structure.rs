@@ -206,15 +206,20 @@ fn print_struct_elem(writer: &mut impl Write, elem: &StructElemInfo, depth: usiz
     }
 }
 
-pub(crate) fn print_structure_json(writer: &mut impl Write, doc: &Document, config: &DumpConfig) {
+pub(crate) fn structure_json_value(doc: &Document, config: &DumpConfig) -> Value {
     let (is_marked, tree) = collect_structure_tree(doc);
     let count = count_struct_elems(&tree);
     let items: Vec<Value> = tree.iter().map(|e| struct_elem_to_json(e, 0, config)).collect();
-    let output = json!({
+    json!({
         "tagged": is_marked,
         "element_count": count,
         "structure": items,
-    });
+    })
+}
+
+#[cfg(test)]
+pub(crate) fn print_structure_json(writer: &mut impl Write, doc: &Document, config: &DumpConfig) {
+    let output = structure_json_value(doc, config);
     writeln!(writer, "{}", serde_json::to_string_pretty(&output).unwrap()).unwrap();
 }
 
@@ -405,7 +410,7 @@ mod tests {
     #[test]
     fn structure_depth_limit_0() {
         let doc = make_struct_doc();
-        let config = DumpConfig { decode_streams: false, truncate: None, json: false, hex: false, depth: Some(0), deref: false, raw: false };
+        let config = DumpConfig { decode: false, truncate: None, json: false, hex: false, depth: Some(0), deref: false, raw: false };
         let out = output_of(|w| print_structure(w, &doc, &config));
         assert!(out.contains("/Document"));
         assert!(out.contains("children"));
@@ -416,7 +421,7 @@ mod tests {
     #[test]
     fn structure_depth_limit_1() {
         let doc = make_struct_doc();
-        let config = DumpConfig { decode_streams: false, truncate: None, json: false, hex: false, depth: Some(1), deref: false, raw: false };
+        let config = DumpConfig { decode: false, truncate: None, json: false, hex: false, depth: Some(1), deref: false, raw: false };
         let out = output_of(|w| print_structure(w, &doc, &config));
         assert!(out.contains("/Document"));
         assert!(out.contains("/P"));
@@ -427,7 +432,7 @@ mod tests {
     #[test]
     fn structure_json_with_depth_limit() {
         let doc = make_struct_doc();
-        let config = DumpConfig { decode_streams: false, truncate: None, json: true, hex: false, depth: Some(0), deref: false, raw: false };
+        let config = DumpConfig { decode: false, truncate: None, json: true, hex: false, depth: Some(0), deref: false, raw: false };
         let out = output_of(|w| print_structure_json(w, &doc, &config));
         let parsed: Value = serde_json::from_str(&out).unwrap();
         let root = &parsed["structure"][0];

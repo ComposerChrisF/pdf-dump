@@ -7,7 +7,7 @@ use std::io::Write;
 use crate::types::DumpConfig;
 use crate::stream::decode_stream;
 use crate::helpers::object_type_label;
-use crate::object::{object_to_json, print_object};
+use crate::object::{object_to_json, print_object, object_header_label};
 use crate::summary::summary_detail;
 
 pub(crate) enum SearchCondition {
@@ -152,7 +152,7 @@ pub(crate) fn search_objects(writer: &mut impl Write, doc: &Document, conditions
                 let detail = summary_detail(object);
                 writeln!(writer, "  {:>4}  {:>3}  {:<13} {:<14} {}", obj_num, generation, kind, type_label, detail).unwrap();
             } else {
-                writeln!(writer, "Object {} {}:", obj_num, generation).unwrap();
+                writeln!(writer, "Object {} {} ({}):", obj_num, generation, object_header_label(object)).unwrap();
                 let visited = BTreeSet::new();
                 let mut child_refs = BTreeSet::new();
                 print_object(writer, object, doc, &visited, 1, config, false, &mut child_refs);
@@ -322,7 +322,7 @@ mod tests {
         let conds = vec![SearchCondition::KeyEquals { key: b"Type".to_vec(), value: b"Font".to_vec() }];
         let config = default_config();
         let out = output_of(|w| search_objects(w, &doc, &conds, &config, false));
-        assert!(out.contains("Object 1 0:"));
+        assert!(out.contains("Object 1 0 (Dictionary, /Font):"), "got: {}", out);
         assert!(out.contains("Found 1 matching objects."));
     }
 

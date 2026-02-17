@@ -212,7 +212,7 @@ pub(crate) fn print_forms(writer: &mut impl Write, doc: &Document) {
     }
 }
 
-pub(crate) fn print_forms_json(writer: &mut impl Write, doc: &Document) {
+pub(crate) fn forms_json_value(doc: &Document) -> Value {
     let (acroform_id, need_appearances, fields) = collect_form_fields(doc);
 
     let items: Vec<Value> = fields.iter().map(|f| {
@@ -227,12 +227,17 @@ pub(crate) fn print_forms_json(writer: &mut impl Write, doc: &Document) {
         })
     }).collect();
 
-    let output = json!({
+    json!({
         "acroform_object": acroform_id.map(|id| id.0),
         "need_appearances": need_appearances,
         "field_count": items.len(),
         "fields": items,
-    });
+    })
+}
+
+#[cfg(test)]
+pub(crate) fn print_forms_json(writer: &mut impl Write, doc: &Document) {
+    let output = forms_json_value(doc);
     writeln!(writer, "{}", serde_json::to_string_pretty(&output).unwrap()).unwrap();
 }
 

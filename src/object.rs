@@ -1,51 +1,11 @@
 use lopdf::{content::Content, Document, Object, ObjectId};
 use serde_json::{json, Value};
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::BTreeSet;
 use std::io::Write;
 
-use crate::types::{DumpConfig, PageSpec};
+use crate::types::DumpConfig;
 use crate::stream::{decode_stream, get_filter_names, is_binary_stream, format_hex_dump};
 use crate::helpers::{format_dict_value, format_operation, object_type_label};
-
-pub(crate) fn dump_object_and_children(writer: &mut impl Write, obj_id: ObjectId, doc: &Document, visited: &mut BTreeSet<ObjectId>, config: &DumpConfig, is_contents: bool, current_depth: usize) {
-    if visited.contains(&obj_id) {
-        return;
-    }
-    visited.insert(obj_id);
-
-    writeln!(writer, "Object {} {}:", obj_id.0, obj_id.1).unwrap();
-
-    match doc.get_object(obj_id) {
-        Ok(object) => {
-            let visited_for_print = BTreeSet::new();
-            let mut child_refs = BTreeSet::new();
-            print_object(writer, object, doc, &visited_for_print, 1, config, is_contents, &mut child_refs);
-            writeln!(writer, "\n").unwrap();
-
-            if let Some(max_depth) = config.depth
-                && current_depth >= max_depth
-            {
-                let unvisited: Vec<_> = child_refs.iter()
-                    .filter(|(_, id)| !visited.contains(id))
-                    .collect();
-                if !unvisited.is_empty() {
-                    writeln!(writer, "  (depth limit reached, {} references not followed)", unvisited.len()).unwrap();
-                }
-                return;
-            }
-
-            for (is_contents, child_id) in child_refs {
-                if !visited.contains(&child_id) {
-                    writeln!(writer, "--------------------------------\n").unwrap();
-                    dump_object_and_children(writer, child_id, doc, visited, config, is_contents, current_depth + 1);
-                }
-            }
-        }
-        Err(e) => {
-            writeln!(writer, "  Error getting object: {}", e).unwrap();
-        }
-    }
-}
 
 pub(crate) fn print_stream_content(writer: &mut impl Write, stream: &lopdf::Stream, indent_str: &str, config: &DumpConfig, is_contents: bool) {
     let (decoded_content, warning) = decode_stream(stream);
@@ -156,7 +116,7 @@ pub(crate) fn print_object(writer: &mut impl Write, obj: &Object, doc: &Document
 
             if config.raw {
                 print_content_data(writer, &stream.content, "raw, undecoded", &indent_str, config, false, None);
-            } else if config.decode_streams {
+            } else if config.decode {
                 print_stream_content(writer, stream, &indent_str, config, is_contents);
             }
         }
@@ -222,11 +182,21 @@ pub(crate) fn deref_summary(obj: &Object, _doc: &Document) -> String {
     }
 }
 
+pub(crate) fn object_header_label(obj: &Object) -> String {
+    let variant = obj.enum_variant();
+    let type_name = object_type_label(obj);
+    if type_name != "-" {
+        format!("{}, /{}", variant, type_name)
+    } else {
+        variant.to_string()
+    }
+}
+
 pub(crate) fn print_single_object(writer: &mut impl Write, doc: &Document, obj_num: u32, config: &DumpConfig) {
     let obj_id = (obj_num, 0);
     match doc.get_object(obj_id) {
         Ok(object) => {
-            writeln!(writer, "Object {} 0:", obj_num).unwrap();
+            writeln!(writer, "Object {} 0 ({}):", obj_num, object_header_label(object)).unwrap();
             let visited = BTreeSet::new();
             let mut child_refs = BTreeSet::new();
             print_object(writer, object, doc, &visited, 1, config, false, &mut child_refs);
@@ -275,34 +245,6 @@ pub(crate) fn print_objects_json(writer: &mut impl Write, doc: &Document, nums: 
     }
 }
 
-#[allow(dead_code)]
-pub(crate) fn dump_page(writer: &mut impl Write, doc: &Document, spec: &PageSpec, config: &DumpConfig) {
-    let pages = doc.get_pages();
-    let total = pages.len();
-
-    for page_num in spec.pages() {
-        let page_id = match pages.get(&page_num) {
-            Some(&id) => id,
-            None => {
-                eprintln!("Error: Page {} not found. Document has {} pages.", page_num, total);
-                std::process::exit(1);
-            }
-        };
-
-        let mut visited = BTreeSet::new();
-
-        // Pre-seed visited with /Parent to confine traversal to this page's subtree
-        if let Ok(Object::Dictionary(dict)) = doc.get_object(page_id)
-            && let Ok(parent_ref) = dict.get(b"Parent").and_then(|o| o.as_reference())
-        {
-            visited.insert(parent_ref);
-        }
-
-        writeln!(writer, "Page {} (Object {} {}):", page_num, page_id.0, page_id.1).unwrap();
-        dump_object_and_children(writer, page_id, doc, &mut visited, config, false, 0);
-    }
-}
-
 // ── JSON output (Phase 1) ────────────────────────────────────────────
 
 #[allow(clippy::only_used_in_recursion)]
@@ -343,7 +285,7 @@ pub(crate) fn object_to_json(obj: &Object, doc: &Document, config: &DumpConfig) 
                 } else {
                     val["raw_content_binary"] = json!(format!("<binary, {} bytes>", content.len()));
                 }
-            } else if config.decode_streams {
+            } else if config.decode {
                 let (decoded, warning) = decode_stream(stream);
                 if let Some(warn) = &warning {
                     val["decode_warning"] = json!(warn);
@@ -377,59 +319,6 @@ pub(crate) fn object_to_json(obj: &Object, doc: &Document, config: &DumpConfig) 
     }
 }
 
-pub(crate) fn collect_reachable_objects(doc: &Document, max_depth: Option<usize>) -> BTreeMap<String, Value> {
-    let config = DumpConfig { decode_streams: false, truncate: None, json: true, hex: false, depth: None, deref: false, raw: false };
-    let mut result = BTreeMap::new();
-    let mut visited = BTreeSet::new();
-
-    fn walk(doc: &Document, obj_id: ObjectId, visited: &mut BTreeSet<ObjectId>, result: &mut BTreeMap<String, Value>, config: &DumpConfig, current_depth: usize, max_depth: Option<usize>) {
-        if visited.contains(&obj_id) { return; }
-        if let Some(max) = max_depth
-            && current_depth > max { return; }
-        visited.insert(obj_id);
-        if let Ok(obj) = doc.get_object(obj_id) {
-            let key = format!("{}:{}", obj_id.0, obj_id.1);
-            result.insert(key, object_to_json(obj, doc, config));
-            collect_refs(obj, doc, visited, result, config, current_depth, max_depth);
-        }
-    }
-
-    fn collect_refs(obj: &Object, doc: &Document, visited: &mut BTreeSet<ObjectId>, result: &mut BTreeMap<String, Value>, config: &DumpConfig, current_depth: usize, max_depth: Option<usize>) {
-        match obj {
-            Object::Reference(id) => walk(doc, *id, visited, result, config, current_depth + 1, max_depth),
-            Object::Array(arr) => {
-                for item in arr { collect_refs(item, doc, visited, result, config, current_depth, max_depth); }
-            }
-            Object::Dictionary(dict) => {
-                for (_, v) in dict.iter() { collect_refs(v, doc, visited, result, config, current_depth, max_depth); }
-            }
-            Object::Stream(stream) => {
-                for (_, v) in stream.dict.iter() { collect_refs(v, doc, visited, result, config, current_depth, max_depth); }
-            }
-            _ => {}
-        }
-    }
-
-    // Start from trailer refs
-    for (_, v) in doc.trailer.iter() {
-        if let Ok(id) = v.as_reference() {
-            walk(doc, id, &mut visited, &mut result, &config, 0, max_depth);
-        }
-    }
-
-    result
-}
-
-pub(crate) fn dump_json(writer: &mut impl Write, doc: &Document, config: &DumpConfig) {
-    let trailer_json = object_to_json(&Object::Dictionary(doc.trailer.clone()), doc, config);
-    let objects = collect_reachable_objects(doc, config.depth);
-    let output = json!({
-        "trailer": trailer_json,
-        "objects": objects,
-    });
-    writeln!(writer, "{}", serde_json::to_string_pretty(&output).unwrap()).unwrap();
-}
-
 pub(crate) fn print_single_object_json(writer: &mut impl Write, doc: &Document, obj_num: u32, config: &DumpConfig) {
     let obj_id = (obj_num, 0);
     match doc.get_object(obj_id) {
@@ -448,80 +337,11 @@ pub(crate) fn print_single_object_json(writer: &mut impl Write, doc: &Document, 
     }
 }
 
-#[allow(dead_code)]
-pub(crate) fn dump_page_json(writer: &mut impl Write, doc: &Document, spec: &PageSpec, config: &DumpConfig) {
-    let pages = doc.get_pages();
-    let total = pages.len();
-
-    fn walk_page(doc: &Document, obj_id: ObjectId, visited: &mut BTreeSet<ObjectId>, objects: &mut BTreeMap<String, Value>, config: &DumpConfig) {
-        if visited.contains(&obj_id) { return; }
-        visited.insert(obj_id);
-        if let Ok(obj) = doc.get_object(obj_id) {
-            let key = format!("{}:{}", obj_id.0, obj_id.1);
-            objects.insert(key, object_to_json(obj, doc, config));
-            collect_refs_page(obj, doc, visited, objects, config);
-        }
-    }
-
-    fn collect_refs_page(obj: &Object, doc: &Document, visited: &mut BTreeSet<ObjectId>, objects: &mut BTreeMap<String, Value>, config: &DumpConfig) {
-        match obj {
-            Object::Reference(id) => walk_page(doc, *id, visited, objects, config),
-            Object::Array(arr) => {
-                for item in arr { collect_refs_page(item, doc, visited, objects, config); }
-            }
-            Object::Dictionary(dict) => {
-                for (_, v) in dict.iter() { collect_refs_page(v, doc, visited, objects, config); }
-            }
-            Object::Stream(stream) => {
-                for (_, v) in stream.dict.iter() { collect_refs_page(v, doc, visited, objects, config); }
-            }
-            _ => {}
-        }
-    }
-
-    let mut page_outputs = Vec::new();
-
-    for page_num in spec.pages() {
-        let page_id = match pages.get(&page_num) {
-            Some(&id) => id,
-            None => {
-                eprintln!("Error: Page {} not found. Document has {} pages.", page_num, total);
-                std::process::exit(1);
-            }
-        };
-
-        let mut visited = BTreeSet::new();
-        let mut objects = BTreeMap::new();
-
-        if let Ok(Object::Dictionary(dict)) = doc.get_object(page_id)
-            && let Ok(parent_ref) = dict.get(b"Parent").and_then(|o| o.as_reference())
-        {
-            visited.insert(parent_ref);
-        }
-
-        walk_page(doc, page_id, &mut visited, &mut objects, config);
-
-        page_outputs.push(json!({
-            "page_number": page_num,
-            "objects": objects,
-        }));
-    }
-
-    // For single page, output as before; for range, output array
-    if page_outputs.len() == 1 {
-        writeln!(writer, "{}", serde_json::to_string_pretty(&page_outputs[0]).unwrap()).unwrap();
-    } else {
-        writeln!(writer, "{}", serde_json::to_string_pretty(&json!({"pages": page_outputs})).unwrap()).unwrap();
-    }
-}
-
-
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::test_utils::*;
     use crate::types::DumpConfig;
-    use crate::types::PageSpec;
     use lopdf::{Dictionary, Stream, StringFormat};
     use pretty_assertions::assert_eq;
     use serde_json::{Value};
@@ -530,7 +350,6 @@ mod tests {
     use lopdf::Document;
     use crate::validate::collect_reachable_ids;
     use flate2::write::ZlibEncoder;
-    
 
     #[test]
     fn print_content_data_with_warning() {
@@ -558,7 +377,7 @@ mod tests {
             Some(Object::Name(b"FlateDecode".to_vec())),
             b"corrupt data".to_vec(),
         );
-        let config = DumpConfig { decode_streams: true, truncate: None, json: true, hex: false, depth: None, deref: false, raw: false };
+        let config = DumpConfig { decode: true, truncate: None, json: true, hex: false, depth: None, deref: false, raw: false };
         let val = object_to_json(&Object::Stream(stream), &empty_doc(), &config);
         assert!(val.get("decode_warning").is_some(), "Corrupt stream should have decode_warning in JSON");
     }
@@ -566,7 +385,7 @@ mod tests {
     #[test]
     fn object_to_json_stream_no_decode_warning() {
         let stream = make_stream(None, b"text content".to_vec());
-        let config = DumpConfig { decode_streams: true, truncate: None, json: true, hex: false, depth: None, deref: false, raw: false };
+        let config = DumpConfig { decode: true, truncate: None, json: true, hex: false, depth: None, deref: false, raw: false };
         let val = object_to_json(&Object::Stream(stream), &empty_doc(), &config);
         assert!(val.get("decode_warning").is_none(), "Valid stream should not have decode_warning");
     }
@@ -647,7 +466,7 @@ mod tests {
         let (out, _) = print_obj(&Object::Stream(stream));
         assert!(out.contains("<<"));
         assert!(out.contains(">> stream"));
-        // decode_streams=false, so no stream content printed
+        // decode=false, so no stream content printed
         assert!(!out.contains("Stream content"));
     }
 
@@ -657,7 +476,7 @@ mod tests {
         let doc = empty_doc();
         let visited = BTreeSet::new();
         let mut child_refs = BTreeSet::new();
-        let config = DumpConfig { decode_streams: true, truncate: None, json: false, hex: false, depth: None, deref: false, raw: false };
+        let config = DumpConfig { decode: true, truncate: None, json: false, hex: false, depth: None, deref: false, raw: false };
         let out = output_of(|w| {
             print_object(w, &Object::Stream(stream), &doc, &visited, 1, &config, false, &mut child_refs);
         });
@@ -717,7 +536,7 @@ mod tests {
     fn print_content_data_binary_truncated() {
         // 200 bytes of binary data (contains 0x80 so is_binary_stream = true)
         let content: Vec<u8> = (0..200).map(|i| (i as u8).wrapping_add(0x80)).collect();
-        let config = DumpConfig { decode_streams: false, truncate: Some(100), json: false, hex: false, depth: None, deref: false, raw: false };
+        let config = DumpConfig { decode: false, truncate: Some(100), json: false, hex: false, depth: None, deref: false, raw: false };
         let out = output_of(|w| {
             print_content_data(w, &content, "raw", "", &config, false, None);
         });
@@ -734,64 +553,6 @@ mod tests {
         });
         assert!(out.contains("Parsed Content Stream"));
         assert!(out.contains("operations"));
-    }
-
-    #[test]
-    fn dump_single_object_no_refs() {
-        let mut doc = Document::new();
-        doc.objects.insert((1, 0), Object::Integer(42));
-        let mut visited = BTreeSet::new();
-        let config = default_config();
-        let out = output_of(|w| {
-            dump_object_and_children(w, (1, 0), &doc, &mut visited, &config, false, 0);
-        });
-        assert!(out.contains("Object 1 0:"));
-        assert!(out.contains("42"));
-        assert!(visited.contains(&(1, 0)));
-    }
-
-    #[test]
-    fn dump_object_follows_references() {
-        let mut doc = Document::new();
-        // Object 1 is a dict with a reference to object 2
-        let mut dict = Dictionary::new();
-        dict.set("Child", Object::Reference((2, 0)));
-        doc.objects.insert((1, 0), Object::Dictionary(dict));
-        doc.objects.insert((2, 0), Object::Integer(99));
-
-        let mut visited = BTreeSet::new();
-        let config = default_config();
-        let out = output_of(|w| {
-            dump_object_and_children(w, (1, 0), &doc, &mut visited, &config, false, 0);
-        });
-        assert!(out.contains("Object 1 0:"));
-        assert!(out.contains("Object 2 0:"));
-        assert!(out.contains("99"));
-        assert!(visited.contains(&(1, 0)));
-        assert!(visited.contains(&(2, 0)));
-    }
-
-    #[test]
-    fn dump_object_circular_reference() {
-        let mut doc = Document::new();
-        // Object 1 references object 2, object 2 references object 1
-        let mut dict1 = Dictionary::new();
-        dict1.set("Next", Object::Reference((2, 0)));
-        let mut dict2 = Dictionary::new();
-        dict2.set("Prev", Object::Reference((1, 0)));
-        doc.objects.insert((1, 0), Object::Dictionary(dict1));
-        doc.objects.insert((2, 0), Object::Dictionary(dict2));
-
-        let mut visited = BTreeSet::new();
-        let config = default_config();
-        // This should terminate (not infinite-loop) thanks to the visited set
-        let out = output_of(|w| {
-            dump_object_and_children(w, (1, 0), &doc, &mut visited, &config, false, 0);
-        });
-        assert!(out.contains("Object 1 0:"));
-        assert!(out.contains("Object 2 0:"));
-        assert!(visited.contains(&(1, 0)));
-        assert!(visited.contains(&(2, 0)));
     }
 
     #[test]
@@ -871,7 +632,7 @@ mod tests {
         let doc = empty_doc();
         let visited = BTreeSet::new();
         let mut child_refs = BTreeSet::new();
-        let config = DumpConfig { decode_streams: true, truncate: None, json: false, hex: false, depth: None, deref: false, raw: false };
+        let config = DumpConfig { decode: true, truncate: None, json: false, hex: false, depth: None, deref: false, raw: false };
         let out = output_of(|w| {
             print_object(w, &Object::Stream(stream), &doc, &visited, 1, &config, false, &mut child_refs);
         });
@@ -943,7 +704,7 @@ mod tests {
     fn print_content_data_binary_short_with_truncation_enabled() {
         // Binary content < 100 bytes with truncation enabled → no truncation applied
         let content: Vec<u8> = vec![0x80; 50];
-        let config = DumpConfig { decode_streams: false, truncate: Some(100), json: false, hex: false, depth: None, deref: false, raw: false };
+        let config = DumpConfig { decode: false, truncate: Some(100), json: false, hex: false, depth: None, deref: false, raw: false };
         let out = output_of(|w| {
             print_content_data(w, &content, "raw", "", &config, false, None);
         });
@@ -955,7 +716,7 @@ mod tests {
     fn print_content_data_binary_exactly_100_bytes_with_truncation() {
         // Exactly 100 bytes of binary → no truncation (only truncates > 100)
         let content: Vec<u8> = vec![0x80; 100];
-        let config = DumpConfig { decode_streams: false, truncate: Some(100), json: false, hex: false, depth: None, deref: false, raw: false };
+        let config = DumpConfig { decode: false, truncate: Some(100), json: false, hex: false, depth: None, deref: false, raw: false };
         let out = output_of(|w| {
             print_content_data(w, &content, "raw", "", &config, false, None);
         });
@@ -967,7 +728,7 @@ mod tests {
     fn print_content_data_binary_101_bytes_with_truncation() {
         // 101 bytes of binary → should truncate
         let content: Vec<u8> = vec![0x80; 101];
-        let config = DumpConfig { decode_streams: false, truncate: Some(100), json: false, hex: false, depth: None, deref: false, raw: false };
+        let config = DumpConfig { decode: false, truncate: Some(100), json: false, hex: false, depth: None, deref: false, raw: false };
         let out = output_of(|w| {
             print_content_data(w, &content, "raw", "", &config, false, None);
         });
@@ -977,7 +738,7 @@ mod tests {
     #[test]
     fn print_content_data_truncate_none_no_truncation() {
         let content: Vec<u8> = vec![0x80; 200];
-        let config = DumpConfig { decode_streams: false, truncate: None, json: false, hex: false, depth: None, deref: false, raw: false };
+        let config = DumpConfig { decode: false, truncate: None, json: false, hex: false, depth: None, deref: false, raw: false };
         let out = output_of(|w| {
             print_content_data(w, &content, "raw", "", &config, false, None);
         });
@@ -988,7 +749,7 @@ mod tests {
     #[test]
     fn print_content_data_truncate_custom_50() {
         let content: Vec<u8> = vec![0x80; 200];
-        let config = DumpConfig { decode_streams: false, truncate: Some(50), json: false, hex: false, depth: None, deref: false, raw: false };
+        let config = DumpConfig { decode: false, truncate: Some(50), json: false, hex: false, depth: None, deref: false, raw: false };
         let out = output_of(|w| {
             print_content_data(w, &content, "raw", "", &config, false, None);
         });
@@ -998,7 +759,7 @@ mod tests {
     #[test]
     fn print_content_data_truncate_larger_than_stream() {
         let content: Vec<u8> = vec![0x80; 50];
-        let config = DumpConfig { decode_streams: false, truncate: Some(500), json: false, hex: false, depth: None, deref: false, raw: false };
+        let config = DumpConfig { decode: false, truncate: Some(500), json: false, hex: false, depth: None, deref: false, raw: false };
         let out = output_of(|w| {
             print_content_data(w, &content, "raw", "", &config, false, None);
         });
@@ -1027,7 +788,7 @@ mod tests {
     fn print_content_data_ascii_not_truncated_even_when_flag_set() {
         // ASCII content >100 bytes with truncation flag → no truncation (not binary)
         let content = b"abcdefghij".repeat(20); // 200 bytes of ASCII
-        let config = DumpConfig { decode_streams: false, truncate: Some(100), json: false, hex: false, depth: None, deref: false, raw: false };
+        let config = DumpConfig { decode: false, truncate: Some(100), json: false, hex: false, depth: None, deref: false, raw: false };
         let out = output_of(|w| {
             print_content_data(w, &content, "raw", "", &config, false, None);
         });
@@ -1066,7 +827,7 @@ mod tests {
         // Large binary stream with truncation enabled
         let content: Vec<u8> = vec![0x80; 200];
         let stream = make_stream(None, content);
-        let config = DumpConfig { decode_streams: false, truncate: Some(100), json: false, hex: false, depth: None, deref: false, raw: false };
+        let config = DumpConfig { decode: false, truncate: Some(100), json: false, hex: false, depth: None, deref: false, raw: false };
         let out = output_of(|w| {
             print_stream_content(w, &stream, "", &config, false);
         });
@@ -1082,133 +843,6 @@ mod tests {
             print_stream_content(w, &stream, "  ", &config, true);
         });
         assert!(out.contains("Parsed Content Stream"));
-    }
-
-    #[test]
-    fn dump_object_not_found() {
-        let doc = Document::new();
-        let mut visited = BTreeSet::new();
-        let config = default_config();
-        let out = output_of(|w| {
-            dump_object_and_children(w, (99, 0), &doc, &mut visited, &config, false, 0);
-        });
-        assert!(out.contains("Object 99 0:"));
-        assert!(out.contains("Error getting object"));
-        assert!(visited.contains(&(99, 0)));
-    }
-
-    #[test]
-    fn dump_object_already_visited_produces_no_output() {
-        let mut doc = Document::new();
-        doc.objects.insert((1, 0), Object::Integer(42));
-        let mut visited = BTreeSet::new();
-        visited.insert((1, 0));
-        let config = default_config();
-        let out = output_of(|w| {
-            dump_object_and_children(w, (1, 0), &doc, &mut visited, &config, false, 0);
-        });
-        assert_eq!(out, "");
-    }
-
-    #[test]
-    fn dump_object_deep_chain_three_levels() {
-        let mut doc = Document::new();
-        let mut dict1 = Dictionary::new();
-        dict1.set("Next", Object::Reference((2, 0)));
-        let mut dict2 = Dictionary::new();
-        dict2.set("Next", Object::Reference((3, 0)));
-        doc.objects.insert((1, 0), Object::Dictionary(dict1));
-        doc.objects.insert((2, 0), Object::Dictionary(dict2));
-        doc.objects.insert((3, 0), Object::Integer(777));
-
-        let mut visited = BTreeSet::new();
-        let config = default_config();
-        let out = output_of(|w| {
-            dump_object_and_children(w, (1, 0), &doc, &mut visited, &config, false, 0);
-        });
-        assert!(out.contains("Object 1 0:"));
-        assert!(out.contains("Object 2 0:"));
-        assert!(out.contains("Object 3 0:"));
-        assert!(out.contains("777"));
-        assert_eq!(visited.len(), 3);
-    }
-
-    #[test]
-    fn dump_object_multiple_children_from_parent() {
-        let mut doc = Document::new();
-        let mut dict = Dictionary::new();
-        dict.set("Child1", Object::Reference((2, 0)));
-        dict.set("Child2", Object::Reference((3, 0)));
-        doc.objects.insert((1, 0), Object::Dictionary(dict));
-        doc.objects.insert((2, 0), Object::Integer(22));
-        doc.objects.insert((3, 0), Object::Integer(33));
-
-        let mut visited = BTreeSet::new();
-        let config = default_config();
-        let out = output_of(|w| {
-            dump_object_and_children(w, (1, 0), &doc, &mut visited, &config, false, 0);
-        });
-        assert!(out.contains("Object 1 0:"));
-        assert!(out.contains("Object 2 0:"));
-        assert!(out.contains("Object 3 0:"));
-        assert!(out.contains("22"));
-        assert!(out.contains("33"));
-    }
-
-    #[test]
-    fn dump_object_with_stream_and_decode() {
-        let mut doc = Document::new();
-        let compressed = zlib_compress(b"stream content here");
-        let stream = make_stream(
-            Some(Object::Name(b"FlateDecode".to_vec())),
-            compressed,
-        );
-        doc.objects.insert((1, 0), Object::Stream(stream));
-
-        let mut visited = BTreeSet::new();
-        let config = DumpConfig { decode_streams: true, truncate: None, json: false, hex: false, depth: None, deref: false, raw: false };
-        let out = output_of(|w| {
-            dump_object_and_children(w, (1, 0), &doc, &mut visited, &config, false, 0);
-        });
-        assert!(out.contains("Object 1 0:"));
-        assert!(out.contains("stream content here"));
-    }
-
-    #[test]
-    fn dump_object_is_contents_propagates() {
-        let mut doc = Document::new();
-        // Object 1 has /Contents referencing object 2
-        let mut dict = Dictionary::new();
-        dict.set("Contents", Object::Reference((2, 0)));
-        doc.objects.insert((1, 0), Object::Dictionary(dict));
-        // Object 2 is a valid content stream
-        let content = b"BT\n/F1 12 Tf\nET";
-        let stream = make_stream(None, content.to_vec());
-        doc.objects.insert((2, 0), Object::Stream(stream));
-
-        let mut visited = BTreeSet::new();
-        let config = DumpConfig { decode_streams: true, truncate: None, json: false, hex: false, depth: None, deref: false, raw: false };
-        let out = output_of(|w| {
-            dump_object_and_children(w, (1, 0), &doc, &mut visited, &config, false, 0);
-        });
-        assert!(out.contains("Object 2 0:"));
-        assert!(out.contains("Parsed Content Stream"));
-    }
-
-    #[test]
-    fn dump_object_separator_between_siblings() {
-        let mut doc = Document::new();
-        let mut dict = Dictionary::new();
-        dict.set("A", Object::Reference((2, 0)));
-        doc.objects.insert((1, 0), Object::Dictionary(dict));
-        doc.objects.insert((2, 0), Object::Integer(1));
-
-        let mut visited = BTreeSet::new();
-        let config = default_config();
-        let out = output_of(|w| {
-            dump_object_and_children(w, (1, 0), &doc, &mut visited, &config, false, 0);
-        });
-        assert!(out.contains("--------------------------------"));
     }
 
     #[test]
@@ -1437,248 +1071,6 @@ mod tests {
     }
 
     #[test]
-    fn dump_object_stream_dict_refs_traversed() {
-        // Stream dict contains references → those children should be traversed
-        let mut doc = Document::new();
-        let mut dict = Dictionary::new();
-        dict.set("Font", Object::Reference((2, 0)));
-        let stream = Stream::new(dict, b"data".to_vec());
-        doc.objects.insert((1, 0), Object::Stream(stream));
-        doc.objects.insert((2, 0), Object::Integer(42));
-
-        let mut visited = BTreeSet::new();
-        let config = default_config();
-        let out = output_of(|w| {
-            dump_object_and_children(w, (1, 0), &doc, &mut visited, &config, false, 0);
-        });
-        assert!(out.contains("Object 1 0:"), "Parent stream should be printed");
-        assert!(out.contains("Object 2 0:"), "Referenced object in stream dict should be traversed");
-        assert!(out.contains("42"));
-    }
-
-    #[test]
-    fn dump_object_is_contents_direct_param() {
-        // Passing is_contents=true directly to dump_object_and_children
-        let mut doc = Document::new();
-        let content = b"BT\n/F1 12 Tf\nET";
-        let stream = make_stream(None, content.to_vec());
-        doc.objects.insert((1, 0), Object::Stream(stream));
-
-        let mut visited = BTreeSet::new();
-        let config = DumpConfig { decode_streams: true, truncate: None, json: false, hex: false, depth: None, deref: false, raw: false };
-        let out = output_of(|w| {
-            dump_object_and_children(w, (1, 0), &doc, &mut visited, &config, true, 0);
-        });
-        assert!(out.contains("Parsed Content Stream"), "Direct is_contents=true should trigger content parsing");
-    }
-
-    #[test]
-    fn dump_object_with_decode_and_truncate() {
-        // Both decode_streams=true and truncate=Some(100) with binary stream
-        let mut doc = Document::new();
-        let binary_content: Vec<u8> = vec![0x80; 200];
-        let stream = make_stream(None, binary_content);
-        doc.objects.insert((1, 0), Object::Stream(stream));
-
-        let mut visited = BTreeSet::new();
-        let config = DumpConfig { decode_streams: true, truncate: Some(100), json: false, hex: false, depth: None, deref: false, raw: false };
-        let out = output_of(|w| {
-            dump_object_and_children(w, (1, 0), &doc, &mut visited, &config, false, 0);
-        });
-        assert!(out.contains("truncated to 100"), "Binary stream should be truncated");
-    }
-
-    #[test]
-    fn dump_object_diamond_dependency() {
-        // A → B, A → C, B → D, C → D  (diamond: D visited once)
-        let mut doc = Document::new();
-        let mut dict_a = Dictionary::new();
-        dict_a.set("B", Object::Reference((2, 0)));
-        dict_a.set("C", Object::Reference((3, 0)));
-        let mut dict_b = Dictionary::new();
-        dict_b.set("D", Object::Reference((4, 0)));
-        let mut dict_c = Dictionary::new();
-        dict_c.set("D", Object::Reference((4, 0)));
-
-        doc.objects.insert((1, 0), Object::Dictionary(dict_a));
-        doc.objects.insert((2, 0), Object::Dictionary(dict_b));
-        doc.objects.insert((3, 0), Object::Dictionary(dict_c));
-        doc.objects.insert((4, 0), Object::Integer(999));
-
-        let mut visited = BTreeSet::new();
-        let config = default_config();
-        let out = output_of(|w| {
-            dump_object_and_children(w, (1, 0), &doc, &mut visited, &config, false, 0);
-        });
-        assert_eq!(visited.len(), 4, "All 4 objects should be visited exactly once");
-        // Object 4 should appear exactly once (not duplicated)
-        let count = out.matches("Object 4 0:").count();
-        assert_eq!(count, 1, "Diamond dependency: object 4 should be dumped only once");
-    }
-
-    #[test]
-    fn dump_object_self_referencing() {
-        // An object that references itself
-        let mut doc = Document::new();
-        let mut dict = Dictionary::new();
-        dict.set("Self", Object::Reference((1, 0)));
-        doc.objects.insert((1, 0), Object::Dictionary(dict));
-
-        let mut visited = BTreeSet::new();
-        let config = default_config();
-        let out = output_of(|w| {
-            dump_object_and_children(w, (1, 0), &doc, &mut visited, &config, false, 0);
-        });
-        // Should terminate and print the object once
-        let count = out.matches("Object 1 0:").count();
-        assert_eq!(count, 1, "Self-referencing object should be printed once");
-    }
-
-    #[test]
-    fn depth_zero_prints_root_only() {
-        // depth=0 means print root but don't follow any refs
-        let mut doc = Document::new();
-        let child_dict = Dictionary::from_iter(vec![
-            ("Type", Object::Name(b"Child".to_vec())),
-        ]);
-        doc.objects.insert((2, 0), Object::Dictionary(child_dict));
-        let root_dict = Dictionary::from_iter(vec![
-            ("Type", Object::Name(b"Root".to_vec())),
-            ("Child", Object::Reference((2, 0))),
-        ]);
-        doc.objects.insert((1, 0), Object::Dictionary(root_dict));
-
-        let mut visited = BTreeSet::new();
-        let config = DumpConfig { decode_streams: false, truncate: None, json: false, hex: false, depth: Some(0), deref: false, raw: false };
-        let out = output_of(|w| {
-            dump_object_and_children(w, (1, 0), &doc, &mut visited, &config, false, 0);
-        });
-        assert!(out.contains("Object 1 0:"), "Should print root object");
-        assert!(!out.contains("Object 2 0:"), "Should NOT follow child ref");
-        assert!(out.contains("depth limit reached"));
-        assert!(out.contains("1 references not followed"));
-    }
-
-    #[test]
-    fn depth_one_follows_immediate_refs_only() {
-        // Root -> Child -> Grandchild; depth=1 should show Root + Child but not Grandchild
-        let mut doc = Document::new();
-        let gc_dict = Dictionary::from_iter(vec![
-            ("Type", Object::Name(b"Grandchild".to_vec())),
-        ]);
-        doc.objects.insert((3, 0), Object::Dictionary(gc_dict));
-        let child_dict = Dictionary::from_iter(vec![
-            ("Type", Object::Name(b"Child".to_vec())),
-            ("Next", Object::Reference((3, 0))),
-        ]);
-        doc.objects.insert((2, 0), Object::Dictionary(child_dict));
-        let root_dict = Dictionary::from_iter(vec![
-            ("Type", Object::Name(b"Root".to_vec())),
-            ("Child", Object::Reference((2, 0))),
-        ]);
-        doc.objects.insert((1, 0), Object::Dictionary(root_dict));
-
-        let mut visited = BTreeSet::new();
-        let config = DumpConfig { decode_streams: false, truncate: None, json: false, hex: false, depth: Some(1), deref: false, raw: false };
-        let out = output_of(|w| {
-            dump_object_and_children(w, (1, 0), &doc, &mut visited, &config, false, 0);
-        });
-        assert!(out.contains("Object 1 0:"), "Should print root");
-        assert!(out.contains("Object 2 0:"), "Should follow immediate child");
-        assert!(!out.contains("Object 3 0:"), "Should NOT follow grandchild");
-        assert!(out.contains("depth limit reached"));
-    }
-
-    #[test]
-    fn depth_none_traverses_everything() {
-        // depth=None means unlimited (current behavior)
-        let mut doc = Document::new();
-        let gc_dict = Dictionary::from_iter(vec![
-            ("Type", Object::Name(b"Grandchild".to_vec())),
-        ]);
-        doc.objects.insert((3, 0), Object::Dictionary(gc_dict));
-        let child_dict = Dictionary::from_iter(vec![
-            ("Type", Object::Name(b"Child".to_vec())),
-            ("Next", Object::Reference((3, 0))),
-        ]);
-        doc.objects.insert((2, 0), Object::Dictionary(child_dict));
-        let root_dict = Dictionary::from_iter(vec![
-            ("Type", Object::Name(b"Root".to_vec())),
-            ("Child", Object::Reference((2, 0))),
-        ]);
-        doc.objects.insert((1, 0), Object::Dictionary(root_dict));
-
-        let mut visited = BTreeSet::new();
-        let config = DumpConfig { decode_streams: false, truncate: None, json: false, hex: false, depth: None, deref: false, raw: false };
-        let out = output_of(|w| {
-            dump_object_and_children(w, (1, 0), &doc, &mut visited, &config, false, 0);
-        });
-        assert!(out.contains("Object 1 0:"), "Should print root");
-        assert!(out.contains("Object 2 0:"), "Should print child");
-        assert!(out.contains("Object 3 0:"), "Should print grandchild");
-        assert!(!out.contains("depth limit reached"));
-    }
-
-    #[test]
-    fn depth_limit_shows_correct_ref_count() {
-        // Root has 3 child refs, depth=0 should say "3 references not followed"
-        let mut doc = Document::new();
-        doc.objects.insert((2, 0), Object::Dictionary(Dictionary::new()));
-        doc.objects.insert((3, 0), Object::Dictionary(Dictionary::new()));
-        doc.objects.insert((4, 0), Object::Dictionary(Dictionary::new()));
-        let root_dict = Dictionary::from_iter(vec![
-            ("A", Object::Reference((2, 0))),
-            ("B", Object::Reference((3, 0))),
-            ("C", Object::Reference((4, 0))),
-        ]);
-        doc.objects.insert((1, 0), Object::Dictionary(root_dict));
-
-        let mut visited = BTreeSet::new();
-        let config = DumpConfig { decode_streams: false, truncate: None, json: false, hex: false, depth: Some(0), deref: false, raw: false };
-        let out = output_of(|w| {
-            dump_object_and_children(w, (1, 0), &doc, &mut visited, &config, false, 0);
-        });
-        assert!(out.contains("3 references not followed"));
-    }
-
-    #[test]
-    fn collect_reachable_with_depth_limit() {
-        let mut doc = Document::new();
-        let gc_dict = Dictionary::from_iter(vec![
-            ("Type", Object::Name(b"Grandchild".to_vec())),
-        ]);
-        doc.objects.insert((3, 0), Object::Dictionary(gc_dict));
-        let child_dict = Dictionary::from_iter(vec![
-            ("Type", Object::Name(b"Child".to_vec())),
-            ("Next", Object::Reference((3, 0))),
-        ]);
-        doc.objects.insert((2, 0), Object::Dictionary(child_dict));
-        let root_dict = Dictionary::from_iter(vec![
-            ("Type", Object::Name(b"Root".to_vec())),
-            ("Child", Object::Reference((2, 0))),
-        ]);
-        doc.objects.insert((1, 0), Object::Dictionary(root_dict));
-        doc.trailer.set("Root", Object::Reference((1, 0)));
-
-        // depth=0: only the root (immediate trailer ref)
-        let objects = collect_reachable_objects(&doc, Some(0));
-        assert!(objects.contains_key("1:0"), "Root should be included");
-        assert!(!objects.contains_key("2:0"), "Child should NOT be included at depth 0");
-
-        // depth=1: root + child
-        let objects = collect_reachable_objects(&doc, Some(1));
-        assert!(objects.contains_key("1:0"));
-        assert!(objects.contains_key("2:0"));
-        assert!(!objects.contains_key("3:0"), "Grandchild should NOT be included at depth 1");
-
-        // depth=None: everything
-        let objects = collect_reachable_objects(&doc, None);
-        assert!(objects.contains_key("1:0"));
-        assert!(objects.contains_key("2:0"));
-        assert!(objects.contains_key("3:0"));
-    }
-
-    #[test]
     fn print_single_object_integer() {
         let mut doc = Document::new();
         doc.objects.insert((1, 0), Object::Integer(42));
@@ -1686,7 +1078,7 @@ mod tests {
         let out = output_of(|w| {
             print_single_object(w, &doc, 1, &config);
         });
-        assert!(out.contains("Object 1 0:"));
+        assert!(out.contains("Object 1 0 (Integer):"), "got: {}", out);
         assert!(out.contains("42"));
     }
 
@@ -1701,10 +1093,10 @@ mod tests {
         let out = output_of(|w| {
             print_single_object(w, &doc, 1, &config);
         });
-        assert!(out.contains("Object 1 0:"));
+        assert!(out.contains("Object 1 0 (Dictionary):"), "got: {}", out);
         assert!(out.contains("2 0 R"));
         // Should NOT follow into object 2
-        assert!(!out.contains("Object 2 0:"));
+        assert!(!out.contains("Object 2 0"));
         assert!(!out.contains("99"));
     }
 
@@ -1713,46 +1105,12 @@ mod tests {
         let mut doc = Document::new();
         let stream = make_stream(None, b"visible data".to_vec());
         doc.objects.insert((1, 0), Object::Stream(stream));
-        let config = DumpConfig { decode_streams: true, truncate: None, json: false, hex: false, depth: None, deref: false, raw: false };
+        let config = DumpConfig { decode: true, truncate: None, json: false, hex: false, depth: None, deref: false, raw: false };
         let out = output_of(|w| {
             print_single_object(w, &doc, 1, &config);
         });
-        assert!(out.contains("Object 1 0:"));
+        assert!(out.contains("Object 1 0 (Stream):"), "got: {}", out);
         assert!(out.contains("visible data"));
-    }
-
-    #[test]
-    fn dump_page_shows_page_header() {
-        let doc = build_two_page_doc();
-        let config = default_config();
-        let out = output_of(|w| {
-            dump_page(w, &doc, &PageSpec::Single(1), &config);
-        });
-        assert!(out.contains("Page 1 (Object"));
-    }
-
-    #[test]
-    fn dump_page_confines_to_target_page() {
-        let doc = build_two_page_doc();
-        let config = DumpConfig { decode_streams: true, truncate: None, json: false, hex: false, depth: None, deref: false, raw: false };
-        let out = output_of(|w| {
-            dump_page(w, &doc, &PageSpec::Single(1), &config);
-        });
-        // Should contain page 1's content but not page 2's
-        assert!(out.contains("Page1"), "Should contain page 1 content");
-        assert!(!out.contains("Page2"), "Should NOT contain page 2 content");
-    }
-
-    #[test]
-    fn dump_page_two_shows_only_page_two() {
-        let doc = build_two_page_doc();
-        let config = DumpConfig { decode_streams: true, truncate: None, json: false, hex: false, depth: None, deref: false, raw: false };
-        let out = output_of(|w| {
-            dump_page(w, &doc, &PageSpec::Single(2), &config);
-        });
-        assert!(out.contains("Page 2 (Object"));
-        assert!(out.contains("Page2"), "Should contain page 2 content");
-        assert!(!out.contains("Page1"), "Should NOT contain page 1 content");
     }
 
     #[test]
@@ -1831,19 +1189,9 @@ mod tests {
     #[test]
     fn object_to_json_stream_with_decode() {
         let stream = make_stream(None, b"text content".to_vec());
-        let config = DumpConfig { decode_streams: true, truncate: None, json: true, hex: false, depth: None, deref: false, raw: false };
+        let config = DumpConfig { decode: true, truncate: None, json: true, hex: false, depth: None, deref: false, raw: false };
         let val = object_to_json(&Object::Stream(stream), &empty_doc(), &config);
         assert_eq!(val["content"], "text content");
-    }
-
-    #[test]
-    fn dump_json_produces_valid_json() {
-        let doc = build_two_page_doc();
-        let config = json_config();
-        let out = output_of(|w| dump_json(w, &doc, &config));
-        let parsed: Value = serde_json::from_str(&out).expect("Should be valid JSON");
-        assert!(parsed.get("trailer").is_some());
-        assert!(parsed.get("objects").is_some());
     }
 
     #[test]
@@ -1859,20 +1207,10 @@ mod tests {
     }
 
     #[test]
-    fn dump_page_json_produces_valid_json() {
-        let doc = build_two_page_doc();
-        let config = json_config();
-        let out = output_of(|w| dump_page_json(w, &doc, &PageSpec::Single(1), &config));
-        let parsed: Value = serde_json::from_str(&out).expect("Should be valid JSON");
-        assert_eq!(parsed["page_number"], 1);
-        assert!(parsed.get("objects").is_some());
-    }
-
-    #[test]
     fn object_to_json_stream_with_decode_binary() {
         let binary_content: Vec<u8> = vec![0x80; 200];
         let stream = make_stream(None, binary_content);
-        let config = DumpConfig { decode_streams: true, truncate: None, json: true, hex: false, depth: None, deref: false, raw: false };
+        let config = DumpConfig { decode: true, truncate: None, json: true, hex: false, depth: None, deref: false, raw: false };
         let val = object_to_json(&Object::Stream(stream), &empty_doc(), &config);
         assert_eq!(val["type"], "stream");
         assert!(val.get("content_binary").is_some(), "Binary stream should have content_binary field");
@@ -1882,7 +1220,7 @@ mod tests {
     fn object_to_json_stream_with_decode_binary_truncated() {
         let binary_content: Vec<u8> = vec![0x80; 200];
         let stream = make_stream(None, binary_content);
-        let config = DumpConfig { decode_streams: true, truncate: Some(100), json: true, hex: false, depth: None, deref: false, raw: false };
+        let config = DumpConfig { decode: true, truncate: Some(100), json: true, hex: false, depth: None, deref: false, raw: false };
         let val = object_to_json(&Object::Stream(stream), &empty_doc(), &config);
         assert_eq!(val["type"], "stream");
         assert!(val.get("content_truncated").is_some(), "Truncated binary should have content_truncated field");
@@ -1891,47 +1229,11 @@ mod tests {
     #[test]
     fn object_to_json_stream_no_decode() {
         let stream = make_stream(None, b"text data".to_vec());
-        let config = DumpConfig { decode_streams: false, truncate: None, json: true, hex: false, depth: None, deref: false, raw: false };
+        let config = DumpConfig { decode: false, truncate: None, json: true, hex: false, depth: None, deref: false, raw: false };
         let val = object_to_json(&Object::Stream(stream), &empty_doc(), &config);
         assert_eq!(val["type"], "stream");
-        assert!(val.get("content").is_none(), "No content when decode_streams=false");
+        assert!(val.get("content").is_none(), "No content when decode=false");
         assert!(val.get("content_binary").is_none());
-    }
-
-    #[test]
-    fn collect_reachable_objects_basic() {
-        let doc = build_two_page_doc();
-        let objects = collect_reachable_objects(&doc, None);
-        assert!(!objects.is_empty(), "Should collect reachable objects");
-        // Every reachable object should have a valid JSON value
-        for (key, val) in &objects {
-            assert!(key.contains(':'), "Key should be obj:gen format, got: {}", key);
-            assert!(val.get("type").is_some(), "Each object should have a type field");
-        }
-    }
-
-    #[test]
-    fn collect_reachable_objects_empty_doc() {
-        let doc = Document::new();
-        let objects = collect_reachable_objects(&doc, None);
-        assert!(objects.is_empty(), "Empty doc should have no reachable objects");
-    }
-
-    #[test]
-    fn dump_page_json_confines_to_page() {
-        let doc = build_two_page_doc();
-        let config = json_config();
-        let spec1 = PageSpec::Single(1);
-        let spec2 = PageSpec::Single(2);
-        let out1 = output_of(|w| dump_page_json(w, &doc, &spec1, &config));
-        let out2 = output_of(|w| dump_page_json(w, &doc, &spec2, &config));
-        let parsed1: Value = serde_json::from_str(&out1).unwrap();
-        let parsed2: Value = serde_json::from_str(&out2).unwrap();
-        assert_eq!(parsed1["page_number"], 1);
-        assert_eq!(parsed2["page_number"], 2);
-        // Both should have objects but potentially different sets
-        assert!(parsed1.get("objects").is_some());
-        assert!(parsed2.get("objects").is_some());
     }
 
     #[test]
@@ -1940,7 +1242,7 @@ mod tests {
         let binary_content: Vec<u8> = (0..32).collect();
         let stream = Stream::new(Dictionary::new(), binary_content);
         doc.objects.insert((1, 0), Object::Stream(stream));
-        let config = DumpConfig { decode_streams: true, truncate: None, json: false, hex: true, depth: None, deref: false, raw: false };
+        let config = DumpConfig { decode: true, truncate: None, json: false, hex: true, depth: None, deref: false, raw: false };
         let out = output_of(|w| print_single_object(w, &doc, 1, &config));
         assert!(out.contains("00000000  "));
         assert!(!out.contains("---"));
@@ -1952,7 +1254,7 @@ mod tests {
         let text_content = b"Hello world".to_vec();
         let stream = Stream::new(Dictionary::new(), text_content);
         doc.objects.insert((1, 0), Object::Stream(stream));
-        let config = DumpConfig { decode_streams: true, truncate: None, json: false, hex: true, depth: None, deref: false, raw: false };
+        let config = DumpConfig { decode: true, truncate: None, json: false, hex: true, depth: None, deref: false, raw: false };
         let out = output_of(|w| print_single_object(w, &doc, 1, &config));
         // Text streams still use --- delimiters
         assert!(out.contains("---"));
@@ -1964,7 +1266,7 @@ mod tests {
         let binary_content: Vec<u8> = (0..32).collect();
         let stream = Stream::new(Dictionary::new(), binary_content);
         doc.objects.insert((1, 0), Object::Stream(stream));
-        let config = DumpConfig { decode_streams: true, truncate: None, json: true, hex: true, depth: None, deref: false, raw: false };
+        let config = DumpConfig { decode: true, truncate: None, json: true, hex: true, depth: None, deref: false, raw: false };
         let out = output_of(|w| print_single_object_json(w, &doc, 1, &config));
         let parsed: Value = serde_json::from_str(&out).unwrap();
         assert!(parsed["object"]["content_hex"].is_string());
@@ -2063,7 +1365,7 @@ mod tests {
         doc.objects.insert((1, 0), Object::Stream(stream));
 
         let config = DumpConfig {
-            decode_streams: true,
+            decode: true,
             truncate: Some(100),
             json: false,
             hex: true,
@@ -2081,15 +1383,15 @@ mod tests {
     }
 
     #[test]
-    fn hex_mode_without_decode_streams_no_hex() {
+    fn hex_mode_without_decode_no_hex() {
         let mut doc = Document::new();
         let binary_content: Vec<u8> = (0..32).collect();
         let stream = Stream::new(Dictionary::new(), binary_content);
         doc.objects.insert((1, 0), Object::Stream(stream));
 
-        // hex=true but decode_streams=false → no stream content shown at all
+        // hex=true but decode=false → no stream content shown at all
         let config = DumpConfig {
-            decode_streams: false,
+            decode: false,
             truncate: None,
             json: false,
             hex: true,
@@ -2109,7 +1411,7 @@ mod tests {
         doc.objects.insert((1, 0), Object::Stream(stream));
 
         let config = DumpConfig {
-            decode_streams: true,
+            decode: true,
             truncate: Some(100),
             json: true,
             hex: true,
@@ -2135,7 +1437,7 @@ mod tests {
         doc.objects.insert((1, 0), Object::Stream(stream));
 
         let config = DumpConfig {
-            decode_streams: true,
+            decode: true,
             truncate: None,
             json: true,
             hex: true,
@@ -2158,7 +1460,7 @@ mod tests {
         doc.objects.insert((1, 0), Object::Stream(stream));
 
         let config = DumpConfig {
-            decode_streams: true,
+            decode: true,
             truncate: None,
             json: true,
             hex: false,
@@ -2181,7 +1483,7 @@ mod tests {
         doc.objects.insert((1, 0), Object::Stream(stream));
 
         let config = DumpConfig {
-            decode_streams: true,
+            decode: true,
             truncate: Some(100),
             json: true,
             hex: false,
@@ -2198,7 +1500,7 @@ mod tests {
     fn print_content_data_truncate_zero() {
         // truncate=0 should truncate all binary content to 0 bytes
         let content: Vec<u8> = vec![0x80; 50];
-        let config = DumpConfig { decode_streams: false, truncate: Some(0), json: false, hex: false, depth: None, deref: false, raw: false };
+        let config = DumpConfig { decode: false, truncate: Some(0), json: false, hex: false, depth: None, deref: false, raw: false };
         let out = output_of(|w| {
             print_content_data(w, &content, "raw", "", &config, false, None);
         });
@@ -2209,7 +1511,7 @@ mod tests {
     fn print_content_data_truncate_one() {
         // truncate=1 should show only 1 byte of binary
         let content: Vec<u8> = vec![0x80; 100];
-        let config = DumpConfig { decode_streams: false, truncate: Some(1), json: false, hex: false, depth: None, deref: false, raw: false };
+        let config = DumpConfig { decode: false, truncate: Some(1), json: false, hex: false, depth: None, deref: false, raw: false };
         let out = output_of(|w| {
             print_content_data(w, &content, "raw", "", &config, false, None);
         });
@@ -2220,7 +1522,7 @@ mod tests {
     fn print_content_data_hex_with_truncation() {
         // hex mode + truncation: hex dump should be truncated too
         let content: Vec<u8> = (0..200).map(|i| i as u8).collect();
-        let config = DumpConfig { decode_streams: false, truncate: Some(32), json: false, hex: true, depth: None, deref: false, raw: false };
+        let config = DumpConfig { decode: false, truncate: Some(32), json: false, hex: true, depth: None, deref: false, raw: false };
         let out = output_of(|w| {
             print_content_data(w, &content, "raw", "", &config, false, None);
         });
@@ -2236,7 +1538,7 @@ mod tests {
     fn print_content_data_hex_without_truncation() {
         // hex mode without truncation: full hex dump
         let content: Vec<u8> = (0..48).map(|i| i as u8).collect();
-        let config = DumpConfig { decode_streams: false, truncate: None, json: false, hex: true, depth: None, deref: false, raw: false };
+        let config = DumpConfig { decode: false, truncate: None, json: false, hex: true, depth: None, deref: false, raw: false };
         let out = output_of(|w| {
             print_content_data(w, &content, "raw", "", &config, false, None);
         });
@@ -2250,7 +1552,7 @@ mod tests {
     fn print_content_data_warning_with_hex_mode() {
         // Warning should appear alongside hex dump output
         let content: Vec<u8> = vec![0x80; 32];
-        let config = DumpConfig { decode_streams: false, truncate: None, json: false, hex: true, depth: None, deref: false, raw: false };
+        let config = DumpConfig { decode: false, truncate: None, json: false, hex: true, depth: None, deref: false, raw: false };
         let out = output_of(|w| {
             print_content_data(w, &content, "raw", "", &config, false, Some("FlateDecode decompression failed"));
         });
@@ -2262,7 +1564,7 @@ mod tests {
     fn print_content_data_warning_with_truncation() {
         // Warning + truncation should both appear
         let content: Vec<u8> = vec![0x80; 200];
-        let config = DumpConfig { decode_streams: false, truncate: Some(50), json: false, hex: false, depth: None, deref: false, raw: false };
+        let config = DumpConfig { decode: false, truncate: Some(50), json: false, hex: false, depth: None, deref: false, raw: false };
         let out = output_of(|w| {
             print_content_data(w, &content, "raw", "", &config, false, Some("unsupported filter: DCTDecode"));
         });
@@ -2274,7 +1576,7 @@ mod tests {
     fn print_content_data_warning_with_hex_and_truncation() {
         // All three: warning + hex + truncation
         let content: Vec<u8> = (0..200).map(|i| i as u8).collect();
-        let config = DumpConfig { decode_streams: false, truncate: Some(16), json: false, hex: true, depth: None, deref: false, raw: false };
+        let config = DumpConfig { decode: false, truncate: Some(16), json: false, hex: true, depth: None, deref: false, raw: false };
         let out = output_of(|w| {
             print_content_data(w, &content, "raw", "", &config, false, Some("LZWDecode: invalid data"));
         });
@@ -2282,75 +1584,6 @@ mod tests {
         assert!(out.contains("truncated to 16"));
         assert!(out.contains("00000000"), "Hex dump should appear");
         assert!(!out.contains("00000010"), "Only 16 bytes = 1 hex line");
-    }
-
-    #[test]
-    fn depth_zero_json_limits_objects() {
-        let mut doc = Document::new();
-        let gc_dict = Dictionary::from_iter(vec![
-            ("Type", Object::Name(b"Grandchild".to_vec())),
-        ]);
-        doc.objects.insert((3, 0), Object::Dictionary(gc_dict));
-        let child_dict = Dictionary::from_iter(vec![
-            ("Type", Object::Name(b"Child".to_vec())),
-            ("Next", Object::Reference((3, 0))),
-        ]);
-        doc.objects.insert((2, 0), Object::Dictionary(child_dict));
-        let root_dict = Dictionary::from_iter(vec![
-            ("Type", Object::Name(b"Root".to_vec())),
-            ("Child", Object::Reference((2, 0))),
-        ]);
-        doc.objects.insert((1, 0), Object::Dictionary(root_dict));
-        doc.trailer.set("Root", Object::Reference((1, 0)));
-
-        // depth=0: collect_reachable_objects should only include root
-        let objects_d0 = collect_reachable_objects(&doc, Some(0));
-        assert!(objects_d0.contains_key("1:0"), "Root should be collected at depth 0");
-        assert!(!objects_d0.contains_key("2:0"), "Child should NOT be collected at depth 0");
-        assert!(!objects_d0.contains_key("3:0"), "Grandchild should NOT be at depth 0");
-
-        // depth=2: should get everything
-        let objects_d2 = collect_reachable_objects(&doc, Some(2));
-        assert!(objects_d2.contains_key("1:0"));
-        assert!(objects_d2.contains_key("2:0"));
-        assert!(objects_d2.contains_key("3:0"), "Grandchild should be at depth 2");
-    }
-
-    #[test]
-    fn depth_one_follows_all_immediate_refs() {
-        // Root has 3 children, depth=1 should follow all 3 but not their children
-        let mut doc = Document::new();
-        let gc = Dictionary::from_iter(vec![("Type", Object::Name(b"Deep".to_vec()))]);
-        doc.objects.insert((5, 0), Object::Dictionary(gc));
-
-        let c1 = Dictionary::from_iter(vec![
-            ("Type", Object::Name(b"C1".to_vec())),
-            ("Deep", Object::Reference((5, 0))),
-        ]);
-        let c2 = Dictionary::from_iter(vec![("Type", Object::Name(b"C2".to_vec()))]);
-        let c3 = Dictionary::from_iter(vec![("Type", Object::Name(b"C3".to_vec()))]);
-        doc.objects.insert((2, 0), Object::Dictionary(c1));
-        doc.objects.insert((3, 0), Object::Dictionary(c2));
-        doc.objects.insert((4, 0), Object::Dictionary(c3));
-
-        let root = Dictionary::from_iter(vec![
-            ("A", Object::Reference((2, 0))),
-            ("B", Object::Reference((3, 0))),
-            ("C", Object::Reference((4, 0))),
-        ]);
-        doc.objects.insert((1, 0), Object::Dictionary(root));
-
-        let mut visited = BTreeSet::new();
-        let config = DumpConfig { decode_streams: false, truncate: None, json: false, hex: false, depth: Some(1), deref: false, raw: false };
-        let out = output_of(|w| {
-            dump_object_and_children(w, (1, 0), &doc, &mut visited, &config, false, 0);
-        });
-        assert!(out.contains("Object 1 0:"), "Should print root");
-        assert!(out.contains("Object 2 0:"), "Should follow child A");
-        assert!(out.contains("Object 3 0:"), "Should follow child B");
-        assert!(out.contains("Object 4 0:"), "Should follow child C");
-        assert!(!out.contains("Object 5 0:"), "Should NOT follow grandchild");
-        assert!(out.contains("depth limit reached"));
     }
 
     #[test]
@@ -2398,7 +1631,7 @@ mod tests {
             Some(Object::Name(b"CCITTFaxDecode".to_vec())),
             b"fax data".to_vec(),
         );
-        let config = DumpConfig { decode_streams: true, truncate: None, json: true, hex: false, depth: None, deref: false, raw: false };
+        let config = DumpConfig { decode: true, truncate: None, json: true, hex: false, depth: None, deref: false, raw: false };
         let val = object_to_json(&Object::Stream(stream), &empty_doc(), &config);
         let warning = val.get("decode_warning");
         assert!(warning.is_some(), "Unsupported filter should produce JSON warning");
@@ -2415,22 +1648,11 @@ mod tests {
             ])),
             b"48656c6c6f>".to_vec(), // hex("Hello"), but "Hello" is not valid zlib
         );
-        let config = DumpConfig { decode_streams: true, truncate: None, json: true, hex: false, depth: None, deref: false, raw: false };
+        let config = DumpConfig { decode: true, truncate: None, json: true, hex: false, depth: None, deref: false, raw: false };
         let val = object_to_json(&Object::Stream(stream), &empty_doc(), &config);
         let warning = val.get("decode_warning");
         assert!(warning.is_some(), "Pipeline failure should produce JSON warning");
         assert!(warning.unwrap().as_str().unwrap().contains("FlateDecode"));
-    }
-
-    #[test]
-    fn dump_page_range() {
-        let doc = build_two_page_doc();
-        let config = DumpConfig { decode_streams: true, truncate: None, json: false, hex: false, depth: None, deref: false, raw: false };
-        let out = output_of(|w| {
-            dump_page(w, &doc, &PageSpec::Range(1, 2), &config);
-        });
-        assert!(out.contains("Page 1 (Object"));
-        assert!(out.contains("Page 2 (Object"));
     }
 
     #[test]
@@ -2440,8 +1662,8 @@ mod tests {
         doc.objects.insert((2, 0), Object::Boolean(true));
         let config = default_config();
         let out = output_of(|w| print_objects(w, &doc, &[1, 2], &config));
-        assert!(out.contains("Object 1 0:"));
-        assert!(out.contains("Object 2 0:"));
+        assert!(out.contains("Object 1 0 (Integer):"), "got: {}", out);
+        assert!(out.contains("Object 2 0 (Boolean):"), "got: {}", out);
     }
 
     #[test]
@@ -2449,7 +1671,7 @@ mod tests {
         let mut doc = Document::new();
         doc.objects.insert((1, 0), Object::Integer(42));
         doc.objects.insert((2, 0), Object::Boolean(true));
-        let config = DumpConfig { decode_streams: false, truncate: None, json: true, hex: false, depth: None, deref: false, raw: false };
+        let config = DumpConfig { decode: false, truncate: None, json: true, hex: false, depth: None, deref: false, raw: false };
         let out = output_of(|w| print_objects_json(w, &doc, &[1, 2], &config));
         let parsed: Value = serde_json::from_str(&out).unwrap();
         assert!(parsed["objects"].is_array());
@@ -2460,7 +1682,7 @@ mod tests {
     fn single_object_json_backward_compat() {
         let mut doc = Document::new();
         doc.objects.insert((1, 0), Object::Integer(42));
-        let config = DumpConfig { decode_streams: false, truncate: None, json: true, hex: false, depth: None, deref: false, raw: false };
+        let config = DumpConfig { decode: false, truncate: None, json: true, hex: false, depth: None, deref: false, raw: false };
         let out = output_of(|w| print_objects_json(w, &doc, &[1], &config));
         let parsed: Value = serde_json::from_str(&out).unwrap();
         // Single object should NOT wrap in array
@@ -2471,7 +1693,7 @@ mod tests {
     fn multi_object_missing_reports_error_in_json() {
         let mut doc = Document::new();
         doc.objects.insert((1, 0), Object::Integer(42));
-        let config = DumpConfig { decode_streams: false, truncate: None, json: true, hex: false, depth: None, deref: false, raw: false };
+        let config = DumpConfig { decode: false, truncate: None, json: true, hex: false, depth: None, deref: false, raw: false };
         let out = output_of(|w| print_objects_json(w, &doc, &[1, 99], &config));
         let parsed: Value = serde_json::from_str(&out).unwrap();
         let objs = parsed["objects"].as_array().unwrap();
@@ -2489,7 +1711,7 @@ mod tests {
         target.set("Type", Object::Name(b"Font".to_vec()));
         target.set("BaseFont", Object::Name(b"Helvetica".to_vec()));
         doc.objects.insert((2, 0), Object::Dictionary(target));
-        let config = DumpConfig { decode_streams: false, truncate: None, json: false, hex: false, depth: None, deref: true, raw: false };
+        let config = DumpConfig { decode: false, truncate: None, json: false, hex: false, depth: None, deref: true, raw: false };
         let out = output_of(|w| print_single_object(w, &doc, 1, &config));
         assert!(out.contains("2 0 R =>"));
         assert!(out.contains("/Type /Font"));
@@ -2502,7 +1724,7 @@ mod tests {
         dict.set("Ref", Object::Reference((2, 0)));
         doc.objects.insert((1, 0), Object::Dictionary(dict));
         doc.objects.insert((2, 0), Object::Integer(42));
-        let config = DumpConfig { decode_streams: false, truncate: None, json: false, hex: false, depth: None, deref: false, raw: false };
+        let config = DumpConfig { decode: false, truncate: None, json: false, hex: false, depth: None, deref: false, raw: false };
         let out = output_of(|w| print_single_object(w, &doc, 1, &config));
         assert!(out.contains("2 0 R"));
         assert!(!out.contains("=>"));
@@ -2515,7 +1737,7 @@ mod tests {
         dict.set("Ref", Object::Reference((2, 0)));
         doc.objects.insert((1, 0), Object::Dictionary(dict));
         doc.objects.insert((2, 0), Object::Integer(42));
-        let config = DumpConfig { decode_streams: false, truncate: None, json: true, hex: false, depth: None, deref: true, raw: false };
+        let config = DumpConfig { decode: false, truncate: None, json: true, hex: false, depth: None, deref: true, raw: false };
         let out = output_of(|w| print_single_object_json(w, &doc, 1, &config));
         let parsed: Value = serde_json::from_str(&out).unwrap();
         let ref_obj = &parsed["object"]["entries"]["Ref"];
@@ -2535,7 +1757,7 @@ mod tests {
         inner_dict.set("Inner", Object::Reference((3, 0)));
         doc.objects.insert((2, 0), Object::Dictionary(inner_dict));
         doc.objects.insert((3, 0), Object::Integer(99));
-        let config = DumpConfig { decode_streams: false, truncate: None, json: true, hex: false, depth: None, deref: true, raw: false };
+        let config = DumpConfig { decode: false, truncate: None, json: true, hex: false, depth: None, deref: true, raw: false };
         let out = output_of(|w| print_single_object_json(w, &doc, 1, &config));
         let parsed: Value = serde_json::from_str(&out).unwrap();
         let resolved = &parsed["object"]["entries"]["Ref"]["resolved"];
@@ -2555,7 +1777,7 @@ mod tests {
         stream_dict.set("Filter", Object::Name(b"FlateDecode".to_vec()));
         let stream = Stream::new(stream_dict, vec![0u8; 100]);
         doc.objects.insert((2, 0), Object::Stream(stream));
-        let config = DumpConfig { decode_streams: false, truncate: None, json: false, hex: false, depth: None, deref: true, raw: false };
+        let config = DumpConfig { decode: false, truncate: None, json: false, hex: false, depth: None, deref: true, raw: false };
         let out = output_of(|w| print_single_object(w, &doc, 1, &config));
         assert!(out.contains("stream, 100 bytes"));
         assert!(out.contains("FlateDecode"));
@@ -2576,7 +1798,7 @@ mod tests {
         doc.objects.insert((1, 0), Object::Stream(stream));
 
         // raw mode: should show the compressed bytes, not decoded
-        let config = DumpConfig { decode_streams: false, truncate: None, json: false, hex: false, depth: None, deref: false, raw: true };
+        let config = DumpConfig { decode: false, truncate: None, json: false, hex: false, depth: None, deref: false, raw: true };
         let out = output_of(|w| print_single_object(w, &doc, 1, &config));
         assert!(out.contains("raw, undecoded"));
         assert!(out.contains(&format!("{} bytes", compressed_len)));
@@ -2591,7 +1813,7 @@ mod tests {
         let stream = Stream::new(Dictionary::new(), binary_content);
         doc.objects.insert((1, 0), Object::Stream(stream));
 
-        let config = DumpConfig { decode_streams: false, truncate: None, json: false, hex: true, depth: None, deref: false, raw: true };
+        let config = DumpConfig { decode: false, truncate: None, json: false, hex: true, depth: None, deref: false, raw: true };
         let out = output_of(|w| print_single_object(w, &doc, 1, &config));
         assert!(out.contains("raw, undecoded"));
         assert!(out.contains("00000000  "));
@@ -2604,7 +1826,7 @@ mod tests {
         let stream = Stream::new(Dictionary::new(), binary_content);
         doc.objects.insert((1, 0), Object::Stream(stream));
 
-        let config = DumpConfig { decode_streams: false, truncate: Some(50), json: false, hex: true, depth: None, deref: false, raw: true };
+        let config = DumpConfig { decode: false, truncate: Some(50), json: false, hex: true, depth: None, deref: false, raw: true };
         let out = output_of(|w| print_single_object(w, &doc, 1, &config));
         assert!(out.contains("raw, undecoded"));
         assert!(out.contains("truncated to 50"));
@@ -2615,7 +1837,7 @@ mod tests {
         let mut doc = Document::new();
         doc.objects.insert((1, 0), Object::Integer(42));
 
-        let config = DumpConfig { decode_streams: false, truncate: None, json: false, hex: false, depth: None, deref: false, raw: true };
+        let config = DumpConfig { decode: false, truncate: None, json: false, hex: false, depth: None, deref: false, raw: true };
         let out = output_of(|w| print_single_object(w, &doc, 1, &config));
         assert!(out.contains("42"));
         assert!(!out.contains("raw"));
@@ -2627,7 +1849,7 @@ mod tests {
         let stream = Stream::new(Dictionary::new(), b"Hello text content".to_vec());
         doc.objects.insert((1, 0), Object::Stream(stream));
 
-        let config = DumpConfig { decode_streams: false, truncate: None, json: true, hex: false, depth: None, deref: false, raw: true };
+        let config = DumpConfig { decode: false, truncate: None, json: true, hex: false, depth: None, deref: false, raw: true };
         let out = output_of(|w| print_single_object_json(w, &doc, 1, &config));
         let parsed: Value = serde_json::from_str(&out).unwrap();
         assert_eq!(parsed["object"]["raw_content"].as_str().unwrap(), "Hello text content");
@@ -2641,7 +1863,7 @@ mod tests {
         let stream = Stream::new(Dictionary::new(), binary);
         doc.objects.insert((1, 0), Object::Stream(stream));
 
-        let config = DumpConfig { decode_streams: false, truncate: None, json: true, hex: false, depth: None, deref: false, raw: true };
+        let config = DumpConfig { decode: false, truncate: None, json: true, hex: false, depth: None, deref: false, raw: true };
         let out = output_of(|w| print_single_object_json(w, &doc, 1, &config));
         let parsed: Value = serde_json::from_str(&out).unwrap();
         assert!(parsed["object"]["raw_content_binary"].as_str().unwrap().contains("32 bytes"));
@@ -2654,7 +1876,7 @@ mod tests {
         let stream = Stream::new(Dictionary::new(), binary);
         doc.objects.insert((1, 0), Object::Stream(stream));
 
-        let config = DumpConfig { decode_streams: false, truncate: None, json: true, hex: true, depth: None, deref: false, raw: true };
+        let config = DumpConfig { decode: false, truncate: None, json: true, hex: true, depth: None, deref: false, raw: true };
         let out = output_of(|w| print_single_object_json(w, &doc, 1, &config));
         let parsed: Value = serde_json::from_str(&out).unwrap();
         assert!(parsed["object"]["raw_content_hex"].is_string());
@@ -2668,7 +1890,7 @@ mod tests {
         let stream = Stream::new(Dictionary::new(), binary);
         doc.objects.insert((1, 0), Object::Stream(stream));
 
-        let config = DumpConfig { decode_streams: false, truncate: Some(32), json: true, hex: true, depth: None, deref: false, raw: true };
+        let config = DumpConfig { decode: false, truncate: Some(32), json: true, hex: true, depth: None, deref: false, raw: true };
         let out = output_of(|w| print_single_object_json(w, &doc, 1, &config));
         let parsed: Value = serde_json::from_str(&out).unwrap();
         assert!(parsed["object"]["raw_content_hex"].is_string());
@@ -2684,7 +1906,7 @@ mod tests {
         let stream = Stream::new(Dictionary::new(), b"Some PDF text stream".to_vec());
         doc.objects.insert((1, 0), Object::Stream(stream));
 
-        let config = DumpConfig { decode_streams: false, truncate: None, json: false, hex: false, depth: None, deref: false, raw: true };
+        let config = DumpConfig { decode: false, truncate: None, json: false, hex: false, depth: None, deref: false, raw: true };
         let out = output_of(|w| print_single_object(w, &doc, 1, &config));
         assert!(out.contains("raw, undecoded"));
         assert!(out.contains("Some PDF text stream"));
@@ -2699,7 +1921,7 @@ mod tests {
         doc.objects.insert((1, 0), Object::Stream(stream));
 
         // With raw, is_contents=false so it won't try to parse
-        let config = DumpConfig { decode_streams: false, truncate: None, json: false, hex: false, depth: None, deref: false, raw: true };
+        let config = DumpConfig { decode: false, truncate: None, json: false, hex: false, depth: None, deref: false, raw: true };
         let out = output_of(|w| print_single_object(w, &doc, 1, &config));
         assert!(out.contains("raw, undecoded"));
         // Should show raw text, not parsed operations

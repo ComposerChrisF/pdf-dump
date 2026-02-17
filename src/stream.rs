@@ -1169,14 +1169,14 @@ mod tests {
     }
 
     #[test]
-    fn decode_streams_uses_format_operation_not_debug() {
+    fn decode_uses_format_operation_not_debug() {
         let mut doc = Document::new();
         // Create a minimal content stream with a Tj operation
         let content_bytes = b"(Hello) Tj";
         let stream = Stream::new(Dictionary::new(), content_bytes.to_vec());
         doc.objects.insert((1, 0), Object::Stream(stream));
 
-        let config = DumpConfig { decode_streams: true, truncate: None, json: false, hex: false, depth: None, deref: false, raw: false };
+        let config = DumpConfig { decode: true, truncate: None, json: false, hex: false, depth: None, deref: false, raw: false };
         let out = output_of(|w| print_single_object(w, &doc, 1, &config));
         // Should show clean format, not Debug format with "Operation { operator:"
         assert!(!out.contains("Operation {"), "Should not contain Debug format");

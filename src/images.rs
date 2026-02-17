@@ -66,7 +66,7 @@ pub(crate) fn print_images(writer: &mut impl Write, doc: &Document) {
     }
 }
 
-pub(crate) fn print_images_json(writer: &mut impl Write, doc: &Document) {
+pub(crate) fn images_json_value(doc: &Document) -> Value {
     let images = collect_images(doc);
     let items: Vec<Value> = images.iter().map(|img| {
         json!({
@@ -80,10 +80,15 @@ pub(crate) fn print_images_json(writer: &mut impl Write, doc: &Document) {
             "size": img.size,
         })
     }).collect();
-    let output = json!({
+    json!({
         "image_count": items.len(),
         "images": items,
-    });
+    })
+}
+
+#[cfg(test)]
+pub(crate) fn print_images_json(writer: &mut impl Write, doc: &Document) {
+    let output = images_json_value(doc);
     writeln!(writer, "{}", serde_json::to_string_pretty(&output).unwrap()).unwrap();
 }
 

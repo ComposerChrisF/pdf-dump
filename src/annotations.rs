@@ -184,7 +184,7 @@ pub(crate) fn print_annotations(writer: &mut impl Write, doc: &Document, page_fi
     }
 }
 
-pub(crate) fn print_annotations_json(writer: &mut impl Write, doc: &Document, page_filter: Option<&PageSpec>) {
+pub(crate) fn annotations_json_value(doc: &Document, page_filter: Option<&PageSpec>) -> Value {
     let annotations = collect_annotations(doc, page_filter);
     let items: Vec<Value> = annotations.iter().map(|a| {
         json!({
@@ -198,10 +198,15 @@ pub(crate) fn print_annotations_json(writer: &mut impl Write, doc: &Document, pa
             "target": a.target,
         })
     }).collect();
-    let output = json!({
+    json!({
         "annotation_count": items.len(),
         "annotations": items,
-    });
+    })
+}
+
+#[cfg(test)]
+pub(crate) fn print_annotations_json(writer: &mut impl Write, doc: &Document, page_filter: Option<&PageSpec>) {
+    let output = annotations_json_value(doc, page_filter);
     writeln!(writer, "{}", serde_json::to_string_pretty(&output).unwrap()).unwrap();
 }
 

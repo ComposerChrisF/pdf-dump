@@ -242,13 +242,13 @@ pub(crate) fn print_security(writer: &mut impl Write, doc: &Document, file_path:
     }
 }
 
-pub(crate) fn print_security_json(writer: &mut impl Write, doc: &Document, file_path: &Path) {
+pub(crate) fn security_json_value(doc: &Document, file_path: &Path) -> Value {
     let info = collect_security(doc, Some(file_path));
     let perms: Value = info.permissions.iter()
         .map(|(k, v)| (k.clone(), json!(*v)))
         .collect::<serde_json::Map<String, Value>>()
         .into();
-    let output = json!({
+    json!({
         "encrypted": info.encrypted,
         "algorithm": info.algorithm,
         "version": info.version,
@@ -257,7 +257,12 @@ pub(crate) fn print_security_json(writer: &mut impl Write, doc: &Document, file_
         "permissions_raw": info.permissions_raw,
         "permissions": perms,
         "encrypt_object": info.encrypt_object,
-    });
+    })
+}
+
+#[cfg(test)]
+pub(crate) fn print_security_json(writer: &mut impl Write, doc: &Document, file_path: &Path) {
+    let output = security_json_value(doc, file_path);
     writeln!(writer, "{}", serde_json::to_string_pretty(&output).unwrap()).unwrap();
 }
 

@@ -5,7 +5,7 @@ use std::io::Write;
 
 use crate::types::DumpConfig;
 use crate::helpers::{format_dict_value, format_filter, format_color_space};
-use crate::object::{object_to_json, print_object, deref_summary};
+use crate::object::{object_to_json, print_object, deref_summary, object_header_label};
 use crate::refs::{collect_reverse_refs, reverse_refs_to_json, collect_forward_refs_json, collect_refs_with_paths};
 
 pub(crate) fn classify_object(doc: &Document, obj_num: u32, object: &Object, pages: &BTreeMap<u32, ObjectId>) -> (String, String, Vec<(String, String)>) {
@@ -369,10 +369,10 @@ pub(crate) fn print_info(writer: &mut impl Write, doc: &Document, obj_num: u32) 
 
     // Full object content
     let config = DumpConfig {
-        decode_streams: false, truncate: None, json: false,
+        decode: false, truncate: None, json: false,
         hex: false, depth: None, deref: false, raw: false,
     };
-    writeln!(writer, "\nObject {} 0:", obj_num).unwrap();
+    writeln!(writer, "\nObject {} 0 ({}):", obj_num, object_header_label(object)).unwrap();
     let visited = BTreeSet::new();
     let mut child_refs = BTreeSet::new();
     print_object(writer, object, doc, &visited, 1, &config, false, &mut child_refs);
@@ -424,7 +424,7 @@ pub(crate) fn print_info_json(writer: &mut impl Write, doc: &Document, obj_num: 
     let (role, description, details) = classify_object(doc, obj_num, object, &pages);
 
     let config = DumpConfig {
-        decode_streams: false, truncate: None, json: true,
+        decode: false, truncate: None, json: true,
         hex: false, depth: None, deref: false, raw: false,
     };
     let refs_to = collect_forward_refs_json(doc, object);
@@ -768,7 +768,7 @@ mod tests {
         assert!(out.contains("Kind: Dictionary"));
         assert!(out.contains("BaseFont: Courier"));
         // Now includes full object content
-        assert!(out.contains("Object 5 0:"));
+        assert!(out.contains("Object 5 0 (Dictionary, /Font):"), "got: {}", out);
     }
 
     #[test]

@@ -2,7 +2,10 @@ use lopdf::{Document, Object};
 use serde_json::{json, Value};
 use std::io::Write;
 
+use std::collections::BTreeMap;
+
 use crate::helpers::object_type_label;
+use crate::stream::{get_filter_names, decode_stream};
 use crate::validate::validate_pdf;
 use crate::bookmarks::count_bookmarks;
 use crate::forms::collect_form_fields;
@@ -69,7 +72,7 @@ pub(crate) fn summary_detail(object: &Object) -> String {
     }
 }
 
-pub(crate) fn print_summary_json(writer: &mut impl Write, doc: &Document) {
+pub(crate) fn list_json_value(doc: &Document) -> Value {
     let objects: Vec<Value> = doc.objects.iter()
         .map(|(&(obj_num, generation), object)| {
             json!({
@@ -81,11 +84,16 @@ pub(crate) fn print_summary_json(writer: &mut impl Write, doc: &Document) {
             })
         })
         .collect();
-    let output = json!({
+    json!({
         "version": doc.version,
         "object_count": doc.objects.len(),
         "objects": objects,
-    });
+    })
+}
+
+#[cfg(test)]
+pub(crate) fn print_summary_json(writer: &mut impl Write, doc: &Document) {
+    let output = list_json_value(doc);
     writeln!(writer, "{}", serde_json::to_string_pretty(&output).unwrap()).unwrap();
 }
 
@@ -200,17 +208,79 @@ pub(crate) fn print_overview(writer: &mut impl Write, doc: &Document) {
         }
     }
 
-    // Object stats summary
+    // Object type breakdown
+    let mut type_counts: BTreeMap<&str, usize> = BTreeMap::new();
+    for object in doc.objects.values() {
+        let kind = match object {
+            Object::Boolean(_) => "booleans",
+            Object::Integer(_) => "integers",
+            Object::Real(_) => "reals",
+            Object::Name(_) => "names",
+            Object::String(_, _) => "strings",
+            Object::Array(_) => "arrays",
+            Object::Dictionary(_) => "dictionaries",
+            Object::Stream(_) => "streams",
+            Object::Reference(_) => "references",
+            Object::Null => "nulls",
+        };
+        *type_counts.entry(kind).or_insert(0) += 1;
+    }
+    let type_parts: Vec<String> = type_counts.iter()
+        .filter(|(_, count)| **count > 0)
+        .map(|(kind, count)| format!("{} {}", count, kind))
+        .collect();
+    if !type_parts.is_empty() {
+        writeln!(writer, "Types:       {}", type_parts.join(", ")).unwrap();
+    }
+
+    // Stream stats with filters and decoded bytes
     let mut stream_count = 0usize;
     let mut total_stream_bytes = 0usize;
-    for object in doc.objects.values() {
+    let mut total_decoded_bytes = 0usize;
+    let mut filter_counts: BTreeMap<String, usize> = BTreeMap::new();
+    let mut largest_streams: Vec<(u32, usize)> = Vec::new(); // (obj_num, raw_bytes)
+
+    for (&(obj_num, _), object) in &doc.objects {
         if let Object::Stream(stream) = object {
             stream_count += 1;
-            total_stream_bytes += stream.content.len();
+            let raw_bytes = stream.content.len();
+            total_stream_bytes += raw_bytes;
+
+            let (decoded, _) = decode_stream(stream);
+            total_decoded_bytes += decoded.len();
+
+            for filter in get_filter_names(stream) {
+                let name = String::from_utf8_lossy(&filter).into_owned();
+                *filter_counts.entry(name).or_insert(0) += 1;
+            }
+
+            largest_streams.push((obj_num, raw_bytes));
         }
     }
+    largest_streams.sort_by(|a, b| b.1.cmp(&a.1));
+    largest_streams.truncate(3);
+
     writeln!(writer).unwrap();
-    writeln!(writer, "Streams:     {} ({} bytes)", stream_count, total_stream_bytes).unwrap();
+    if total_decoded_bytes != total_stream_bytes {
+        writeln!(writer, "Streams:     {} ({} bytes raw, {} decoded)",
+            stream_count, total_stream_bytes, total_decoded_bytes).unwrap();
+    } else {
+        writeln!(writer, "Streams:     {} ({} bytes)", stream_count, total_stream_bytes).unwrap();
+    }
+    if !filter_counts.is_empty() {
+        let mut sorted_filters: Vec<_> = filter_counts.iter().collect();
+        sorted_filters.sort_by(|a, b| b.1.cmp(a.1).then(a.0.cmp(b.0)));
+        let filter_parts: Vec<String> = sorted_filters.iter()
+            .map(|(name, count)| format!("{} \u{00d7}{}", name, count))
+            .collect();
+        writeln!(writer, "  Filters:   {}", filter_parts.join(", ")).unwrap();
+    }
+    if !largest_streams.is_empty() && stream_count > 1 {
+        let parts: Vec<String> = largest_streams.iter()
+            .map(|(num, bytes)| format!("#{} ({} B)", num, bytes))
+            .collect();
+        writeln!(writer, "  Largest:   {}", parts.join(", ")).unwrap();
+    }
 
     // Feature indicators
     let mut features = Vec::new();
@@ -240,6 +310,8 @@ pub(crate) fn print_overview(writer: &mut impl Write, doc: &Document) {
     if !features.is_empty() {
         writeln!(writer, "Features:    {}", features.join(", ")).unwrap();
     }
+
+    writeln!(writer, "\nTip: Use --json for machine-readable output.").unwrap();
 }
 
 pub(crate) fn print_overview_json(writer: &mut impl Write, doc: &Document) {
@@ -257,14 +329,61 @@ pub(crate) fn print_overview_json(writer: &mut impl Write, doc: &Document) {
         })
     }).collect();
 
+    // Object type breakdown
+    let mut type_counts: BTreeMap<&str, usize> = BTreeMap::new();
+    for object in doc.objects.values() {
+        let kind = match object {
+            Object::Boolean(_) => "booleans",
+            Object::Integer(_) => "integers",
+            Object::Real(_) => "reals",
+            Object::Name(_) => "names",
+            Object::String(_, _) => "strings",
+            Object::Array(_) => "arrays",
+            Object::Dictionary(_) => "dictionaries",
+            Object::Stream(_) => "streams",
+            Object::Reference(_) => "references",
+            Object::Null => "nulls",
+        };
+        *type_counts.entry(kind).or_insert(0) += 1;
+    }
+    let type_counts_json: serde_json::Map<String, Value> = type_counts.iter()
+        .filter(|(_, count)| **count > 0)
+        .map(|(kind, count)| (kind.to_string(), json!(count)))
+        .collect();
+
+    // Stream stats with filters and decoded bytes
     let mut stream_count = 0usize;
     let mut total_stream_bytes = 0usize;
-    for object in doc.objects.values() {
+    let mut total_decoded_bytes = 0usize;
+    let mut filter_counts: BTreeMap<String, usize> = BTreeMap::new();
+    let mut largest_streams: Vec<(u32, usize)> = Vec::new();
+
+    for (&(obj_num, _), object) in &doc.objects {
         if let Object::Stream(stream) = object {
             stream_count += 1;
-            total_stream_bytes += stream.content.len();
+            let raw_bytes = stream.content.len();
+            total_stream_bytes += raw_bytes;
+
+            let (decoded, _) = decode_stream(stream);
+            total_decoded_bytes += decoded.len();
+
+            for filter in get_filter_names(stream) {
+                let name = String::from_utf8_lossy(&filter).into_owned();
+                *filter_counts.entry(name).or_insert(0) += 1;
+            }
+
+            largest_streams.push((obj_num, raw_bytes));
         }
     }
+    largest_streams.sort_by(|a, b| b.1.cmp(&a.1));
+    largest_streams.truncate(3);
+
+    let filter_counts_json: serde_json::Map<String, Value> = filter_counts.iter()
+        .map(|(name, count)| (name.clone(), json!(count)))
+        .collect();
+    let largest_json: Vec<Value> = largest_streams.iter()
+        .map(|(num, bytes)| json!({"object_number": num, "bytes": bytes}))
+        .collect();
 
     let encrypted = doc.trailer.get(b"Encrypt").is_ok()
         || doc.objects.values().any(|obj| {
@@ -292,6 +411,7 @@ pub(crate) fn print_overview_json(writer: &mut impl Write, doc: &Document) {
         "encrypted": encrypted,
         "info": info,
         "catalog": catalog,
+        "object_types": type_counts_json,
         "validation": {
             "error_count": report.error_count,
             "warning_count": report.warn_count,
@@ -301,6 +421,9 @@ pub(crate) fn print_overview_json(writer: &mut impl Write, doc: &Document) {
         "streams": {
             "count": stream_count,
             "total_bytes": total_stream_bytes,
+            "total_decoded_bytes": total_decoded_bytes,
+            "filters": filter_counts_json,
+            "largest": largest_json,
         },
         "features": {
             "bookmark_count": bookmark_count,
@@ -617,6 +740,100 @@ mod tests {
         let out = output_of(|w| print_overview(w, &doc));
         assert!(out.contains("Encrypted:   no"),
             "Should show not encrypted, got: {}", out);
+    }
+
+    #[test]
+    fn overview_shows_object_type_breakdown() {
+        let mut doc = Document::new();
+        let mut pages = Dictionary::new();
+        pages.set(b"Type", Object::Name(b"Pages".to_vec()));
+        pages.set(b"Count", Object::Integer(0));
+        pages.set(b"Kids", Object::Array(vec![]));
+        doc.objects.insert((1, 0), Object::Dictionary(pages));
+        let mut catalog = Dictionary::new();
+        catalog.set(b"Type", Object::Name(b"Catalog".to_vec()));
+        catalog.set(b"Pages", Object::Reference((1, 0)));
+        doc.objects.insert((2, 0), Object::Dictionary(catalog));
+        doc.objects.insert((3, 0), Object::Integer(42));
+        doc.trailer.set(b"Root", Object::Reference((2, 0)));
+
+        let out = output_of(|w| print_overview(w, &doc));
+        assert!(out.contains("Types:"), "Should show type breakdown, got: {}", out);
+        assert!(out.contains("dictionaries"), "Should list dictionaries");
+        assert!(out.contains("integers"), "Should list integers");
+    }
+
+    #[test]
+    fn overview_shows_stream_filters() {
+        let mut doc = Document::new();
+        let mut pages = Dictionary::new();
+        pages.set(b"Type", Object::Name(b"Pages".to_vec()));
+        pages.set(b"Count", Object::Integer(0));
+        pages.set(b"Kids", Object::Array(vec![]));
+        doc.objects.insert((1, 0), Object::Dictionary(pages));
+        let mut catalog = Dictionary::new();
+        catalog.set(b"Type", Object::Name(b"Catalog".to_vec()));
+        catalog.set(b"Pages", Object::Reference((1, 0)));
+        doc.objects.insert((2, 0), Object::Dictionary(catalog));
+
+        let compressed = crate::test_utils::zlib_compress(b"hello");
+        let stream = make_stream(Some(Object::Name(b"FlateDecode".to_vec())), compressed);
+        doc.objects.insert((3, 0), Object::Stream(stream));
+        doc.trailer.set(b"Root", Object::Reference((2, 0)));
+
+        let out = output_of(|w| print_overview(w, &doc));
+        assert!(out.contains("Filters:"), "Should show filter histogram, got: {}", out);
+        assert!(out.contains("FlateDecode"), "Should list FlateDecode");
+    }
+
+    #[test]
+    fn overview_shows_decoded_bytes_when_different() {
+        let mut doc = Document::new();
+        let mut pages = Dictionary::new();
+        pages.set(b"Type", Object::Name(b"Pages".to_vec()));
+        pages.set(b"Count", Object::Integer(0));
+        pages.set(b"Kids", Object::Array(vec![]));
+        doc.objects.insert((1, 0), Object::Dictionary(pages));
+        let mut catalog = Dictionary::new();
+        catalog.set(b"Type", Object::Name(b"Catalog".to_vec()));
+        catalog.set(b"Pages", Object::Reference((1, 0)));
+        doc.objects.insert((2, 0), Object::Dictionary(catalog));
+
+        let original = b"hello world test data for compression";
+        let compressed = crate::test_utils::zlib_compress(original);
+        let stream = make_stream(Some(Object::Name(b"FlateDecode".to_vec())), compressed);
+        doc.objects.insert((3, 0), Object::Stream(stream));
+        doc.trailer.set(b"Root", Object::Reference((2, 0)));
+
+        let out = output_of(|w| print_overview(w, &doc));
+        assert!(out.contains("raw"), "Should show 'raw' when decoded differs from raw, got: {}", out);
+        assert!(out.contains("decoded"), "Should show 'decoded' when decoded differs from raw");
+    }
+
+    #[test]
+    fn overview_json_includes_object_types_and_stream_stats() {
+        let mut doc = Document::new();
+        let mut pages = Dictionary::new();
+        pages.set(b"Type", Object::Name(b"Pages".to_vec()));
+        pages.set(b"Count", Object::Integer(0));
+        pages.set(b"Kids", Object::Array(vec![]));
+        doc.objects.insert((1, 0), Object::Dictionary(pages));
+        let mut catalog = Dictionary::new();
+        catalog.set(b"Type", Object::Name(b"Catalog".to_vec()));
+        catalog.set(b"Pages", Object::Reference((1, 0)));
+        doc.objects.insert((2, 0), Object::Dictionary(catalog));
+
+        let compressed = crate::test_utils::zlib_compress(b"test");
+        let stream = make_stream(Some(Object::Name(b"FlateDecode".to_vec())), compressed);
+        doc.objects.insert((3, 0), Object::Stream(stream));
+        doc.trailer.set(b"Root", Object::Reference((2, 0)));
+
+        let out = output_of(|w| print_overview_json(w, &doc));
+        let parsed: Value = serde_json::from_str(&out).expect("Valid JSON");
+        assert!(parsed.get("object_types").is_some(), "Should have object_types");
+        assert!(parsed["streams"]["total_decoded_bytes"].is_number(), "Should have decoded bytes");
+        assert!(parsed["streams"]["filters"].is_object(), "Should have filters");
+        assert!(parsed["streams"]["largest"].is_array(), "Should have largest");
     }
 
 }

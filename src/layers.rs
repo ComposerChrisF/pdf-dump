@@ -162,7 +162,7 @@ pub(crate) fn print_layers(writer: &mut impl Write, doc: &Document) {
     }
 }
 
-pub(crate) fn print_layers_json(writer: &mut impl Write, doc: &Document) {
+pub(crate) fn layers_json_value(doc: &Document) -> Value {
     let layers = collect_layers(doc);
     let items: Vec<Value> = layers.iter().map(|l| {
         json!({
@@ -173,10 +173,15 @@ pub(crate) fn print_layers_json(writer: &mut impl Write, doc: &Document) {
             "pages": l.page_numbers,
         })
     }).collect();
-    let output = json!({
+    json!({
         "layer_count": items.len(),
         "layers": items,
-    });
+    })
+}
+
+#[cfg(test)]
+pub(crate) fn print_layers_json(writer: &mut impl Write, doc: &Document) {
+    let output = layers_json_value(doc);
     writeln!(writer, "{}", serde_json::to_string_pretty(&output).unwrap()).unwrap();
 }
 

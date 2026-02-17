@@ -80,7 +80,7 @@ pub(crate) fn print_operators(writer: &mut impl Write, doc: &Document, page_filt
     }
 }
 
-pub(crate) fn print_operators_json(writer: &mut impl Write, doc: &Document, page_filter: Option<&PageSpec>) {
+pub(crate) fn operators_json_value(doc: &Document, page_filter: Option<&PageSpec>) -> Value {
     let pages = doc.get_pages();
 
     let page_list: Vec<(u32, ObjectId)> = if let Some(spec) = page_filter {
@@ -121,7 +121,12 @@ pub(crate) fn print_operators_json(writer: &mut impl Write, doc: &Document, page
         page_results.push(Value::Object(entry));
     }
 
-    let output = json!({"pages": page_results});
+    json!({"pages": page_results})
+}
+
+#[cfg(test)]
+pub(crate) fn print_operators_json(writer: &mut impl Write, doc: &Document, page_filter: Option<&PageSpec>) {
+    let output = operators_json_value(doc, page_filter);
     writeln!(writer, "{}", serde_json::to_string_pretty(&output).unwrap()).unwrap();
 }
 

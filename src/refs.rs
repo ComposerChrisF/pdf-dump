@@ -1,6 +1,5 @@
 use lopdf::{Document, Object, ObjectId};
 use serde_json::{json, Value};
-use std::io::Write;
 
 use crate::helpers::{object_type_label, format_dict_value};
 
@@ -86,28 +85,6 @@ pub(crate) fn collect_forward_refs_json(doc: &Document, object: &Object) -> Vec<
     }).collect()
 }
 
-pub(crate) fn print_refs_to(writer: &mut impl Write, doc: &Document, target_num: u32) {
-    let target_id = (target_num, 0);
-    writeln!(writer, "Objects referencing {} 0 R:\n", target_num).unwrap();
-
-    let rev_refs = collect_reverse_refs(doc, target_id);
-    for r in &rev_refs {
-        writeln!(writer, "  {:>4}  {:>3}  {:<13} {:<14} via {}", r.obj_num, r.generation, r.kind, r.type_label, r.paths.join(", ")).unwrap();
-    }
-    writeln!(writer, "\nFound {} objects referencing {} 0 R.", rev_refs.len(), target_num).unwrap();
-}
-
-pub(crate) fn print_refs_to_json(writer: &mut impl Write, doc: &Document, target_num: u32) {
-    let target_id = (target_num, 0);
-    let references = reverse_refs_to_json(&collect_reverse_refs(doc, target_id));
-    let output = json!({
-        "target_object": target_num,
-        "reference_count": references.len(),
-        "references": references,
-    });
-    writeln!(writer, "{}", serde_json::to_string_pretty(&output).unwrap()).unwrap();
-}
-
 pub(crate) fn collect_refs_from_dict(dict: &lopdf::Dictionary) -> Vec<(String, ObjectId)> {
     let mut refs = Vec::new();
     for (key, val) in dict.iter() {
@@ -191,11 +168,9 @@ fn deref_summary(obj: &Object, _doc: &Document) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::test_utils::*;
-    
+
     use lopdf::{Dictionary, Stream, StringFormat};
     use pretty_assertions::assert_eq;
-    use serde_json::{Value};
     use lopdf::Object;
 
     #[test]
@@ -261,46 +236,6 @@ mod tests {
         let obj = Object::Reference((99, 0));
         let paths = collect_references_in_object(&obj, target, "");
         assert!(paths.is_empty());
-    }
-
-    #[test]
-    fn print_refs_to_finds_referencing_objects() {
-        let mut doc = Document::new();
-        let target_id: ObjectId = (5, 0);
-        doc.objects.insert(target_id, Object::Integer(42));
-
-        let mut dict = Dictionary::new();
-        dict.set(b"Font", Object::Reference(target_id));
-        doc.objects.insert((1, 0), Object::Dictionary(dict));
-
-        let out = output_of(|w| print_refs_to(w, &doc, 5));
-        assert!(out.contains("Found 1 objects referencing 5 0 R."));
-        assert!(out.contains("/Font"));
-    }
-
-    #[test]
-    fn print_refs_to_no_references() {
-        let mut doc = Document::new();
-        doc.objects.insert((5, 0), Object::Integer(42));
-        let out = output_of(|w| print_refs_to(w, &doc, 5));
-        assert!(out.contains("Found 0 objects referencing 5 0 R."));
-    }
-
-    #[test]
-    fn print_refs_to_json_produces_valid_json() {
-        let mut doc = Document::new();
-        let target_id: ObjectId = (5, 0);
-        doc.objects.insert(target_id, Object::Integer(42));
-
-        let mut dict = Dictionary::new();
-        dict.set(b"Font", Object::Reference(target_id));
-        doc.objects.insert((1, 0), Object::Dictionary(dict));
-
-        let out = output_of(|w| print_refs_to_json(w, &doc, 5));
-        let parsed: Value = serde_json::from_str(&out).unwrap();
-        assert_eq!(parsed["target_object"], 5);
-        assert_eq!(parsed["reference_count"], 1);
-        assert!(parsed["references"].is_array());
     }
 
     #[test]
@@ -376,85 +311,6 @@ mod tests {
         assert!(collect_references_in_object(
             &Object::String(b"test".to_vec(), StringFormat::Literal), target, ""
         ).is_empty());
-    }
-
-    #[test]
-    fn print_refs_to_multiple_referencing_objects() {
-        let mut doc = Document::new();
-        let target_id: ObjectId = (5, 0);
-        doc.objects.insert(target_id, Object::Integer(42));
-
-        // Two different objects reference the target
-        let mut dict1 = Dictionary::new();
-        dict1.set(b"Font", Object::Reference(target_id));
-        doc.objects.insert((1, 0), Object::Dictionary(dict1));
-
-        let mut dict2 = Dictionary::new();
-        dict2.set(b"XObject", Object::Reference(target_id));
-        doc.objects.insert((2, 0), Object::Dictionary(dict2));
-
-        let out = output_of(|w| print_refs_to(w, &doc, 5));
-        assert!(out.contains("Found 2 objects referencing 5 0 R."));
-        assert!(out.contains("/Font"));
-        assert!(out.contains("/XObject"));
-    }
-
-    #[test]
-    fn print_refs_to_nonexistent_target() {
-        // Target object doesn't exist — should still work, just find 0 refs
-        let mut doc = Document::new();
-        doc.objects.insert((1, 0), Object::Integer(10));
-
-        let out = output_of(|w| print_refs_to(w, &doc, 999));
-        assert!(out.contains("Found 0 objects referencing 999 0 R."));
-    }
-
-    #[test]
-    fn print_refs_to_json_multiple_via_keys() {
-        // Single object has two paths to the target
-        let mut doc = Document::new();
-        let target_id: ObjectId = (5, 0);
-        doc.objects.insert(target_id, Object::Integer(42));
-
-        let mut dict = Dictionary::new();
-        dict.set(b"A", Object::Reference(target_id));
-        dict.set(b"B", Object::Reference(target_id));
-        doc.objects.insert((1, 0), Object::Dictionary(dict));
-
-        let out = output_of(|w| print_refs_to_json(w, &doc, 5));
-        let parsed: Value = serde_json::from_str(&out).unwrap();
-        assert_eq!(parsed["reference_count"], 1);
-        let via_keys = parsed["references"][0]["via_keys"].as_array().unwrap();
-        assert_eq!(via_keys.len(), 2);
-    }
-
-    #[test]
-    fn print_refs_to_json_no_references() {
-        let mut doc = Document::new();
-        doc.objects.insert((1, 0), Object::Integer(42));
-
-        let out = output_of(|w| print_refs_to_json(w, &doc, 99));
-        let parsed: Value = serde_json::from_str(&out).unwrap();
-        assert_eq!(parsed["target_object"], 99);
-        assert_eq!(parsed["reference_count"], 0);
-        assert!(parsed["references"].as_array().unwrap().is_empty());
-    }
-
-    #[test]
-    fn print_refs_to_shows_object_type_label() {
-        let mut doc = Document::new();
-        let target_id: ObjectId = (5, 0);
-        doc.objects.insert(target_id, Object::Integer(42));
-
-        // Dict with /Type = Page
-        let mut dict = Dictionary::new();
-        dict.set(b"Type", Object::Name(b"Page".to_vec()));
-        dict.set(b"Contents", Object::Reference(target_id));
-        doc.objects.insert((1, 0), Object::Dictionary(dict));
-
-        let out = output_of(|w| print_refs_to(w, &doc, 5));
-        assert!(out.contains("Page"));
-        assert!(out.contains("Dictionary"));
     }
 
     #[test]

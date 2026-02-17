@@ -89,7 +89,7 @@ fn print_tree_node(writer: &mut impl Write, obj_id: ObjectId, doc: &Document, vi
     }
 }
 
-pub(crate) fn print_tree_json(writer: &mut impl Write, doc: &Document, config: &DumpConfig) {
+pub(crate) fn tree_json_value(doc: &Document, config: &DumpConfig) -> Value {
     let mut visited = BTreeSet::new();
     let trailer_refs = collect_refs_from_dict(&doc.trailer);
 
@@ -97,12 +97,17 @@ pub(crate) fn print_tree_json(writer: &mut impl Write, doc: &Document, config: &
         .map(|(path, ref_id)| tree_node_to_json(*ref_id, doc, &mut visited, 1, path, config))
         .collect();
 
-    let output = json!({
+    json!({
         "tree": {
             "node": "Trailer",
             "children": children,
         }
-    });
+    })
+}
+
+#[cfg(test)]
+pub(crate) fn print_tree_json(writer: &mut impl Write, doc: &Document, config: &DumpConfig) {
+    let output = tree_json_value(doc, config);
     writeln!(writer, "{}", serde_json::to_string_pretty(&output).unwrap()).unwrap();
 }
 
@@ -276,7 +281,7 @@ mod tests {
         doc.objects.insert((1, 0), Object::Dictionary(catalog));
         doc.trailer.set("Root", Object::Reference((1, 0)));
 
-        let config = DumpConfig { decode_streams: false, truncate: None, json: false, hex: false, depth: None, deref: false, raw: false };
+        let config = DumpConfig { decode: false, truncate: None, json: false, hex: false, depth: None, deref: false, raw: false };
         let out = output_of(|w| print_tree(w, &doc, &config));
         assert!(out.contains("Reference Tree:"));
         assert!(out.contains("Trailer"));
@@ -303,7 +308,7 @@ mod tests {
         doc.trailer.set("A", Object::Reference((1, 0)));
         doc.trailer.set("B", Object::Reference((2, 0)));
 
-        let config = DumpConfig { decode_streams: false, truncate: None, json: false, hex: false, depth: None, deref: false, raw: false };
+        let config = DumpConfig { decode: false, truncate: None, json: false, hex: false, depth: None, deref: false, raw: false };
         let out = output_of(|w| print_tree(w, &doc, &config));
         // Object 3 should appear once normally and once as visited
         assert!(out.contains("3 0 (Font)"));
@@ -324,7 +329,7 @@ mod tests {
         doc.trailer.set("Root", Object::Reference((1, 0)));
 
         // depth=1: trailer -> root (depth 1), child would be depth 2 → limited
-        let config = DumpConfig { decode_streams: false, truncate: None, json: false, hex: false, depth: Some(1), deref: false, raw: false };
+        let config = DumpConfig { decode: false, truncate: None, json: false, hex: false, depth: Some(1), deref: false, raw: false };
         let out = output_of(|w| print_tree(w, &doc, &config));
         assert!(out.contains("1 0"));
         assert!(out.contains("depth limit reached"));
@@ -344,7 +349,7 @@ mod tests {
         doc.objects.insert((1, 0), Object::Dictionary(catalog));
         doc.trailer.set("Root", Object::Reference((1, 0)));
 
-        let config = DumpConfig { decode_streams: false, truncate: None, json: true, hex: false, depth: None, deref: false, raw: false };
+        let config = DumpConfig { decode: false, truncate: None, json: true, hex: false, depth: None, deref: false, raw: false };
         let out = output_of(|w| print_tree_json(w, &doc, &config));
         let parsed: Value = serde_json::from_str(&out).unwrap();
         assert_eq!(parsed["tree"]["node"], "Trailer");
@@ -373,7 +378,7 @@ mod tests {
         doc.trailer.set("A", Object::Reference((1, 0)));
         doc.trailer.set("B", Object::Reference((3, 0)));
 
-        let config = DumpConfig { decode_streams: false, truncate: None, json: true, hex: false, depth: None, deref: false, raw: false };
+        let config = DumpConfig { decode: false, truncate: None, json: true, hex: false, depth: None, deref: false, raw: false };
         let out = output_of(|w| print_tree_json(w, &doc, &config));
         let parsed: Value = serde_json::from_str(&out).unwrap();
         // Should contain "visited" status somewhere in the tree
@@ -392,7 +397,7 @@ mod tests {
         doc.objects.insert((1, 0), Object::Dictionary(root));
         doc.trailer.set("Root", Object::Reference((1, 0)));
 
-        let config = DumpConfig { decode_streams: false, truncate: None, json: true, hex: false, depth: Some(1), deref: false, raw: false };
+        let config = DumpConfig { decode: false, truncate: None, json: true, hex: false, depth: Some(1), deref: false, raw: false };
         let out = output_of(|w| print_tree_json(w, &doc, &config));
         let parsed: Value = serde_json::from_str(&out).unwrap();
         let tree_str = serde_json::to_string(&parsed).unwrap();
@@ -516,7 +521,7 @@ mod tests {
         let mut doc = Document::new();
         doc.trailer.set("Root", Object::Reference((99, 0)));
 
-        let config = DumpConfig { decode_streams: false, truncate: None, json: false, hex: false, depth: None, deref: false, raw: false };
+        let config = DumpConfig { decode: false, truncate: None, json: false, hex: false, depth: None, deref: false, raw: false };
         let out = output_of(|w| print_tree(w, &doc, &config));
         assert!(out.contains("99 0 (missing)"), "Missing objects should be labeled: {}", out);
     }
@@ -526,7 +531,7 @@ mod tests {
         let mut doc = Document::new();
         doc.trailer.set("Root", Object::Reference((99, 0)));
 
-        let config = DumpConfig { decode_streams: false, truncate: None, json: true, hex: false, depth: None, deref: false, raw: false };
+        let config = DumpConfig { decode: false, truncate: None, json: true, hex: false, depth: None, deref: false, raw: false };
         let out = output_of(|w| print_tree_json(w, &doc, &config));
         let parsed: Value = serde_json::from_str(&out).unwrap();
         let tree_str = serde_json::to_string(&parsed).unwrap();
@@ -548,7 +553,7 @@ mod tests {
         doc.trailer.set("Root", Object::Reference((1, 0)));
 
         // depth=0: Trailer shows, but no children at all (trailer is depth 0)
-        let config = DumpConfig { decode_streams: false, truncate: None, json: false, hex: false, depth: Some(0), deref: false, raw: false };
+        let config = DumpConfig { decode: false, truncate: None, json: false, hex: false, depth: Some(0), deref: false, raw: false };
         let out = output_of(|w| print_tree(w, &doc, &config));
         assert!(out.contains("Trailer"));
         // /Root -> 1 0 should show as depth limit reached (depth 1 > max_depth 0)
@@ -575,7 +580,7 @@ mod tests {
         doc.trailer.set("Root", Object::Reference((1, 0)));
 
         // depth=2: should show Trailer, Root (depth 1), Child (depth 2), but not Grandchild (depth 3)
-        let config = DumpConfig { decode_streams: false, truncate: None, json: false, hex: false, depth: Some(2), deref: false, raw: false };
+        let config = DumpConfig { decode: false, truncate: None, json: false, hex: false, depth: Some(2), deref: false, raw: false };
         let out = output_of(|w| print_tree(w, &doc, &config));
         assert!(out.contains("Catalog"), "Should show Root/Catalog");
         assert!(out.contains("Child"), "Should show Child at depth 2");
@@ -637,7 +642,7 @@ mod tests {
         let root_id = doc.add_object(Object::Dictionary(root));
         doc.trailer.set("Root", Object::Reference(root_id));
 
-        let config = DumpConfig { decode_streams: false, truncate: None, json: false, hex: false, depth: Some(1), deref: false, raw: false };
+        let config = DumpConfig { decode: false, truncate: None, json: false, hex: false, depth: Some(1), deref: false, raw: false };
         let out = output_of(|w| print_tree_dot(w, &doc, &config));
         // Should include root and child, but not the deep object
         let deep_node = format!("obj_{}_{}", deep.0, deep.1);
