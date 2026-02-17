@@ -4,7 +4,7 @@ use std::io::Write;
 
 use crate::types::PageSpec;
 use crate::stream::decode_stream;
-use crate::helpers::{format_operation, format_dict_value};
+use crate::helpers::{self, format_operation, format_dict_value};
 
 pub(crate) struct OpsResult {
     pub operations: Vec<lopdf::content::Operation>,
@@ -50,21 +50,9 @@ pub(crate) fn get_page_operations_with_warnings(doc: &Document, page_id: ObjectI
 }
 
 pub(crate) fn print_operators(writer: &mut impl Write, doc: &Document, page_filter: Option<&PageSpec>) {
-    let pages = doc.get_pages();
-
-    let page_list: Vec<(u32, ObjectId)> = if let Some(spec) = page_filter {
-        spec.pages().into_iter().map(|pn| {
-            let page_id = match pages.get(&pn) {
-                Some(&id) => id,
-                None => {
-                    eprintln!("Error: Page {} not found. Document has {} pages.", pn, pages.len());
-                    std::process::exit(1);
-                }
-            };
-            (pn, page_id)
-        }).collect()
-    } else {
-        pages.iter().map(|(&pn, &id)| (pn, id)).collect()
+    let page_list = match helpers::build_page_list(doc, page_filter) {
+        Ok(list) => list,
+        Err(msg) => { eprintln!("Error: {}", msg); return; }
     };
 
     for (pn, page_id) in &page_list {
@@ -72,30 +60,18 @@ pub(crate) fn print_operators(writer: &mut impl Write, doc: &Document, page_filt
         for warn in &result.warnings {
             eprintln!("Warning: Page {}: {}", pn, warn);
         }
-        writeln!(writer, "--- Page {} ({} operations) ---", pn, result.operations.len()).unwrap();
+        wln!(writer, "--- Page {} ({} operations) ---", pn, result.operations.len());
         for op in &result.operations {
-            writeln!(writer, "{}", format_operation(op)).unwrap();
+            wln!(writer, "{}", format_operation(op));
         }
-        writeln!(writer).unwrap();
+        wln!(writer);
     }
 }
 
 pub(crate) fn operators_json_value(doc: &Document, page_filter: Option<&PageSpec>) -> Value {
-    let pages = doc.get_pages();
-
-    let page_list: Vec<(u32, ObjectId)> = if let Some(spec) = page_filter {
-        spec.pages().into_iter().map(|pn| {
-            let page_id = match pages.get(&pn) {
-                Some(&id) => id,
-                None => {
-                    eprintln!("Error: Page {} not found. Document has {} pages.", pn, pages.len());
-                    std::process::exit(1);
-                }
-            };
-            (pn, page_id)
-        }).collect()
-    } else {
-        pages.iter().map(|(&pn, &id)| (pn, id)).collect()
+    let page_list = match helpers::build_page_list(doc, page_filter) {
+        Ok(list) => list,
+        Err(msg) => { return json!({"error": msg}); }
     };
 
     let mut page_results = Vec::new();

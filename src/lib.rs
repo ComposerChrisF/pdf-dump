@@ -1,3 +1,34 @@
+/// writeln! that exits cleanly on BrokenPipe instead of panicking.
+#[macro_export]
+macro_rules! wln {
+    ($dst:expr $(,)?) => {
+        if let Err(e) = writeln!($dst) {
+            if e.kind() == ::std::io::ErrorKind::BrokenPipe { ::std::process::exit(0); }
+            eprintln!("Write error: {}", e);
+            ::std::process::exit(1);
+        }
+    };
+    ($dst:expr, $($arg:tt)*) => {
+        if let Err(e) = writeln!($dst, $($arg)*) {
+            if e.kind() == ::std::io::ErrorKind::BrokenPipe { ::std::process::exit(0); }
+            eprintln!("Write error: {}", e);
+            ::std::process::exit(1);
+        }
+    };
+}
+
+/// write! that exits cleanly on BrokenPipe instead of panicking.
+#[macro_export]
+macro_rules! w {
+    ($dst:expr, $($arg:tt)*) => {
+        if let Err(e) = write!($dst, $($arg)*) {
+            if e.kind() == ::std::io::ErrorKind::BrokenPipe { ::std::process::exit(0); }
+            eprintln!("Write error: {}", e);
+            ::std::process::exit(1);
+        }
+    };
+}
+
 pub(crate) mod types;
 pub(crate) mod stream;
 pub(crate) mod helpers;
@@ -115,8 +146,8 @@ fn dispatch_standalone(
     out: &mut impl Write,
     doc: &Document,
     config: &DumpConfig,
-    page_spec: Option<&PageSpec>,
-    args: &Args,
+    _page_spec: Option<&PageSpec>,
+    _args: &Args,
     mode: StandaloneMode,
 ) {
     match mode {
@@ -132,7 +163,7 @@ fn dispatch_standalone(
                         eprintln!("Error writing to output file: {}", e);
                         std::process::exit(1);
                     }
-                    writeln!(out, "Successfully extracted object {} to '{}'.", obj_num, output.display()).unwrap();
+                    wln!(out, "Successfully extracted object {} to '{}'.", obj_num, output.display());
                 }
                 Ok(_) => {
                     eprintln!("Error: Object {} is not a stream and cannot be extracted to a file.", obj_num);
@@ -173,7 +204,6 @@ fn dispatch_standalone(
             }
         }
     }
-    let _ = (page_spec, args); // acknowledge unused params for future use
 }
 
 fn dispatch_combined(
@@ -195,19 +225,19 @@ fn dispatch_combined(
                 map.insert(mode.json_key().to_string(), value);
             }
             let output = Value::Object(map);
-            writeln!(out, "{}", serde_json::to_string_pretty(&output).unwrap()).unwrap();
+            wln!(out, "{}", serde_json::to_string_pretty(&output).unwrap());
         } else {
             // Single mode: output directly (unchanged schema)
             let value = build_mode_json_value(&modes[0], doc, config, page_spec, args);
-            writeln!(out, "{}", serde_json::to_string_pretty(&value).unwrap()).unwrap();
+            wln!(out, "{}", serde_json::to_string_pretty(&value).unwrap());
         }
     } else {
         for (i, mode) in modes.iter().enumerate() {
             if multi {
                 if i > 0 {
-                    writeln!(out).unwrap();
+                    wln!(out);
                 }
-                writeln!(out, "=== {} ===", mode.label()).unwrap();
+                wln!(out, "=== {} ===", mode.label());
             }
             dispatch_mode_text(out, mode, doc, config, page_spec, args);
         }

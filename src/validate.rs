@@ -63,10 +63,12 @@ fn collect_xref_stream_ids(doc: &Document) -> BTreeSet<ObjectId> {
 }
 
 fn check_broken_references(doc: &Document, xref_ids: &BTreeSet<ObjectId>, issues: &mut Vec<ValidationIssue>) {
+    let mut broken = Vec::new();
     for (&(obj_num, generation), object) in &doc.objects {
         if xref_ids.contains(&(obj_num, generation)) { continue; }
-        let broken = collect_broken_refs(object, doc);
-        for (ref_num, ref_generation) in broken {
+        broken.clear();
+        collect_broken_refs(object, doc, &mut broken);
+        for &(ref_num, ref_generation) in &broken {
             issues.push(ValidationIssue {
                 level: ValidationLevel::Error,
                 message: format!("Object {} {}: references non-existent object {} {}", obj_num, generation, ref_num, ref_generation),
@@ -75,8 +77,7 @@ fn check_broken_references(doc: &Document, xref_ids: &BTreeSet<ObjectId>, issues
     }
 }
 
-fn collect_broken_refs(obj: &Object, doc: &Document) -> Vec<(u32, u16)> {
-    let mut broken = Vec::new();
+fn collect_broken_refs(obj: &Object, doc: &Document, broken: &mut Vec<(u32, u16)>) {
     match obj {
         Object::Reference(id) => {
             if doc.get_object(*id).is_err() {
@@ -85,22 +86,21 @@ fn collect_broken_refs(obj: &Object, doc: &Document) -> Vec<(u32, u16)> {
         }
         Object::Array(arr) => {
             for item in arr {
-                broken.extend(collect_broken_refs(item, doc));
+                collect_broken_refs(item, doc, broken);
             }
         }
         Object::Dictionary(dict) => {
             for (_, v) in dict.iter() {
-                broken.extend(collect_broken_refs(v, doc));
+                collect_broken_refs(v, doc, broken);
             }
         }
         Object::Stream(stream) => {
             for (_, v) in stream.dict.iter() {
-                broken.extend(collect_broken_refs(v, doc));
+                collect_broken_refs(v, doc, broken);
             }
         }
         _ => {}
     }
-    broken
 }
 
 pub(crate) fn collect_reachable_ids(doc: &Document) -> BTreeSet<ObjectId> {
@@ -443,7 +443,7 @@ pub(crate) fn print_validation(writer: &mut impl Write, doc: &Document) {
     let report = validate_pdf(doc);
 
     if report.issues.is_empty() {
-        writeln!(writer, "[OK] No issues found.").unwrap();
+        wln!(writer, "[OK] No issues found.");
         return;
     }
 
@@ -453,10 +453,10 @@ pub(crate) fn print_validation(writer: &mut impl Write, doc: &Document) {
             ValidationLevel::Warn => "[WARN]",
             ValidationLevel::Info => "[INFO]",
         };
-        writeln!(writer, "{} {}", prefix, issue.message).unwrap();
+        wln!(writer, "{} {}", prefix, issue.message);
     }
-    writeln!(writer, "\nSummary: {} errors, {} warnings, {} info",
-        report.error_count, report.warn_count, report.info_count).unwrap();
+    wln!(writer, "\nSummary: {} errors, {} warnings, {} info",
+        report.error_count, report.warn_count, report.info_count);
 }
 
 pub(crate) fn validation_json_value(doc: &Document) -> Value {
@@ -539,7 +539,8 @@ mod tests {
         let obj = Object::Array(vec![Object::Reference((99, 0))]);
         doc.objects.insert((1, 0), obj.clone());
 
-        let broken = collect_broken_refs(&obj, &doc);
+        let mut broken = Vec::new();
+        collect_broken_refs(&obj, &doc, &mut broken);
         assert_eq!(broken.len(), 1);
     }
 
@@ -552,7 +553,8 @@ mod tests {
         let obj = Object::Stream(stream);
         doc.objects.insert((1, 0), obj.clone());
 
-        let broken = collect_broken_refs(&obj, &doc);
+        let mut broken = Vec::new();
+        collect_broken_refs(&obj, &doc, &mut broken);
         assert_eq!(broken.len(), 1);
     }
 
@@ -709,7 +711,8 @@ mod tests {
         outer.set(b"Inner", Object::Dictionary(inner));
         let obj = Object::Dictionary(outer);
 
-        let broken = collect_broken_refs(&obj, &doc);
+        let mut broken = Vec::new();
+        collect_broken_refs(&obj, &doc, &mut broken);
         assert_eq!(broken.len(), 1);
         assert_eq!(broken[0], (99, 0));
     }
@@ -721,7 +724,8 @@ mod tests {
             Object::Array(vec![Object::Reference((88, 0))]),
         ]);
 
-        let broken = collect_broken_refs(&obj, &doc);
+        let mut broken = Vec::new();
+        collect_broken_refs(&obj, &doc, &mut broken);
         assert_eq!(broken.len(), 1);
         assert_eq!(broken[0], (88, 0));
     }
@@ -735,7 +739,8 @@ mod tests {
         dict.set(b"C", Object::Reference((93, 0)));
         let obj = Object::Dictionary(dict);
 
-        let broken = collect_broken_refs(&obj, &doc);
+        let mut broken = Vec::new();
+        collect_broken_refs(&obj, &doc, &mut broken);
         assert_eq!(broken.len(), 3);
     }
 
@@ -745,18 +750,29 @@ mod tests {
         doc.objects.insert((5, 0), Object::Integer(42));
         let obj = Object::Reference((5, 0));
 
-        let broken = collect_broken_refs(&obj, &doc);
+        let mut broken = Vec::new();
+        collect_broken_refs(&obj, &doc, &mut broken);
         assert!(broken.is_empty());
     }
 
     #[test]
     fn collect_broken_refs_primitives_return_empty() {
         let doc = Document::new();
-        assert!(collect_broken_refs(&Object::Null, &doc).is_empty());
-        assert!(collect_broken_refs(&Object::Boolean(false), &doc).is_empty());
-        assert!(collect_broken_refs(&Object::Integer(0), &doc).is_empty());
-        assert!(collect_broken_refs(&Object::Real(1.0), &doc).is_empty());
-        assert!(collect_broken_refs(&Object::Name(b"X".to_vec()), &doc).is_empty());
+        let mut broken = Vec::new();
+        collect_broken_refs(&Object::Null, &doc, &mut broken);
+        assert!(broken.is_empty());
+        broken.clear();
+        collect_broken_refs(&Object::Boolean(false), &doc, &mut broken);
+        assert!(broken.is_empty());
+        broken.clear();
+        collect_broken_refs(&Object::Integer(0), &doc, &mut broken);
+        assert!(broken.is_empty());
+        broken.clear();
+        collect_broken_refs(&Object::Real(1.0), &doc, &mut broken);
+        assert!(broken.is_empty());
+        broken.clear();
+        collect_broken_refs(&Object::Name(b"X".to_vec()), &doc, &mut broken);
+        assert!(broken.is_empty());
     }
 
     #[test]

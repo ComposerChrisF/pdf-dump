@@ -149,16 +149,16 @@ fn scan_page_for_ocgs(doc: &Document, page_dict: &lopdf::Dictionary, page_num: u
 
 pub(crate) fn print_layers(writer: &mut impl Write, doc: &Document) {
     let layers = collect_layers(doc);
-    writeln!(writer, "{} layers found\n", layers.len()).unwrap();
+    wln!(writer, "{} layers found\n", layers.len());
     if layers.is_empty() { return; }
-    writeln!(writer, "  {:>4}  {:<30} {:<8} Pages", "Obj#", "Name", "Default").unwrap();
+    wln!(writer, "  {:>4}  {:<30} {:<8} Pages", "Obj#", "Name", "Default");
     for l in &layers {
         let pages_str = if l.page_numbers.is_empty() {
             "-".to_string()
         } else {
             l.page_numbers.iter().map(|n| n.to_string()).collect::<Vec<_>>().join(", ")
         };
-        writeln!(writer, "  {:>4}  {:<30} {:<8} {}", l.object_id.0, l.name, l.default_state, pages_str).unwrap();
+        wln!(writer, "  {:>4}  {:<30} {:<8} {}", l.object_id.0, l.name, l.default_state, pages_str);
     }
 }
 

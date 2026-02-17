@@ -99,123 +99,95 @@ pub(crate) fn collect_page_resources(doc: &Document, page_id: ObjectId) -> PageR
     };
 
     let mut fonts = Vec::new();
-    if let Ok(font_obj) = res_dict.get(b"Font") {
-        let font_dict = match font_obj {
-            Object::Dictionary(d) => Some(d),
-            Object::Reference(id) => {
-                if let Ok(Object::Dictionary(d)) = doc.get_object(*id) { Some(d) } else { None }
-            }
-            _ => None,
-        };
-        if let Some(fd) = font_dict {
-            for (name, val) in fd.iter() {
-                let name_str = format!("/{}", String::from_utf8_lossy(name));
-                if let Ok(id) = val.as_reference() {
-                    fonts.push(ResourceEntry {
-                        name: name_str,
-                        object_id: Some(id),
-                        detail: font_detail(doc, id),
-                    });
-                } else {
-                    fonts.push(ResourceEntry { name: name_str, object_id: None, detail: "inline".to_string() });
-                }
+    if let Ok(font_obj) = res_dict.get(b"Font")
+        && let Some(fd) = resolve_dict(doc, font_obj)
+    {
+        for (name, val) in fd.iter() {
+            let name_str = format!("/{}", String::from_utf8_lossy(name));
+            if let Ok(id) = val.as_reference() {
+                fonts.push(ResourceEntry {
+                    name: name_str,
+                    object_id: Some(id),
+                    detail: font_detail(doc, id),
+                });
+            } else {
+                fonts.push(ResourceEntry { name: name_str, object_id: None, detail: "inline".to_string() });
             }
         }
     }
     fonts.sort_by(|a, b| a.name.cmp(&b.name));
 
     let mut xobjects = Vec::new();
-    if let Ok(xobj_obj) = res_dict.get(b"XObject") {
-        let xobj_dict = match xobj_obj {
-            Object::Dictionary(d) => Some(d),
-            Object::Reference(id) => {
-                if let Ok(Object::Dictionary(d)) = doc.get_object(*id) { Some(d) } else { None }
-            }
-            _ => None,
-        };
-        if let Some(xd) = xobj_dict {
-            for (name, val) in xd.iter() {
-                let name_str = format!("/{}", String::from_utf8_lossy(name));
-                if let Ok(id) = val.as_reference() {
-                    xobjects.push(ResourceEntry {
-                        name: name_str,
-                        object_id: Some(id),
-                        detail: xobject_detail(doc, id),
-                    });
-                }
+    if let Ok(xobj_obj) = res_dict.get(b"XObject")
+        && let Some(xd) = resolve_dict(doc, xobj_obj)
+    {
+        for (name, val) in xd.iter() {
+            let name_str = format!("/{}", String::from_utf8_lossy(name));
+            if let Ok(id) = val.as_reference() {
+                xobjects.push(ResourceEntry {
+                    name: name_str,
+                    object_id: Some(id),
+                    detail: xobject_detail(doc, id),
+                });
             }
         }
     }
     xobjects.sort_by(|a, b| a.name.cmp(&b.name));
 
     let mut ext_gstate = Vec::new();
-    if let Ok(gs_obj) = res_dict.get(b"ExtGState") {
-        let gs_dict = match gs_obj {
-            Object::Dictionary(d) => Some(d),
-            Object::Reference(id) => {
-                if let Ok(Object::Dictionary(d)) = doc.get_object(*id) { Some(d) } else { None }
-            }
-            _ => None,
-        };
-        if let Some(gd) = gs_dict {
-            for (name, val) in gd.iter() {
-                let name_str = format!("/{}", String::from_utf8_lossy(name));
-                if let Ok(id) = val.as_reference() {
-                    let key_count = match doc.get_object(id) {
-                        Ok(Object::Dictionary(d)) => d.len(),
-                        Ok(Object::Stream(s)) => s.dict.len(),
-                        _ => 0,
-                    };
-                    ext_gstate.push(ResourceEntry {
-                        name: name_str,
-                        object_id: Some(id),
-                        detail: format!("{} keys", key_count),
-                    });
-                }
+    if let Ok(gs_obj) = res_dict.get(b"ExtGState")
+        && let Some(gd) = resolve_dict(doc, gs_obj)
+    {
+        for (name, val) in gd.iter() {
+            let name_str = format!("/{}", String::from_utf8_lossy(name));
+            if let Ok(id) = val.as_reference() {
+                let key_count = match doc.get_object(id) {
+                    Ok(Object::Dictionary(d)) => d.len(),
+                    Ok(Object::Stream(s)) => s.dict.len(),
+                    _ => 0,
+                };
+                ext_gstate.push(ResourceEntry {
+                    name: name_str,
+                    object_id: Some(id),
+                    detail: format!("{} keys", key_count),
+                });
             }
         }
     }
     ext_gstate.sort_by(|a, b| a.name.cmp(&b.name));
 
     let mut color_spaces = Vec::new();
-    if let Ok(cs_obj) = res_dict.get(b"ColorSpace") {
-        let cs_dict = match cs_obj {
-            Object::Dictionary(d) => Some(d),
-            Object::Reference(id) => {
-                if let Ok(Object::Dictionary(d)) = doc.get_object(*id) { Some(d) } else { None }
-            }
-            _ => None,
-        };
-        if let Some(cd) = cs_dict {
-            for (name, val) in cd.iter() {
-                let name_str = format!("/{}", String::from_utf8_lossy(name));
-                let detail = match val {
-                    Object::Name(n) => String::from_utf8_lossy(n).into_owned(),
-                    Object::Array(arr) => {
-                        arr.first().and_then(|v| v.as_name().ok())
-                            .map(|n| String::from_utf8_lossy(n).into_owned())
-                            .unwrap_or_else(|| format!("[{} items]", arr.len()))
-                    }
-                    Object::Reference(id) => {
-                        if let Ok(resolved) = doc.get_object(*id) {
-                            match resolved {
-                                Object::Name(n) => String::from_utf8_lossy(n).into_owned(),
-                                Object::Array(arr) => {
-                                    arr.first().and_then(|v| v.as_name().ok())
-                                        .map(|n| String::from_utf8_lossy(n).into_owned())
-                                        .unwrap_or_else(|| format!("[{} items]", arr.len()))
-                                }
-                                _ => format!("obj {}", id.0),
+    if let Ok(cs_obj) = res_dict.get(b"ColorSpace")
+        && let Some(cd) = resolve_dict(doc, cs_obj)
+    {
+        for (name, val) in cd.iter() {
+            let name_str = format!("/{}", String::from_utf8_lossy(name));
+            let detail = match val {
+                Object::Name(n) => String::from_utf8_lossy(n).into_owned(),
+                Object::Array(arr) => {
+                    arr.first().and_then(|v| v.as_name().ok())
+                        .map(|n| String::from_utf8_lossy(n).into_owned())
+                        .unwrap_or_else(|| format!("[{} items]", arr.len()))
+                }
+                Object::Reference(id) => {
+                    if let Ok(resolved) = doc.get_object(*id) {
+                        match resolved {
+                            Object::Name(n) => String::from_utf8_lossy(n).into_owned(),
+                            Object::Array(arr) => {
+                                arr.first().and_then(|v| v.as_name().ok())
+                                    .map(|n| String::from_utf8_lossy(n).into_owned())
+                                    .unwrap_or_else(|| format!("[{} items]", arr.len()))
                             }
-                        } else {
-                            format!("{} {} R", id.0, id.1)
+                            _ => format!("obj {}", id.0),
                         }
+                    } else {
+                        format!("{} {} R", id.0, id.1)
                     }
-                    _ => "?".to_string(),
-                };
-                let obj_id = val.as_reference().ok();
-                color_spaces.push(ResourceEntry { name: name_str, object_id: obj_id, detail });
-            }
+                }
+                _ => "?".to_string(),
+            };
+            let obj_id = val.as_reference().ok();
+            color_spaces.push(ResourceEntry { name: name_str, object_id: obj_id, detail });
         }
     }
     color_spaces.sort_by(|a, b| a.name.cmp(&b.name));

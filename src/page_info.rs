@@ -6,7 +6,7 @@ use crate::types::PageSpec;
 use crate::resources::{collect_page_resources, resource_entries_to_json, PageResources};
 use crate::annotations::collect_annotations;
 use crate::text::extract_text_from_page_with_warnings;
-use crate::helpers::format_dict_value;
+use crate::helpers::{self, format_dict_value};
 
 struct PageInfo {
     page_num: u32,
@@ -23,6 +23,9 @@ struct PageInfo {
     content_stream_bytes: usize,
     text_preview: String,
     text_extractable: bool,
+    full_text: String,
+    #[allow(dead_code)]
+    warnings: Vec<String>,
     resources: PageResources,
 }
 
@@ -39,12 +42,13 @@ fn is_garbled_text(text: &str, warnings: &[String]) -> bool {
             }
         }
     }
-    let non_ws: Vec<char> = text.chars().filter(|c| !c.is_whitespace()).collect();
-    if non_ws.is_empty() {
-        return false;
-    }
-    let non_printable = non_ws.iter().filter(|&&c| !('\x20'..='\x7E').contains(&c)).count();
-    non_printable * 2 > non_ws.len()
+    let non_ws_count = text.chars().filter(|c| !c.is_whitespace()).count();
+    if non_ws_count == 0 { return false; }
+    let non_printable = text.chars()
+        .filter(|c| !c.is_whitespace())
+        .filter(|&c| !('\x20'..='\x7E').contains(&c))
+        .count();
+    non_printable * 2 > non_ws_count
 }
 
 fn collect_page_info(doc: &Document, page_num: u32, page_id: ObjectId) -> PageInfo {
@@ -58,6 +62,8 @@ fn collect_page_info(doc: &Document, page_num: u32, page_id: ObjectId) -> PageIn
             content_stream_count: 0, content_stream_bytes: 0,
             text_preview: String::new(),
             text_extractable: true,
+            full_text: String::new(),
+            warnings: vec![],
             resources: PageResources {
                 fonts: vec![], xobjects: vec![], ext_gstate: vec![], color_spaces: vec![],
             },
@@ -127,40 +133,40 @@ fn collect_page_info(doc: &Document, page_num: u32, page_id: ObjectId) -> PageIn
         content_stream_count, content_stream_bytes,
         text_preview,
         text_extractable,
+        full_text: text_result.text,
+        warnings: text_result.warnings,
         resources: res,
     }
 }
 
 pub(crate) fn print_page_info(writer: &mut impl Write, doc: &Document, spec: &PageSpec) {
-    let pages = doc.get_pages();
-    for pn in spec.pages() {
-        let page_id = match pages.get(&pn) {
-            Some(&id) => id,
-            None => {
-                eprintln!("Error: Page {} not found. Document has {} pages.", pn, pages.len());
-                std::process::exit(1);
-            }
-        };
+    let page_list = match helpers::build_page_list(doc, Some(spec)) {
+        Ok(list) => list,
+        Err(msg) => { eprintln!("Error: {}", msg); return; }
+    };
+    for (pn, page_id) in &page_list {
+        let pn = *pn;
+        let page_id = *page_id;
         let info = collect_page_info(doc, pn, page_id);
 
-        writeln!(writer, "Page {} (Object {} {})", info.page_num, info.object_id.0, info.object_id.1).unwrap();
-        writeln!(writer, "  MediaBox:     {}", info.media_box).unwrap();
+        wln!(writer, "Page {} (Object {} {})", info.page_num, info.object_id.0, info.object_id.1);
+        wln!(writer, "  MediaBox:     {}", info.media_box);
         if let Some(ref cb) = info.crop_box {
-            writeln!(writer, "  CropBox:      {}", cb).unwrap();
+            wln!(writer, "  CropBox:      {}", cb);
         }
         if let Some(r) = info.rotate {
-            writeln!(writer, "  Rotate:       {}", r).unwrap();
+            wln!(writer, "  Rotate:       {}", r);
         }
 
         // Resources detail
         if !info.resources.fonts.is_empty() {
-            writeln!(writer, "  Fonts:        {}", info.resources.fonts.len()).unwrap();
+            wln!(writer, "  Fonts:        {}", info.resources.fonts.len());
             for e in &info.resources.fonts {
                 let obj_str = match e.object_id {
                     Some(id) => format!("obj {}", id.0),
                     None => "inline".to_string(),
                 };
-                writeln!(writer, "    {:<12} -> {} ({})", e.name, obj_str, e.detail).unwrap();
+                wln!(writer, "    {:<12} -> {} ({})", e.name, obj_str, e.detail);
             }
         }
         if !info.resources.xobjects.is_empty() {
@@ -170,33 +176,33 @@ pub(crate) fn print_page_info(writer: &mut impl Write, doc: &Document, spec: &Pa
             let mut label_parts = Vec::new();
             if image_count > 0 { label_parts.push(format!("{} image{}", image_count, if image_count == 1 { "" } else { "s" })); }
             if form_count > 0 { label_parts.push(format!("{} form{}", form_count, if form_count == 1 { "" } else { "s" })); }
-            writeln!(writer, "  XObjects:     {} ({})", info.resources.xobjects.len(),
-                label_parts.join(", ")).unwrap();
+            wln!(writer, "  XObjects:     {} ({})", info.resources.xobjects.len(),
+                label_parts.join(", "));
             for e in &info.resources.xobjects {
                 let obj_str = match e.object_id {
                     Some(id) => format!("obj {}", id.0),
                     None => "inline".to_string(),
                 };
-                writeln!(writer, "    {:<12} -> {} ({})", e.name, obj_str, e.detail).unwrap();
+                wln!(writer, "    {:<12} -> {} ({})", e.name, obj_str, e.detail);
             }
         }
         if !info.resources.ext_gstate.is_empty() {
-            writeln!(writer, "  ExtGState:    {}", info.resources.ext_gstate.len()).unwrap();
+            wln!(writer, "  ExtGState:    {}", info.resources.ext_gstate.len());
             for e in &info.resources.ext_gstate {
                 let obj_str = match e.object_id {
                     Some(id) => format!("obj {}", id.0),
                     None => "inline".to_string(),
                 };
-                writeln!(writer, "    {:<12} -> {} ({})", e.name, obj_str, e.detail).unwrap();
+                wln!(writer, "    {:<12} -> {} ({})", e.name, obj_str, e.detail);
             }
         }
         if !info.resources.color_spaces.is_empty() {
-            writeln!(writer, "  ColorSpaces:  {}", info.resources.color_spaces.len()).unwrap();
+            wln!(writer, "  ColorSpaces:  {}", info.resources.color_spaces.len());
             for e in &info.resources.color_spaces {
                 if let Some(id) = e.object_id {
-                    writeln!(writer, "    {:<12} -> obj {} ({})", e.name, id.0, e.detail).unwrap();
+                    wln!(writer, "    {:<12} -> obj {} ({})", e.name, id.0, e.detail);
                 } else {
-                    writeln!(writer, "    {:<12} -> {}", e.name, e.detail).unwrap();
+                    wln!(writer, "    {:<12} -> {}", e.name, e.detail);
                 }
             }
         }
@@ -206,44 +212,42 @@ pub(crate) fn print_page_info(writer: &mut impl Write, doc: &Document, spec: &Pa
             let breakdown: Vec<String> = info.annotation_subtypes.iter()
                 .map(|(s, c)| format!("{} {}", c, s))
                 .collect();
-            writeln!(writer, "  Annotations:  {} ({})", info.annotation_count, breakdown.join(", ")).unwrap();
+            wln!(writer, "  Annotations:  {} ({})", info.annotation_count, breakdown.join(", "));
         }
 
         // Content streams
         if info.content_stream_count > 0 {
-            writeln!(writer, "  Content:      {} stream{}, {} bytes",
+            wln!(writer, "  Content:      {} stream{}, {} bytes",
                 info.content_stream_count,
                 if info.content_stream_count == 1 { "" } else { "s" },
-                info.content_stream_bytes).unwrap();
+                info.content_stream_bytes);
         }
 
         // Text preview
         if !info.text_preview.is_empty() {
             if info.text_extractable {
-                writeln!(writer, "  Text preview: \"{}\"", info.text_preview).unwrap();
+                wln!(writer, "  Text preview: \"{}\"", info.text_preview);
             } else {
-                writeln!(writer, "  Text preview: {}", info.text_preview).unwrap();
+                wln!(writer, "  Text preview: {}", info.text_preview);
             }
         }
-        writeln!(writer).unwrap();
+        wln!(writer);
     }
 }
 
 pub(crate) fn print_page_info_json(writer: &mut impl Write, doc: &Document, spec: &PageSpec) {
-    let pages = doc.get_pages();
+    let page_list = match helpers::build_page_list(doc, Some(spec)) {
+        Ok(list) => list,
+        Err(msg) => {
+            let output = json!({"error": msg});
+            wln!(writer, "{}", serde_json::to_string_pretty(&output).unwrap());
+            return;
+        }
+    };
     let mut results = Vec::new();
 
-    for pn in spec.pages() {
-        let page_id = match pages.get(&pn) {
-            Some(&id) => id,
-            None => {
-                eprintln!("Error: Page {} not found. Document has {} pages.", pn, pages.len());
-                std::process::exit(1);
-            }
-        };
+    for &(pn, page_id) in &page_list {
         let info = collect_page_info(doc, pn, page_id);
-
-        let text_result = extract_text_from_page_with_warnings(doc, page_id);
 
         let subtypes: Value = info.annotation_subtypes.iter()
             .map(|(s, c)| json!({"subtype": s, "count": c}))
@@ -270,7 +274,7 @@ pub(crate) fn print_page_info_json(writer: &mut impl Write, doc: &Document, spec
             "annotation_subtypes": subtypes,
             "content_stream_count": info.content_stream_count,
             "content_stream_bytes": info.content_stream_bytes,
-            "text": text_result.text,
+            "text": info.full_text,
             "resources": resources_json,
         });
         if !info.text_extractable {
@@ -280,10 +284,10 @@ pub(crate) fn print_page_info_json(writer: &mut impl Write, doc: &Document, spec
     }
 
     if results.len() == 1 {
-        writeln!(writer, "{}", serde_json::to_string_pretty(&results[0]).unwrap()).unwrap();
+        wln!(writer, "{}", serde_json::to_string_pretty(&results[0]).unwrap());
     } else {
         let output = json!({"pages": results});
-        writeln!(writer, "{}", serde_json::to_string_pretty(&output).unwrap()).unwrap();
+        wln!(writer, "{}", serde_json::to_string_pretty(&output).unwrap());
     }
 }
 

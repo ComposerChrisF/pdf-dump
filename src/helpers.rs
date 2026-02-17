@@ -1,6 +1,23 @@
 use lopdf::{Document, Object, ObjectId};
 use std::collections::BTreeSet;
 
+use crate::types::PageSpec;
+
+pub(crate) fn build_page_list(
+    doc: &Document,
+    page_filter: Option<&PageSpec>,
+) -> Result<Vec<(u32, ObjectId)>, String> {
+    let pages = doc.get_pages();
+    if let Some(spec) = page_filter {
+        spec.pages().into_iter().map(|pn| {
+            pages.get(&pn).map(|&id| (pn, id))
+                .ok_or_else(|| format!("Page {} not found. Document has {} pages.", pn, pages.len()))
+        }).collect()
+    } else {
+        Ok(pages.iter().map(|(&pn, &id)| (pn, id)).collect())
+    }
+}
+
 pub(crate) fn resolve_dict<'a>(doc: &'a Document, obj: &'a Object) -> Option<&'a lopdf::Dictionary> {
     match obj {
         Object::Dictionary(d) => Some(d),
@@ -12,7 +29,7 @@ pub(crate) fn resolve_dict<'a>(doc: &'a Document, obj: &'a Object) -> Option<&'a
     }
 }
 
-pub(crate) fn resolve_array<'a>(doc: &'a Document, obj: &'a Object) -> Option<&'a Vec<Object>> {
+pub(crate) fn resolve_array<'a>(doc: &'a Document, obj: &'a Object) -> Option<&'a [Object]> {
     match obj {
         Object::Array(a) => Some(a),
         Object::Reference(id) => match doc.get_object(*id).ok()? {

@@ -122,13 +122,13 @@ pub(crate) fn decode_run_length(data: &[u8]) -> Result<Vec<u8>, String> {
     Ok(result)
 }
 
-pub(crate) fn get_filter_names(stream: &lopdf::Stream) -> Vec<Vec<u8>> {
+pub(crate) fn get_filter_names(stream: &lopdf::Stream) -> Vec<&[u8]> {
     match stream.dict.get(b"Filter").ok() {
         Some(filter_obj) => {
             if let Ok(name) = filter_obj.as_name() {
-                vec![name.to_vec()]
+                vec![name]
             } else if let Ok(arr) = filter_obj.as_array() {
-                arr.iter().filter_map(|obj| obj.as_name().ok().map(|n| n.to_vec())).collect()
+                arr.iter().filter_map(|obj| obj.as_name().ok()).collect()
             } else {
                 vec![]
             }
@@ -145,7 +145,7 @@ pub(crate) fn decode_stream(stream: &lopdf::Stream) -> (Cow<'_, [u8]>, Option<St
 
     let mut data: Cow<'_, [u8]> = Cow::Borrowed(&stream.content);
     for filter in &filters {
-        let result = match filter.as_slice() {
+        let result = match *filter {
             b"FlateDecode" => {
                 let mut decoder = ZlibDecoder::new(&data[..]);
                 let mut decompressed = Vec::new();

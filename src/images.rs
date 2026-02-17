@@ -59,10 +59,10 @@ pub(crate) fn collect_images(doc: &Document) -> Vec<ImageInfo> {
 
 pub(crate) fn print_images(writer: &mut impl Write, doc: &Document) {
     let images = collect_images(doc);
-    writeln!(writer, "{} images found\n", images.len()).unwrap();
-    writeln!(writer, "  {:>4}  {:>5}  {:>6}  {:<18} {:>3}  {:<18} {:>8}", "Obj#", "Width", "Height", "ColorSpace", "BPC", "Filter", "Size").unwrap();
+    wln!(writer, "{} images found\n", images.len());
+    wln!(writer, "  {:>4}  {:>5}  {:>6}  {:<18} {:>3}  {:<18} {:>8}", "Obj#", "Width", "Height", "ColorSpace", "BPC", "Filter", "Size");
     for img in &images {
-        writeln!(writer, "  {:>4}  {:>5}  {:>6}  {:<18} {:>3}  {:<18} {:>8}", img.object_id.0, img.width, img.height, img.color_space, img.bits_per_component, img.filter, img.size).unwrap();
+        wln!(writer, "  {:>4}  {:>5}  {:>6}  {:<18} {:>3}  {:<18} {:>8}", img.object_id.0, img.width, img.height, img.color_space, img.bits_per_component, img.filter, img.size);
     }
 }
 

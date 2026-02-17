@@ -13,16 +13,6 @@ pub(crate) struct FormFieldInfo {
     pub flags: u32,
 }
 
-pub(crate) fn field_type_abbrev(ft: &str) -> &str {
-    match ft {
-        "Tx" => "Tx",
-        "Btn" => "Btn",
-        "Ch" => "Ch",
-        "Sig" => "Sig",
-        _ => ft,
-    }
-}
-
 pub(crate) fn collect_form_fields(doc: &Document) -> (Option<ObjectId>, bool, Vec<FormFieldInfo>) {
     // Find AcroForm in catalog
     let catalog_id = match doc.trailer.get(b"Root").ok().and_then(|o| o.as_reference().ok()) {
@@ -183,32 +173,39 @@ pub(crate) fn collect_field_recursive(
     });
 }
 
+fn truncate_str(s: &str, max_chars: usize) -> &str {
+    match s.char_indices().nth(max_chars) {
+        Some((idx, _)) => &s[..idx],
+        None => s,
+    }
+}
+
 pub(crate) fn print_forms(writer: &mut impl Write, doc: &Document) {
     let (acroform_id, need_appearances, fields) = collect_form_fields(doc);
 
     match acroform_id {
         None => {
-            writeln!(writer, "No AcroForm found in document.").unwrap();
+            wln!(writer, "No AcroForm found in document.");
             return;
         }
         Some(id) => {
-            writeln!(writer, "AcroForm found (obj {}), NeedAppearances: {}", id.0, need_appearances).unwrap();
+            wln!(writer, "AcroForm found (obj {}), NeedAppearances: {}", id.0, need_appearances);
         }
     }
 
-    writeln!(writer, "{} form fields\n", fields.len()).unwrap();
+    wln!(writer, "{} form fields\n", fields.len());
     if fields.is_empty() { return; }
 
-    writeln!(writer, "  {:>4}  {:<24} {:<6}  {:<20} Page", "Obj#", "FieldName", "Type", "Value").unwrap();
+    wln!(writer, "  {:>4}  {:<24} {:<6}  {:<20} Page", "Obj#", "FieldName", "Type", "Value");
     for f in &fields {
         let page_str = f.page_number.map(|p| p.to_string()).unwrap_or_else(|| "-".to_string());
-        writeln!(writer, "  {:>4}  {:<24} {:<6}  {:<20} {}",
+        wln!(writer, "  {:>4}  {:<24} {:<6}  {:<20} {}",
             f.object_id.0,
-            if f.qualified_name.len() > 24 { &f.qualified_name[..24] } else { &f.qualified_name },
-            field_type_abbrev(&f.field_type),
-            if f.value.len() > 20 { &f.value[..20] } else { &f.value },
+            truncate_str(&f.qualified_name, 24),
+            &f.field_type,
+            truncate_str(&f.value, 20),
             page_str,
-        ).unwrap();
+        );
     }
 }
 

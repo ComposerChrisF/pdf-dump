@@ -96,12 +96,12 @@ pub(crate) fn collect_embedded_files(doc: &Document) -> Vec<EmbeddedFileInfo> {
 
 pub(crate) fn print_embedded_files(writer: &mut impl Write, doc: &Document) {
     let files = collect_embedded_files(doc);
-    writeln!(writer, "{} embedded files\n", files.len()).unwrap();
+    wln!(writer, "{} embedded files\n", files.len());
     if files.is_empty() { return; }
-    writeln!(writer, "  {:>4}  {:<30} {:<24} {:>8}", "Obj#", "Filename", "MIME Type", "Size").unwrap();
+    wln!(writer, "  {:>4}  {:<30} {:<24} {:>8}", "Obj#", "Filename", "MIME Type", "Size");
     for f in &files {
         let size_str = f.size.map(|s| s.to_string()).unwrap_or_else(|| "-".to_string());
-        writeln!(writer, "  {:>4}  {:<30} {:<24} {:>8}", f.object_number, f.filename, f.mime_type, size_str).unwrap();
+        wln!(writer, "  {:>4}  {:<30} {:<24} {:>8}", f.object_number, f.filename, f.mime_type, size_str);
     }
 }
 

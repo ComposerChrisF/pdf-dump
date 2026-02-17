@@ -341,22 +341,22 @@ pub(crate) fn print_info(writer: &mut impl Write, doc: &Document, obj_num: u32) 
     let object = match doc.get_object(obj_id) {
         Ok(obj) => obj,
         Err(_) => {
-            eprintln!("Error: Object {} not found in the document.", obj_num);
-            std::process::exit(1);
+            wln!(writer, "Error: Object {} not found.", obj_num);
+            return;
         }
     };
 
     let pages = doc.get_pages();
     let (role, description, details) = classify_object(doc, obj_num, object, &pages);
 
-    writeln!(writer, "{}", description).unwrap();
-    writeln!(writer, "\nRole: {}", role).unwrap();
-    writeln!(writer, "Kind: {}", object.enum_variant()).unwrap();
+    wln!(writer, "{}", description);
+    wln!(writer, "\nRole: {}", role);
+    wln!(writer, "Kind: {}", object.enum_variant());
 
     if !details.is_empty() {
-        writeln!(writer, "\nDetails:").unwrap();
+        wln!(writer, "\nDetails:");
         for (key, value) in &details {
-            writeln!(writer, "  {}: {}", key, value).unwrap();
+            wln!(writer, "  {}: {}", key, value);
         }
     }
 
@@ -364,7 +364,7 @@ pub(crate) fn print_info(writer: &mut impl Write, doc: &Document, obj_num: u32) 
     let page_assoc = find_page_associations(doc, obj_num, &pages);
     if !page_assoc.is_empty() {
         let pages_str: Vec<String> = page_assoc.iter().map(|p| p.to_string()).collect();
-        writeln!(writer, "\nReferenced by pages: {}", pages_str.join(", ")).unwrap();
+        wln!(writer, "\nReferenced by pages: {}", pages_str.join(", "));
     }
 
     // Full object content
@@ -372,36 +372,36 @@ pub(crate) fn print_info(writer: &mut impl Write, doc: &Document, obj_num: u32) 
         decode: false, truncate: None, json: false,
         hex: false, depth: None, deref: false, raw: false,
     };
-    writeln!(writer, "\nObject {} 0 ({}):", obj_num, object_header_label(object)).unwrap();
+    wln!(writer, "\nObject {} 0 ({}):", obj_num, object_header_label(object));
     let visited = BTreeSet::new();
     let mut child_refs = BTreeSet::new();
     print_object(writer, object, doc, &visited, 1, &config, false, &mut child_refs);
-    writeln!(writer).unwrap();
+    wln!(writer);
 
     // Forward references
     let forward_refs = collect_refs_with_paths(object);
-    writeln!(writer, "\nReferences from this object:").unwrap();
+    wln!(writer, "\nReferences from this object:");
     if forward_refs.is_empty() {
-        writeln!(writer, "  (none)").unwrap();
+        wln!(writer, "  (none)");
     } else {
         for (path, ref_id) in &forward_refs {
             let summary = if let Ok(resolved) = doc.get_object(*ref_id) {
-                deref_summary(resolved, doc)
+                deref_summary(resolved)
             } else {
                 "(not found)".to_string()
             };
-            writeln!(writer, "  {} -> {} {} R  {}", path, ref_id.0, ref_id.1, summary).unwrap();
+            wln!(writer, "  {} -> {} {} R  {}", path, ref_id.0, ref_id.1, summary);
         }
     }
 
     // Reverse references
     let rev_refs = collect_reverse_refs(doc, (obj_num, 0));
-    writeln!(writer, "\nReferenced by:").unwrap();
+    wln!(writer, "\nReferenced by:");
     if rev_refs.is_empty() {
-        writeln!(writer, "  (none)").unwrap();
+        wln!(writer, "  (none)");
     } else {
         for r in &rev_refs {
-            writeln!(writer, "  {:>4}  {:>3}  {:<13} {:<14} via {}", r.obj_num, r.generation, r.kind, r.type_label, r.paths.join(", ")).unwrap();
+            wln!(writer, "  {:>4}  {:>3}  {:<13} {:<14} via {}", r.obj_num, r.generation, r.kind, r.type_label, r.paths.join(", "));
         }
     }
 }
@@ -415,7 +415,7 @@ pub(crate) fn print_info_json(writer: &mut impl Write, doc: &Document, obj_num: 
                 "object_number": obj_num,
                 "error": "not found",
             });
-            writeln!(writer, "{}", serde_json::to_string_pretty(&output).unwrap()).unwrap();
+            wln!(writer, "{}", serde_json::to_string_pretty(&output).unwrap());
             return;
         }
     };
@@ -447,7 +447,7 @@ pub(crate) fn print_info_json(writer: &mut impl Write, doc: &Document, obj_num: 
         "references": refs_to,
         "referenced_by": referenced_by,
     });
-    writeln!(writer, "{}", serde_json::to_string_pretty(&output).unwrap()).unwrap();
+    wln!(writer, "{}", serde_json::to_string_pretty(&output).unwrap());
 }
 
 

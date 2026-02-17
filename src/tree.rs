@@ -45,8 +45,8 @@ fn tree_node_label(obj: &Object) -> String {
 }
 
 pub(crate) fn print_tree(writer: &mut impl Write, doc: &Document, config: &DumpConfig) {
-    writeln!(writer, "Reference Tree:\n").unwrap();
-    writeln!(writer, "Trailer").unwrap();
+    wln!(writer, "Reference Tree:\n");
+    wln!(writer, "Trailer");
 
     let mut visited = BTreeSet::new();
     let trailer_refs = collect_refs_from_dict(&doc.trailer);
@@ -60,14 +60,14 @@ fn print_tree_node(writer: &mut impl Write, obj_id: ObjectId, doc: &Document, vi
     let indent = "  ".repeat(depth);
 
     if visited.contains(&obj_id) {
-        writeln!(writer, "{}{} -> {} {} (visited)", indent, key_path, obj_id.0, obj_id.1).unwrap();
+        wln!(writer, "{}{} -> {} {} (visited)", indent, key_path, obj_id.0, obj_id.1);
         return;
     }
 
     if let Some(max_depth) = config.depth
         && depth > max_depth
     {
-        writeln!(writer, "{}{} -> {} {} (depth limit reached)", indent, key_path, obj_id.0, obj_id.1).unwrap();
+        wln!(writer, "{}{} -> {} {} (depth limit reached)", indent, key_path, obj_id.0, obj_id.1);
         return;
     }
 
@@ -76,7 +76,7 @@ fn print_tree_node(writer: &mut impl Write, obj_id: ObjectId, doc: &Document, vi
     match doc.get_object(obj_id) {
         Ok(object) => {
             let label = tree_node_label(object);
-            writeln!(writer, "{}{} -> {} {} ({})", indent, key_path, obj_id.0, obj_id.1, label).unwrap();
+            wln!(writer, "{}{} -> {} {} ({})", indent, key_path, obj_id.0, obj_id.1, label);
 
             let child_refs = collect_refs_with_paths(object);
             for (path, child_id) in child_refs {
@@ -84,7 +84,7 @@ fn print_tree_node(writer: &mut impl Write, obj_id: ObjectId, doc: &Document, vi
             }
         }
         Err(_) => {
-            writeln!(writer, "{}{} -> {} {} (missing)", indent, key_path, obj_id.0, obj_id.1).unwrap();
+            wln!(writer, "{}{} -> {} {} (missing)", indent, key_path, obj_id.0, obj_id.1);
         }
     }
 }
@@ -166,10 +166,10 @@ fn escape_dot(s: &str) -> String {
 }
 
 pub(crate) fn print_tree_dot(writer: &mut impl Write, doc: &Document, config: &DumpConfig) {
-    writeln!(writer, "digraph pdf {{").unwrap();
-    writeln!(writer, "  rankdir=LR;").unwrap();
-    writeln!(writer, "  node [shape=box, fontname=\"monospace\"];").unwrap();
-    writeln!(writer, "  \"trailer\" [label=\"Trailer\"];").unwrap();
+    wln!(writer, "digraph pdf {{");
+    wln!(writer, "  rankdir=LR;");
+    wln!(writer, "  node [shape=box, fontname=\"monospace\"];");
+    wln!(writer, "  \"trailer\" [label=\"Trailer\"];");
 
     let mut visited = BTreeSet::new();
     let trailer_refs = collect_refs_from_dict(&doc.trailer);
@@ -178,7 +178,7 @@ pub(crate) fn print_tree_dot(writer: &mut impl Write, doc: &Document, config: &D
         emit_dot_node(writer, ref_id, doc, &mut visited, 1, &path, "trailer", config);
     }
 
-    writeln!(writer, "}}").unwrap();
+    wln!(writer, "}}");
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -187,7 +187,7 @@ fn emit_dot_node(writer: &mut impl Write, obj_id: ObjectId, doc: &Document, visi
     let edge_label = escape_dot(key_path);
 
     if visited.contains(&obj_id) {
-        writeln!(writer, "  \"{}\" -> \"{}\" [label=\"{}\"];", parent_node, node_name, edge_label).unwrap();
+        wln!(writer, "  \"{}\" -> \"{}\" [label=\"{}\"];", parent_node, node_name, edge_label);
         return;
     }
 
@@ -202,8 +202,8 @@ fn emit_dot_node(writer: &mut impl Write, obj_id: ObjectId, doc: &Document, visi
         Ok(object) => {
             let label = escape_dot(&tree_node_label(object));
             let node_label = format!("{} {}: {}", obj_id.0, obj_id.1, label);
-            writeln!(writer, "  \"{}\" [label=\"{}\"];", node_name, node_label).unwrap();
-            writeln!(writer, "  \"{}\" -> \"{}\" [label=\"{}\"];", parent_node, node_name, edge_label).unwrap();
+            wln!(writer, "  \"{}\" [label=\"{}\"];", node_name, node_label);
+            wln!(writer, "  \"{}\" -> \"{}\" [label=\"{}\"];", parent_node, node_name, edge_label);
 
             let child_refs = collect_refs_with_paths(object);
             for (path, child_id) in child_refs {
@@ -211,8 +211,8 @@ fn emit_dot_node(writer: &mut impl Write, obj_id: ObjectId, doc: &Document, visi
             }
         }
         Err(_) => {
-            writeln!(writer, "  \"{}\" [label=\"{} {} (missing)\", style=dashed];", node_name, obj_id.0, obj_id.1).unwrap();
-            writeln!(writer, "  \"{}\" -> \"{}\" [label=\"{}\"];", parent_node, node_name, edge_label).unwrap();
+            wln!(writer, "  \"{}\" [label=\"{} {} (missing)\", style=dashed];", node_name, obj_id.0, obj_id.1);
+            wln!(writer, "  \"{}\" -> \"{}\" [label=\"{}\"];", parent_node, node_name, edge_label);
         }
     }
 }

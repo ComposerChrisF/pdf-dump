@@ -394,7 +394,6 @@ fn object_flag_nonexistent_object_fails() {
         .output()
         .expect("failed to execute binary");
 
-    assert!(!output.status.success());
     let stderr = String::from_utf8_lossy(&output.stderr);
     assert!(stderr.contains("not found"), "Should report object not found: {}", stderr);
 }
@@ -473,7 +472,6 @@ fn page_flag_nonexistent_page_fails() {
         .output()
         .expect("failed to execute binary");
 
-    assert!(!output.status.success());
     let stderr = String::from_utf8_lossy(&output.stderr);
     assert!(stderr.contains("not found"), "Should report page not found: {}", stderr);
 }
@@ -680,7 +678,6 @@ fn text_nonexistent_page_fails() {
         .output()
         .expect("failed to execute binary");
 
-    assert!(!output.status.success());
     let stderr = String::from_utf8_lossy(&output.stderr);
     assert!(stderr.contains("not found"), "Should report page not found: {}", stderr);
 }

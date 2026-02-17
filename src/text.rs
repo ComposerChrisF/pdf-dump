@@ -4,6 +4,7 @@ use std::io::Write;
 
 use crate::types::PageSpec;
 use crate::stream::decode_stream;
+use crate::helpers;
 
 pub(crate) struct TextResult {
     pub text: String,
@@ -135,10 +136,10 @@ pub(crate) fn check_page_font_encodings(doc: &Document, page_dict: &lopdf::Dicti
 
     // Resolve /Resources (may be a reference)
     let resources = match page_dict.get(b"Resources") {
-        Ok(Object::Dictionary(d)) => d.clone(),
+        Ok(Object::Dictionary(d)) => d,
         Ok(Object::Reference(r)) => {
             match doc.get_object(*r) {
-                Ok(Object::Dictionary(d)) => d.clone(),
+                Ok(Object::Dictionary(d)) => d,
                 _ => return warnings,
             }
         }
@@ -147,10 +148,10 @@ pub(crate) fn check_page_font_encodings(doc: &Document, page_dict: &lopdf::Dicti
 
     // Get /Font sub-dictionary
     let font_dict = match resources.get(b"Font") {
-        Ok(Object::Dictionary(d)) => d.clone(),
+        Ok(Object::Dictionary(d)) => d,
         Ok(Object::Reference(r)) => {
             match doc.get_object(*r) {
-                Ok(Object::Dictionary(d)) => d.clone(),
+                Ok(Object::Dictionary(d)) => d,
                 _ => return warnings,
             }
         }
@@ -235,49 +236,25 @@ pub(crate) fn check_page_font_encodings(doc: &Document, page_dict: &lopdf::Dicti
 }
 
 pub(crate) fn print_text(writer: &mut impl Write, doc: &Document, page_filter: Option<&PageSpec>) {
-    let pages = doc.get_pages();
-
-    let page_list: Vec<(u32, ObjectId)> = if let Some(spec) = page_filter {
-        spec.pages().into_iter().map(|pn| {
-            let page_id = match pages.get(&pn) {
-                Some(&id) => id,
-                None => {
-                    eprintln!("Error: Page {} not found. Document has {} pages.", pn, pages.len());
-                    std::process::exit(1);
-                }
-            };
-            (pn, page_id)
-        }).collect()
-    } else {
-        pages.iter().map(|(&pn, &id)| (pn, id)).collect()
+    let page_list = match helpers::build_page_list(doc, page_filter) {
+        Ok(list) => list,
+        Err(msg) => { eprintln!("Error: {}", msg); return; }
     };
 
     for (pn, page_id) in &page_list {
-        writeln!(writer, "--- Page {} ---", pn).unwrap();
+        wln!(writer, "--- Page {} ---", pn);
         let result = extract_text_from_page_with_warnings(doc, *page_id);
         for warn in &result.warnings {
             eprintln!("Warning: Page {}: {}", pn, warn);
         }
-        writeln!(writer, "{}", result.text).unwrap();
+        wln!(writer, "{}", result.text);
     }
 }
 
 pub(crate) fn text_json_value(doc: &Document, page_filter: Option<&PageSpec>) -> Value {
-    let pages = doc.get_pages();
-
-    let page_list: Vec<(u32, ObjectId)> = if let Some(spec) = page_filter {
-        spec.pages().into_iter().map(|pn| {
-            let page_id = match pages.get(&pn) {
-                Some(&id) => id,
-                None => {
-                    eprintln!("Error: Page {} not found. Document has {} pages.", pn, pages.len());
-                    std::process::exit(1);
-                }
-            };
-            (pn, page_id)
-        }).collect()
-    } else {
-        pages.iter().map(|(&pn, &id)| (pn, id)).collect()
+    let page_list = match helpers::build_page_list(doc, page_filter) {
+        Ok(list) => list,
+        Err(msg) => { return json!({"error": msg}); }
     };
 
     let mut page_results = Vec::new();

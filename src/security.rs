@@ -218,18 +218,18 @@ fn extract_int_after_key(data: &[u8], key: &[u8]) -> Option<i64> {
 pub(crate) fn print_security(writer: &mut impl Write, doc: &Document, file_path: &Path) {
     let info = collect_security(doc, Some(file_path));
     if !info.encrypted {
-        writeln!(writer, "Encryption: No").unwrap();
+        wln!(writer, "Encryption: No");
         return;
     }
-    writeln!(writer, "Encryption: Yes").unwrap();
-    writeln!(writer, "Algorithm:  {}", info.algorithm).unwrap();
-    writeln!(writer, "Version:    {}", info.version).unwrap();
-    writeln!(writer, "Revision:   {}", info.revision).unwrap();
-    writeln!(writer, "Key Length: {} bits", info.key_length).unwrap();
+    wln!(writer, "Encryption: Yes");
+    wln!(writer, "Algorithm:  {}", info.algorithm);
+    wln!(writer, "Version:    {}", info.version);
+    wln!(writer, "Revision:   {}", info.revision);
+    wln!(writer, "Key Length: {} bits", info.key_length);
     if let Some(obj) = info.encrypt_object {
-        writeln!(writer, "Encrypt Object: {}", obj).unwrap();
+        wln!(writer, "Encrypt Object: {}", obj);
     }
-    writeln!(writer, "\nPermissions (raw: {}):", info.permissions_raw).unwrap();
+    wln!(writer, "\nPermissions (raw: {}):", info.permissions_raw);
     let perm_order = [
         "Print", "Modify", "Copy/extract text", "Annotate",
         "Fill forms", "Accessibility extract", "Assemble", "Print high quality",
@@ -237,7 +237,7 @@ pub(crate) fn print_security(writer: &mut impl Write, doc: &Document, file_path:
     for name in &perm_order {
         if let Some(&allowed) = info.permissions.get(*name) {
             let tag = if allowed { "YES" } else { " NO" };
-            writeln!(writer, "  [{}] {}", tag, name).unwrap();
+            wln!(writer, "  [{}] {}", tag, name);
         }
     }
 }

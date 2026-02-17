@@ -1,9 +1,11 @@
 use lopdf::{Document, Object, ObjectId};
 use serde_json::{json, Value};
 
-use crate::helpers::{object_type_label, format_dict_value};
+use crate::helpers::object_type_label;
+use crate::object::deref_summary;
 
-pub(crate) fn collect_references_in_object(obj: &Object, target_id: ObjectId, path: &str) -> Vec<String> {
+#[cfg(test)]
+fn collect_references_in_object(obj: &Object, target_id: ObjectId, path: &str) -> Vec<String> {
     let mut found = Vec::new();
     collect_references_in_object_into(obj, target_id, path, &mut found);
     found
@@ -39,22 +41,24 @@ fn collect_references_in_object_into(obj: &Object, target_id: ObjectId, path: &s
 pub(crate) struct ReverseRef {
     pub obj_num: u32,
     pub generation: u16,
-    pub kind: String,
+    pub kind: &'static str,
     pub type_label: String,
     pub paths: Vec<String>,
 }
 
 pub(crate) fn collect_reverse_refs(doc: &Document, target_id: ObjectId) -> Vec<ReverseRef> {
     let mut refs = Vec::new();
+    let mut paths = Vec::new();
     for (&(obj_num, generation), object) in &doc.objects {
-        let paths = collect_references_in_object(object, target_id, "");
+        paths.clear();
+        collect_references_in_object_into(object, target_id, "", &mut paths);
         if !paths.is_empty() {
             refs.push(ReverseRef {
                 obj_num,
                 generation,
-                kind: object.enum_variant().to_string(),
+                kind: object.enum_variant(),
                 type_label: object_type_label(object),
-                paths,
+                paths: paths.clone(),
             });
         }
     }
@@ -79,7 +83,7 @@ pub(crate) fn collect_forward_refs_json(doc: &Document, object: &Object) -> Vec<
             "generation": ref_id.1,
         });
         if let Ok(resolved) = doc.get_object(*ref_id) {
-            entry["summary"] = json!(deref_summary(resolved, doc));
+            entry["summary"] = json!(deref_summary(resolved));
         }
         entry
     }).collect()
@@ -121,46 +125,13 @@ fn collect_refs_recursive(obj: &Object, path: &str, refs: &mut Vec<(String, Obje
                 collect_refs_recursive(val, &child_path, refs);
             }
         }
-        _ => {}
-    }
-}
-
-fn deref_summary(obj: &Object, _doc: &Document) -> String {
-    match obj {
-        Object::Null => "null".to_string(),
-        Object::Boolean(b) => b.to_string(),
-        Object::Integer(i) => i.to_string(),
-        Object::Real(r) => r.to_string(),
-        Object::Name(n) => format!("/{}", String::from_utf8_lossy(n)),
-        Object::String(bytes, _) => format!("({})", String::from_utf8_lossy(bytes)),
-        Object::Array(arr) => format!("[{} items]", arr.len()),
-        Object::Reference(id) => format!("{} {} R", id.0, id.1),
-        Object::Stream(stream) => {
-            let type_label = object_type_label(obj);
-            let filter = stream.dict.get(b"Filter").ok()
-                .and_then(|f| f.as_name().ok().map(|n| String::from_utf8_lossy(n).into_owned()));
-            let mut parts = vec![format!("stream, {} bytes", stream.content.len())];
-            if type_label != "-" { parts.insert(0, format!("/Type /{}", type_label)); }
-            if let Some(f) = filter { parts.push(f); }
-            format!("<< {} >>", parts.join(", "))
-        }
         Object::Dictionary(dict) => {
-            let type_label = object_type_label(obj);
-            let count = dict.len();
-            let mut parts = Vec::new();
-            if type_label != "-" { parts.push(format!("/Type /{}", type_label)); }
-            // Show a few notable keys
-            for key in [b"BaseFont".as_slice(), b"Subtype", b"Count", b"MediaBox"] {
-                if let Ok(val) = dict.get(key) {
-                    parts.push(format!("/{}={}", String::from_utf8_lossy(key), format_dict_value(val)));
-                }
-            }
-            if parts.is_empty() {
-                format!("<< {} keys >>", count)
-            } else {
-                format!("<< {}, {} keys >>", parts.join(", "), count)
+            for (key, val) in dict.iter() {
+                let child_path = format!("{}/{}", path, String::from_utf8_lossy(key));
+                collect_refs_recursive(val, &child_path, refs);
             }
         }
+        _ => {}
     }
 }
 

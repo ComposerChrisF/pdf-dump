@@ -5,6 +5,7 @@ use std::io::Write;
 
 use crate::types::PageSpec;
 use crate::helpers::{name_to_string, format_dict_value, obj_to_string_lossy};
+use crate::bookmarks::format_dest_value;
 
 pub(crate) struct AnnotationInfo {
     pub page_num: u32,
@@ -14,32 +15,6 @@ pub(crate) struct AnnotationInfo {
     pub contents: String,
     pub link_type: Option<String>,
     pub target: Option<String>,
-}
-
-fn format_dest_value(doc: &Document, dest: &Object) -> String {
-    match dest {
-        Object::Array(arr) => {
-            let parts: Vec<String> = arr.iter().map(|item| match item {
-                Object::Reference(id) => format!("{} {} R", id.0, id.1),
-                Object::Name(n) => format!("/{}", String::from_utf8_lossy(n)),
-                Object::Integer(i) => i.to_string(),
-                Object::Real(r) => r.to_string(),
-                Object::Null => "null".to_string(),
-                _ => "?".to_string(),
-            }).collect();
-            format!("[{}]", parts.join(" "))
-        }
-        Object::String(bytes, _) => format!("({})", String::from_utf8_lossy(bytes)),
-        Object::Name(n) => format!("/{}", String::from_utf8_lossy(n)),
-        Object::Reference(id) => {
-            if let Ok(resolved) = doc.get_object(*id) {
-                format_dest_value(doc, resolved)
-            } else {
-                format!("{} {} R", id.0, id.1)
-            }
-        }
-        _ => "-".to_string(),
-    }
 }
 
 fn classify_link(doc: &Document, dict: &lopdf::Dictionary) -> (Cow<'static, str>, String) {
@@ -173,14 +148,14 @@ pub(crate) fn collect_annotations(doc: &Document, page_filter: Option<&PageSpec>
 
 pub(crate) fn print_annotations(writer: &mut impl Write, doc: &Document, page_filter: Option<&PageSpec>) {
     let annotations = collect_annotations(doc, page_filter);
-    writeln!(writer, "{} annotations found\n", annotations.len()).unwrap();
+    wln!(writer, "{} annotations found\n", annotations.len());
     if annotations.is_empty() { return; }
-    writeln!(writer, "  {:>4}  {:>4}  {:<12} {:<8} {:<30} {:<30} Contents", "Page", "Obj#", "Subtype", "Type", "Rect", "Target").unwrap();
+    wln!(writer, "  {:>4}  {:>4}  {:<12} {:<8} {:<30} {:<30} Contents", "Page", "Obj#", "Subtype", "Type", "Rect", "Target");
     for a in &annotations {
         let link_type = a.link_type.as_deref().unwrap_or("-");
         let target = a.target.as_deref().unwrap_or("-");
-        writeln!(writer, "  {:>4}  {:>4}  {:<12} {:<8} {:<30} {:<30} {}",
-            a.page_num, a.object_id.0, a.subtype, link_type, a.rect, target, a.contents).unwrap();
+        wln!(writer, "  {:>4}  {:>4}  {:<12} {:<8} {:<30} {:<30} {}",
+            a.page_num, a.object_id.0, a.subtype, link_type, a.rect, target, a.contents);
     }
 }
 

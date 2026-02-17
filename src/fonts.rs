@@ -182,29 +182,29 @@ pub(crate) fn extract_cid_system_info(doc: &Document, dict: &lopdf::Dictionary) 
 
 pub(crate) fn print_fonts(writer: &mut impl Write, doc: &Document) {
     let fonts = collect_fonts(doc);
-    writeln!(writer, "{} fonts found\n", fonts.len()).unwrap();
-    writeln!(writer, "  {:>4}  {:<30} {:<14} {:<18} Embedded", "Obj#", "BaseFont", "Subtype", "Encoding").unwrap();
+    wln!(writer, "{} fonts found\n", fonts.len());
+    wln!(writer, "  {:>4}  {:<30} {:<14} {:<18} Embedded", "Obj#", "BaseFont", "Subtype", "Encoding");
     for f in &fonts {
         let embedded_str = match f.embedded {
             Some(id) => format!("yes ({})", id.0),
             None => "no".to_string(),
         };
-        writeln!(writer, "  {:>4}  {:<30} {:<14} {:<18} {}", f.object_id.0, f.base_font, f.subtype, f.encoding, embedded_str).unwrap();
+        wln!(writer, "  {:>4}  {:<30} {:<14} {:<18} {}", f.object_id.0, f.base_font, f.subtype, f.encoding, embedded_str);
         // Diagnostic details
         if let Some(id) = f.to_unicode {
-            writeln!(writer, "          ToUnicode: {} 0 R", id.0).unwrap();
+            wln!(writer, "          ToUnicode: {} 0 R", id.0);
         }
         if f.first_char.is_some() || f.last_char.is_some() || f.widths_len.is_some() {
             let fc = f.first_char.map(|n| n.to_string()).unwrap_or_else(|| "-".to_string());
             let lc = f.last_char.map(|n| n.to_string()).unwrap_or_else(|| "-".to_string());
             let wl = f.widths_len.map(|n| n.to_string()).unwrap_or_else(|| "-".to_string());
-            writeln!(writer, "          CharRange: {}-{}, Widths: {}", fc, lc, wl).unwrap();
+            wln!(writer, "          CharRange: {}-{}, Widths: {}", fc, lc, wl);
         }
         if let Some(ref diffs) = f.encoding_differences {
-            writeln!(writer, "          Differences: {}", diffs).unwrap();
+            wln!(writer, "          Differences: {}", diffs);
         }
         if let Some(ref csi) = f.cid_system_info {
-            writeln!(writer, "          CIDSystemInfo: {}", csi).unwrap();
+            wln!(writer, "          CIDSystemInfo: {}", csi);
         }
     }
 }

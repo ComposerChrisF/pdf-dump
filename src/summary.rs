@@ -15,14 +15,14 @@ use crate::page_labels::collect_page_labels;
 use crate::structure::collect_structure_tree;
 
 pub(crate) fn print_summary(writer: &mut impl Write, doc: &Document) {
-    writeln!(writer, "PDF {}  |  {} objects\n", doc.version, doc.objects.len()).unwrap();
-    writeln!(writer, "  {:>4}  {:>3}  {:<13} {:<14} Detail", "Obj#", "Gen", "Kind", "/Type").unwrap();
+    wln!(writer, "PDF {}  |  {} objects\n", doc.version, doc.objects.len());
+    wln!(writer, "  {:>4}  {:>3}  {:<13} {:<14} Detail", "Obj#", "Gen", "Kind", "/Type");
 
     for (&(obj_num, generation), object) in &doc.objects {
         let kind = object.enum_variant();
         let type_label = object_type_label(object);
         let detail = summary_detail(object);
-        writeln!(writer, "  {:>4}  {:>3}  {:<13} {:<14} {}", obj_num, generation, kind, type_label, detail).unwrap();
+        wln!(writer, "  {:>4}  {:>3}  {:<13} {:<14} {}", obj_num, generation, kind, type_label, detail);
     }
 }
 
@@ -136,79 +136,13 @@ pub(crate) fn metadata_info(doc: &Document) -> (serde_json::Map<String, Value>, 
     (info, catalog)
 }
 
-// ── Overview (default mode) ──────────────────────────────────────────
+// ── Shared helpers for overview ──────────────────────────────────────
 
-pub(crate) fn print_overview(writer: &mut impl Write, doc: &Document) {
-    // Basic counts
-    writeln!(writer, "PDF Version: {}", doc.version).unwrap();
-    writeln!(writer, "Objects:     {}", doc.objects.len()).unwrap();
-    writeln!(writer, "Pages:       {}", doc.get_pages().len()).unwrap();
+fn is_encrypted(doc: &Document) -> bool {
+    doc.encryption_state.is_some()
+}
 
-    // Encryption status (also check XRef streams for /Encrypt, since lopdf
-    // strips the trailer key after decryption but leaves the XRef stream intact)
-    let encrypted = doc.trailer.get(b"Encrypt").is_ok()
-        || doc.objects.values().any(|obj| {
-            if let Object::Stream(s) = obj {
-                s.dict.get(b"Type").ok()
-                    .and_then(|v| v.as_name().ok())
-                    .is_some_and(|n| n == b"XRef")
-                && s.dict.get(b"Encrypt").is_ok()
-            } else {
-                false
-            }
-        });
-    writeln!(writer, "Encrypted:   {}", if encrypted { "yes" } else { "no" }).unwrap();
-
-    // /Info fields
-    if let Ok(info_ref) = doc.trailer.get(b"Info")
-        && let Ok((_, Object::Dictionary(info))) = doc.dereference(info_ref)
-    {
-        let fields = [
-            b"Producer".as_slice(), b"Creator", b"Title", b"Author",
-            b"Subject", b"Keywords", b"CreationDate", b"ModDate",
-        ];
-        for key in fields {
-            if let Ok(Object::String(bytes, _)) = info.get(key) {
-                writeln!(writer, "{:<13}{}", format!("{}:", String::from_utf8_lossy(key)), String::from_utf8_lossy(bytes)).unwrap();
-            }
-        }
-    }
-
-    // Catalog properties
-    if let Some(root_ref) = doc.trailer.get(b"Root").ok().and_then(|o| o.as_reference().ok())
-        && let Ok(Object::Dictionary(catalog)) = doc.get_object(root_ref)
-    {
-        for key in [b"PageLayout".as_slice(), b"PageMode", b"Lang"] {
-            if let Ok(val) = catalog.get(key) {
-                let text = match val {
-                    Object::Name(n) => format!("/{}", String::from_utf8_lossy(n)),
-                    Object::String(bytes, _) => String::from_utf8_lossy(bytes).into_owned(),
-                    _ => continue,
-                };
-                writeln!(writer, "{:<13}{}", format!("{}:", String::from_utf8_lossy(key)), text).unwrap();
-            }
-        }
-    }
-
-    // Validation summary
-    let report = validate_pdf(doc);
-    writeln!(writer).unwrap();
-    if report.issues.is_empty() {
-        writeln!(writer, "Validation:  no issues found").unwrap();
-    } else {
-        writeln!(writer, "Validation:  {} errors, {} warnings, {} info",
-            report.error_count, report.warn_count, report.info_count).unwrap();
-        for issue in &report.issues {
-            let prefix = match issue.level {
-                crate::validate::ValidationLevel::Error => "[ERROR]",
-                crate::validate::ValidationLevel::Warn => "[WARN]",
-                crate::validate::ValidationLevel::Info => "[INFO]",
-            };
-            writeln!(writer, "  {} {}", prefix, issue.message).unwrap();
-        }
-    }
-
-    // Object type breakdown
+fn count_object_types(doc: &Document) -> BTreeMap<&str, usize> {
     let mut type_counts: BTreeMap<&str, usize> = BTreeMap::new();
     for object in doc.objects.values() {
         let kind = match object {
@@ -225,61 +159,140 @@ pub(crate) fn print_overview(writer: &mut impl Write, doc: &Document) {
         };
         *type_counts.entry(kind).or_insert(0) += 1;
     }
-    let type_parts: Vec<String> = type_counts.iter()
-        .filter(|(_, count)| **count > 0)
-        .map(|(kind, count)| format!("{} {}", count, kind))
-        .collect();
-    if !type_parts.is_empty() {
-        writeln!(writer, "Types:       {}", type_parts.join(", ")).unwrap();
-    }
+    type_counts
+}
 
-    // Stream stats with filters and decoded bytes
-    let mut stream_count = 0usize;
-    let mut total_stream_bytes = 0usize;
+pub(crate) struct StreamStats {
+    pub count: usize,
+    pub total_bytes: usize,
+    pub total_decoded_bytes: usize,
+    pub filter_counts: BTreeMap<String, usize>,
+    pub largest: Vec<(u32, usize)>,
+}
+
+fn collect_stream_stats(doc: &Document) -> StreamStats {
+    let mut count = 0usize;
+    let mut total_bytes = 0usize;
     let mut total_decoded_bytes = 0usize;
     let mut filter_counts: BTreeMap<String, usize> = BTreeMap::new();
-    let mut largest_streams: Vec<(u32, usize)> = Vec::new(); // (obj_num, raw_bytes)
+    let mut largest: Vec<(u32, usize)> = Vec::new();
 
     for (&(obj_num, _), object) in &doc.objects {
         if let Object::Stream(stream) = object {
-            stream_count += 1;
+            count += 1;
             let raw_bytes = stream.content.len();
-            total_stream_bytes += raw_bytes;
+            total_bytes += raw_bytes;
 
             let (decoded, _) = decode_stream(stream);
             total_decoded_bytes += decoded.len();
 
             for filter in get_filter_names(stream) {
-                let name = String::from_utf8_lossy(&filter).into_owned();
+                let name = String::from_utf8_lossy(filter).into_owned();
                 *filter_counts.entry(name).or_insert(0) += 1;
             }
 
-            largest_streams.push((obj_num, raw_bytes));
+            largest.push((obj_num, raw_bytes));
         }
     }
-    largest_streams.sort_by(|a, b| b.1.cmp(&a.1));
-    largest_streams.truncate(3);
+    largest.sort_by(|a, b| b.1.cmp(&a.1));
+    largest.truncate(3);
 
-    writeln!(writer).unwrap();
-    if total_decoded_bytes != total_stream_bytes {
-        writeln!(writer, "Streams:     {} ({} bytes raw, {} decoded)",
-            stream_count, total_stream_bytes, total_decoded_bytes).unwrap();
-    } else {
-        writeln!(writer, "Streams:     {} ({} bytes)", stream_count, total_stream_bytes).unwrap();
+    StreamStats { count, total_bytes, total_decoded_bytes, filter_counts, largest }
+}
+
+// ── Overview (default mode) ──────────────────────────────────────────
+
+pub(crate) fn print_overview(writer: &mut impl Write, doc: &Document) {
+    // Basic counts
+    wln!(writer, "PDF Version: {}", doc.version);
+    wln!(writer, "Objects:     {}", doc.objects.len());
+    wln!(writer, "Pages:       {}", doc.get_pages().len());
+
+    let encrypted = is_encrypted(doc);
+    wln!(writer, "Encrypted:   {}", if encrypted { "yes" } else { "no" });
+
+    // /Info fields
+    if let Ok(info_ref) = doc.trailer.get(b"Info")
+        && let Ok((_, Object::Dictionary(info))) = doc.dereference(info_ref)
+    {
+        let fields = [
+            b"Producer".as_slice(), b"Creator", b"Title", b"Author",
+            b"Subject", b"Keywords", b"CreationDate", b"ModDate",
+        ];
+        for key in fields {
+            if let Ok(Object::String(bytes, _)) = info.get(key) {
+                wln!(writer, "{:<13}{}", format!("{}:", String::from_utf8_lossy(key)), String::from_utf8_lossy(bytes));
+            }
+        }
     }
-    if !filter_counts.is_empty() {
-        let mut sorted_filters: Vec<_> = filter_counts.iter().collect();
+
+    // Catalog properties
+    if let Some(root_ref) = doc.trailer.get(b"Root").ok().and_then(|o| o.as_reference().ok())
+        && let Ok(Object::Dictionary(catalog)) = doc.get_object(root_ref)
+    {
+        for key in [b"PageLayout".as_slice(), b"PageMode", b"Lang"] {
+            if let Ok(val) = catalog.get(key) {
+                let text = match val {
+                    Object::Name(n) => format!("/{}", String::from_utf8_lossy(n)),
+                    Object::String(bytes, _) => String::from_utf8_lossy(bytes).into_owned(),
+                    _ => continue,
+                };
+                wln!(writer, "{:<13}{}", format!("{}:", String::from_utf8_lossy(key)), text);
+            }
+        }
+    }
+
+    // Validation summary
+    let report = validate_pdf(doc);
+    wln!(writer);
+    if report.issues.is_empty() {
+        wln!(writer, "Validation:  no issues found");
+    } else {
+        wln!(writer, "Validation:  {} errors, {} warnings, {} info",
+            report.error_count, report.warn_count, report.info_count);
+        for issue in &report.issues {
+            let prefix = match issue.level {
+                crate::validate::ValidationLevel::Error => "[ERROR]",
+                crate::validate::ValidationLevel::Warn => "[WARN]",
+                crate::validate::ValidationLevel::Info => "[INFO]",
+            };
+            wln!(writer, "  {} {}", prefix, issue.message);
+        }
+    }
+
+    // Object type breakdown
+    let type_counts = count_object_types(doc);
+    let type_parts: Vec<String> = type_counts.iter()
+        .filter(|(_, count)| **count > 0)
+        .map(|(kind, count)| format!("{} {}", count, kind))
+        .collect();
+    if !type_parts.is_empty() {
+        wln!(writer, "Types:       {}", type_parts.join(", "));
+    }
+
+    // Stream stats
+    let stats = collect_stream_stats(doc);
+
+    wln!(writer);
+    if stats.total_decoded_bytes != stats.total_bytes {
+        wln!(writer, "Streams:     {} ({} bytes raw, {} decoded)",
+            stats.count, stats.total_bytes, stats.total_decoded_bytes);
+    } else {
+        wln!(writer, "Streams:     {} ({} bytes)", stats.count, stats.total_bytes);
+    }
+    if !stats.filter_counts.is_empty() {
+        let mut sorted_filters: Vec<_> = stats.filter_counts.iter().collect();
         sorted_filters.sort_by(|a, b| b.1.cmp(a.1).then(a.0.cmp(b.0)));
         let filter_parts: Vec<String> = sorted_filters.iter()
             .map(|(name, count)| format!("{} \u{00d7}{}", name, count))
             .collect();
-        writeln!(writer, "  Filters:   {}", filter_parts.join(", ")).unwrap();
+        wln!(writer, "  Filters:   {}", filter_parts.join(", "));
     }
-    if !largest_streams.is_empty() && stream_count > 1 {
-        let parts: Vec<String> = largest_streams.iter()
+    if !stats.largest.is_empty() && stats.count > 1 {
+        let parts: Vec<String> = stats.largest.iter()
             .map(|(num, bytes)| format!("#{} ({} B)", num, bytes))
             .collect();
-        writeln!(writer, "  Largest:   {}", parts.join(", ")).unwrap();
+        wln!(writer, "  Largest:   {}", parts.join(", "));
     }
 
     // Feature indicators
@@ -308,10 +321,10 @@ pub(crate) fn print_overview(writer: &mut impl Write, doc: &Document) {
         features.push("tagged structure".to_string());
     }
     if !features.is_empty() {
-        writeln!(writer, "Features:    {}", features.join(", ")).unwrap();
+        wln!(writer, "Features:    {}", features.join(", "));
     }
 
-    writeln!(writer, "\nTip: Use --json for machine-readable output.").unwrap();
+    wln!(writer, "\nTip: Use --json for machine-readable output.");
 }
 
 pub(crate) fn print_overview_json(writer: &mut impl Write, doc: &Document) {
@@ -330,72 +343,23 @@ pub(crate) fn print_overview_json(writer: &mut impl Write, doc: &Document) {
     }).collect();
 
     // Object type breakdown
-    let mut type_counts: BTreeMap<&str, usize> = BTreeMap::new();
-    for object in doc.objects.values() {
-        let kind = match object {
-            Object::Boolean(_) => "booleans",
-            Object::Integer(_) => "integers",
-            Object::Real(_) => "reals",
-            Object::Name(_) => "names",
-            Object::String(_, _) => "strings",
-            Object::Array(_) => "arrays",
-            Object::Dictionary(_) => "dictionaries",
-            Object::Stream(_) => "streams",
-            Object::Reference(_) => "references",
-            Object::Null => "nulls",
-        };
-        *type_counts.entry(kind).or_insert(0) += 1;
-    }
+    let type_counts = count_object_types(doc);
     let type_counts_json: serde_json::Map<String, Value> = type_counts.iter()
         .filter(|(_, count)| **count > 0)
         .map(|(kind, count)| (kind.to_string(), json!(count)))
         .collect();
 
-    // Stream stats with filters and decoded bytes
-    let mut stream_count = 0usize;
-    let mut total_stream_bytes = 0usize;
-    let mut total_decoded_bytes = 0usize;
-    let mut filter_counts: BTreeMap<String, usize> = BTreeMap::new();
-    let mut largest_streams: Vec<(u32, usize)> = Vec::new();
+    // Stream stats
+    let stats = collect_stream_stats(doc);
 
-    for (&(obj_num, _), object) in &doc.objects {
-        if let Object::Stream(stream) = object {
-            stream_count += 1;
-            let raw_bytes = stream.content.len();
-            total_stream_bytes += raw_bytes;
-
-            let (decoded, _) = decode_stream(stream);
-            total_decoded_bytes += decoded.len();
-
-            for filter in get_filter_names(stream) {
-                let name = String::from_utf8_lossy(&filter).into_owned();
-                *filter_counts.entry(name).or_insert(0) += 1;
-            }
-
-            largest_streams.push((obj_num, raw_bytes));
-        }
-    }
-    largest_streams.sort_by(|a, b| b.1.cmp(&a.1));
-    largest_streams.truncate(3);
-
-    let filter_counts_json: serde_json::Map<String, Value> = filter_counts.iter()
+    let filter_counts_json: serde_json::Map<String, Value> = stats.filter_counts.iter()
         .map(|(name, count)| (name.clone(), json!(count)))
         .collect();
-    let largest_json: Vec<Value> = largest_streams.iter()
+    let largest_json: Vec<Value> = stats.largest.iter()
         .map(|(num, bytes)| json!({"object_number": num, "bytes": bytes}))
         .collect();
 
-    let encrypted = doc.trailer.get(b"Encrypt").is_ok()
-        || doc.objects.values().any(|obj| {
-            if let Object::Stream(s) = obj {
-                s.dict.get(b"Type").ok()
-                    .and_then(|v| v.as_name().ok())
-                    .is_some_and(|n| n == b"XRef")
-                && s.dict.get(b"Encrypt").is_ok()
-            } else {
-                false
-            }
-        });
+    let encrypted = is_encrypted(doc);
 
     let bookmark_count = count_bookmarks(doc);
     let (_, _, form_fields) = collect_form_fields(doc);
@@ -419,9 +383,9 @@ pub(crate) fn print_overview_json(writer: &mut impl Write, doc: &Document) {
             "issues": issues,
         },
         "streams": {
-            "count": stream_count,
-            "total_bytes": total_stream_bytes,
-            "total_decoded_bytes": total_decoded_bytes,
+            "count": stats.count,
+            "total_bytes": stats.total_bytes,
+            "total_decoded_bytes": stats.total_decoded_bytes,
             "filters": filter_counts_json,
             "largest": largest_json,
         },
@@ -434,7 +398,7 @@ pub(crate) fn print_overview_json(writer: &mut impl Write, doc: &Document) {
             "tagged_structure": has_tags,
         },
     });
-    writeln!(writer, "{}", serde_json::to_string_pretty(&output).unwrap()).unwrap();
+    wln!(writer, "{}", serde_json::to_string_pretty(&output).unwrap());
 }
 
 
@@ -680,7 +644,7 @@ mod tests {
         assert!(objects.iter().any(|o| o["type"] == "Font"));
     }
 
-    fn build_minimal_doc_with_xref_encrypt() -> Document {
+    fn build_minimal_encrypted_doc() -> Document {
         let mut doc = Document::new();
         // Minimal valid structure
         let mut pages = Dictionary::new();
@@ -695,31 +659,27 @@ mod tests {
         doc.objects.insert((2, 0), Object::Dictionary(catalog));
         doc.trailer.set(b"Root", Object::Reference((2, 0)));
 
-        // XRef stream with /Encrypt key (simulating post-decryption state)
-        let mut xref_dict = Dictionary::new();
-        xref_dict.set(b"Type", Object::Name(b"XRef".to_vec()));
-        xref_dict.set(b"Encrypt", Object::Reference((99, 0)));
-        let xref_stream = Stream::new(xref_dict, vec![]);
-        doc.objects.insert((3, 0), Object::Stream(xref_stream));
+        // Simulate post-decryption state via encryption_state
+        doc.encryption_state = Some(lopdf::encryption::EncryptionState::default());
 
         doc
     }
 
     #[test]
-    fn overview_shows_encrypted_for_xref_stream_with_encrypt() {
-        let doc = build_minimal_doc_with_xref_encrypt();
+    fn overview_shows_encrypted_via_encryption_state() {
+        let doc = build_minimal_encrypted_doc();
         let out = output_of(|w| print_overview(w, &doc));
         assert!(out.contains("Encrypted:   yes"),
-            "Should detect encryption via XRef stream, got: {}", out);
+            "Should detect encryption via encryption_state, got: {}", out);
     }
 
     #[test]
-    fn overview_json_shows_encrypted_for_xref_stream_with_encrypt() {
-        let doc = build_minimal_doc_with_xref_encrypt();
+    fn overview_json_shows_encrypted_via_encryption_state() {
+        let doc = build_minimal_encrypted_doc();
         let out = output_of(|w| print_overview_json(w, &doc));
         let parsed: Value = serde_json::from_str(&out).expect("Should be valid JSON");
         assert_eq!(parsed["encrypted"], true,
-            "JSON should show encrypted: true via XRef stream");
+            "JSON should show encrypted: true via encryption_state");
     }
 
     #[test]

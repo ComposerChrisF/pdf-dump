@@ -61,7 +61,7 @@ pub(crate) fn print_find_text(writer: &mut impl Write, doc: &Document, pattern: 
     let matches = find_matches(doc, pattern, page_filter);
 
     if matches.is_empty() {
-        writeln!(writer, "No matches for \"{}\".", pattern).unwrap();
+        wln!(writer, "No matches for \"{}\".", pattern);
         return;
     }
 
@@ -69,13 +69,13 @@ pub(crate) fn print_find_text(writer: &mut impl Write, doc: &Document, pattern: 
 
     for page_match in &matches {
         for snippet in &page_match.snippets {
-            writeln!(writer, "Page {}: \"{}\"", page_match.page_number, snippet).unwrap();
+            wln!(writer, "Page {}: \"{}\"", page_match.page_number, snippet);
         }
     }
 
     let page_count = matches.len();
-    writeln!(writer).unwrap();
-    writeln!(
+    wln!(writer);
+    wln!(
         writer,
         "Found \"{}\" {} time{} on {} page{}.",
         pattern,
@@ -83,7 +83,7 @@ pub(crate) fn print_find_text(writer: &mut impl Write, doc: &Document, pattern: 
         if total_matches == 1 { "" } else { "s" },
         page_count,
         if page_count == 1 { "" } else { "s" },
-    ).unwrap();
+    );
 }
 
 pub(crate) fn find_text_json_value(doc: &Document, pattern: &str, page_filter: Option<&PageSpec>) -> Value {
@@ -115,7 +115,6 @@ mod tests {
     use super::*;
     use crate::test_utils::{output_of, build_two_page_doc, build_page_doc_with_content};
     use crate::types::PageSpec;
-    use lopdf::Document;
 
     #[test]
     fn find_text_no_matches() {

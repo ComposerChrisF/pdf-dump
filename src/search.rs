@@ -107,7 +107,10 @@ pub(crate) fn object_matches(obj: &Object, conditions: &[SearchCondition]) -> bo
         SearchCondition::StreamContains { text } => {
             if let Some(ref decoded) = decoded_content {
                 let text_lower = text.to_lowercase();
-                let content_str = String::from_utf8_lossy(decoded);
+                let content_str = match std::str::from_utf8(decoded) {
+                    Ok(s) => std::borrow::Cow::Borrowed(s),
+                    Err(_) => String::from_utf8_lossy(decoded),
+                };
                 content_str.to_lowercase().contains(&text_lower)
             } else {
                 false
@@ -140,7 +143,7 @@ pub(crate) fn search_objects(writer: &mut impl Write, doc: &Document, conditions
     let mut count = 0;
 
     if summary_mode {
-        writeln!(writer, "  {:>4}  {:>3}  {:<13} {:<14} Detail", "Obj#", "Gen", "Kind", "/Type").unwrap();
+        wln!(writer, "  {:>4}  {:>3}  {:<13} {:<14} Detail", "Obj#", "Gen", "Kind", "/Type");
     }
 
     for (&(obj_num, generation), object) in &doc.objects {
@@ -150,17 +153,17 @@ pub(crate) fn search_objects(writer: &mut impl Write, doc: &Document, conditions
                 let kind = object.enum_variant();
                 let type_label = object_type_label(object);
                 let detail = summary_detail(object);
-                writeln!(writer, "  {:>4}  {:>3}  {:<13} {:<14} {}", obj_num, generation, kind, type_label, detail).unwrap();
+                wln!(writer, "  {:>4}  {:>3}  {:<13} {:<14} {}", obj_num, generation, kind, type_label, detail);
             } else {
-                writeln!(writer, "Object {} {} ({}):", obj_num, generation, object_header_label(object)).unwrap();
+                wln!(writer, "Object {} {} ({}):", obj_num, generation, object_header_label(object));
                 let visited = BTreeSet::new();
                 let mut child_refs = BTreeSet::new();
                 print_object(writer, object, doc, &visited, 1, config, false, &mut child_refs);
-                writeln!(writer, "\n").unwrap();
+                wln!(writer, "\n");
             }
         }
     }
-    writeln!(writer, "Found {} matching objects.", count).unwrap();
+    wln!(writer, "Found {} matching objects.", count);
 }
 
 pub(crate) fn search_objects_json(writer: &mut impl Write, doc: &Document, expr: &str, conditions: &[SearchCondition], config: &DumpConfig) {
@@ -179,7 +182,7 @@ pub(crate) fn search_objects_json(writer: &mut impl Write, doc: &Document, expr:
         "match_count": matches.len(),
         "matches": matches,
     });
-    writeln!(writer, "{}", serde_json::to_string_pretty(&output).unwrap()).unwrap();
+    wln!(writer, "{}", serde_json::to_string_pretty(&output).unwrap());
 }
 
 

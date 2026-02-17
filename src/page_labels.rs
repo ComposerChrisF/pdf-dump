@@ -123,13 +123,13 @@ pub(crate) fn collect_page_labels(doc: &Document) -> Vec<PageLabelEntry> {
 pub(crate) fn print_page_labels(writer: &mut impl Write, doc: &Document) {
     let labels = collect_page_labels(doc);
     if labels.is_empty() {
-        writeln!(writer, "No page labels defined.").unwrap();
+        wln!(writer, "No page labels defined.");
         return;
     }
-    writeln!(writer, "{} pages with labels\n", labels.len()).unwrap();
-    writeln!(writer, "  {:>8}  Label", "Physical").unwrap();
+    wln!(writer, "{} pages with labels\n", labels.len());
+    wln!(writer, "  {:>8}  Label", "Physical");
     for entry in &labels {
-        writeln!(writer, "  {:>8}  {}", entry.physical_page, entry.label).unwrap();
+        wln!(writer, "  {:>8}  {}", entry.physical_page, entry.label);
     }
 }
 

@@ -150,14 +150,14 @@ pub(crate) fn print_bookmarks(writer: &mut impl Write, doc: &Document) {
     let root_ref = match doc.trailer.get(b"Root").ok().and_then(|o| o.as_reference().ok()) {
         Some(id) => id,
         None => {
-            writeln!(writer, "No bookmarks (no /Root in trailer).").unwrap();
+            wln!(writer, "No bookmarks (no /Root in trailer).");
             return;
         }
     };
     let catalog = match doc.get_object(root_ref) {
         Ok(Object::Dictionary(d)) => d,
         _ => {
-            writeln!(writer, "No bookmarks (could not read catalog).").unwrap();
+            wln!(writer, "No bookmarks (could not read catalog).");
             return;
         }
     };
@@ -169,35 +169,35 @@ pub(crate) fn print_bookmarks(writer: &mut impl Write, doc: &Document) {
     }) {
         Some(id) => id,
         None => {
-            writeln!(writer, "No bookmarks.").unwrap();
+            wln!(writer, "No bookmarks.");
             return;
         }
     };
     let outlines_dict = match doc.get_object(outlines_ref) {
         Ok(Object::Dictionary(d)) => d,
         _ => {
-            writeln!(writer, "No bookmarks (could not read /Outlines).").unwrap();
+            wln!(writer, "No bookmarks (could not read /Outlines).");
             return;
         }
     };
     let first_id = match outlines_dict.get(b"First").ok().and_then(|v| v.as_reference().ok()) {
         Some(id) => id,
         None => {
-            writeln!(writer, "No bookmarks.").unwrap();
+            wln!(writer, "No bookmarks.");
             return;
         }
     };
 
     let items = collect_outline_items(doc, first_id);
     let total = count_outline_items(&items);
-    writeln!(writer, "{} bookmarks\n", total).unwrap();
+    wln!(writer, "{} bookmarks\n", total);
     print_outline_tree(writer, &items, 0);
 }
 
 fn print_outline_tree(writer: &mut impl Write, items: &[OutlineItem], depth: usize) {
     let indent = "  ".repeat(depth);
     for item in items {
-        writeln!(writer, "{}[{}] {} -> {}", indent, item.object_id.0, item.title, item.destination).unwrap();
+        wln!(writer, "{}[{}] {} -> {}", indent, item.object_id.0, item.title, item.destination);
         if !item.children.is_empty() {
             print_outline_tree(writer, &item.children, depth + 1);
         }

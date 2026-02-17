@@ -158,9 +158,9 @@ fn count_struct_elems(items: &[StructElemInfo]) -> usize {
 
 pub(crate) fn print_structure(writer: &mut impl Write, doc: &Document, config: &DumpConfig) {
     let (is_marked, tree) = collect_structure_tree(doc);
-    writeln!(writer, "Tagged PDF: {}", if is_marked { "yes" } else { "no" }).unwrap();
+    wln!(writer, "Tagged PDF: {}", if is_marked { "yes" } else { "no" });
     let count = count_struct_elems(&tree);
-    writeln!(writer, "Structure elements: {}\n", count).unwrap();
+    wln!(writer, "Structure elements: {}\n", count);
     if tree.is_empty() { return; }
     for elem in &tree {
         print_struct_elem(writer, elem, 0, config);
@@ -199,7 +199,7 @@ fn print_struct_elem(writer: &mut impl Write, elem: &StructElemInfo, depth: usiz
         line.push_str(&format!(" ({} children)", count_struct_elems(&elem.children)));
     }
 
-    writeln!(writer, "{}", line).unwrap();
+    wln!(writer, "{}", line);
 
     for child in &elem.children {
         print_struct_elem(writer, child, depth + 1, config);

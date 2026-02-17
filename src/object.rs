@@ -21,25 +21,25 @@ pub(crate) fn print_stream_content(writer: &mut impl Write, stream: &lopdf::Stre
 
 pub(crate) fn print_content_data(writer: &mut impl Write, content: &[u8], description: &str, indent_str: &str, config: &DumpConfig, is_contents: bool, warning: Option<&str>) {
     if let Some(warn) = warning {
-        writeln!(writer, "\n{}[WARNING: {}]", indent_str, warn).unwrap();
+        wln!(writer, "\n{}[WARNING: {}]", indent_str, warn);
     }
 
     if is_contents {
         match Content::decode(content) {
             Ok(content) => {
-                writeln!(
+                wln!(
                     writer,
                     "\n{}Parsed Content Stream ({} operations):",
                     indent_str,
                     content.operations.len()
-                ).unwrap();
+                );
                 for op in &content.operations {
-                    writeln!(writer, "{}  {}", indent_str, format_operation(op)).unwrap();
+                    wln!(writer, "{}  {}", indent_str, format_operation(op));
                 }
                 return;
             }
             Err(e) => {
-                writeln!(writer, "\n{}[Could not parse content stream: {}. Falling back to raw view.]", indent_str, e).unwrap();
+                wln!(writer, "\n{}[Could not parse content stream: {}. Falling back to raw view.]", indent_str, e);
             }
         }
     }
@@ -63,23 +63,23 @@ pub(crate) fn print_content_data(writer: &mut impl Write, content: &[u8], descri
     };
 
     if config.hex && is_binary {
-        writeln!(
+        wln!(
             writer,
             "\n{}Stream content ({}, {} bytes):\n{}",
             indent_str,
             description,
             len_str,
             format_hex_dump(content_to_display)
-        ).unwrap();
+        );
     } else {
-        writeln!(
+        wln!(
             writer,
             "\n{}Stream content ({}, {} bytes):\n---\n{}\n---",
             indent_str,
             description,
             len_str,
             String::from_utf8_lossy(content_to_display)
-        ).unwrap();
+        );
     }
 }
 
@@ -87,32 +87,33 @@ pub(crate) fn print_content_data(writer: &mut impl Write, content: &[u8], descri
 #[allow(clippy::only_used_in_recursion)]
 pub(crate) fn print_object(writer: &mut impl Write, obj: &Object, doc: &Document, visited: &BTreeSet<ObjectId>, indent: usize, config: &DumpConfig, is_contents: bool, child_refs: &mut BTreeSet<(bool, ObjectId)>) {
     let indent_str = "  ".repeat(indent);
-    let child_indent = "  ".repeat(indent + 1);
 
     match obj {
-        Object::Null => write!(writer, "null").unwrap(),
-        Object::Boolean(b) => write!(writer, "{}", b).unwrap(),
-        Object::Integer(i) => write!(writer, "{}", i).unwrap(),
-        Object::Real(r) => write!(writer, "{}", r).unwrap(),
-        Object::Name(name) => write!(writer, "/{}", String::from_utf8_lossy(name)).unwrap(),
-        Object::String(bytes, _) => write!(writer, "({})", String::from_utf8_lossy(bytes)).unwrap(),
+        Object::Null => w!(writer, "null"),
+        Object::Boolean(b) => w!(writer, "{}", b),
+        Object::Integer(i) => w!(writer, "{}", i),
+        Object::Real(r) => w!(writer, "{}", r),
+        Object::Name(name) => w!(writer, "/{}", String::from_utf8_lossy(name)),
+        Object::String(bytes, _) => w!(writer, "({})", String::from_utf8_lossy(bytes)),
         Object::Array(array) => {
-            writeln!(writer, "[").unwrap();
+            let child_indent = "  ".repeat(indent + 1);
+            wln!(writer, "[");
             for item in array {
-                write!(writer, "{}", child_indent).unwrap();
+                w!(writer, "{}", child_indent);
                 print_object(writer, item, doc, visited, indent + 1, config, is_contents, child_refs);
-                writeln!(writer).unwrap();
+                wln!(writer);
             }
-            write!(writer, "{}]", indent_str).unwrap();
+            w!(writer, "{}]", indent_str);
         }
         Object::Stream(stream) => {
-            writeln!(writer, "<<").unwrap();
+            let child_indent = "  ".repeat(indent + 1);
+            wln!(writer, "<<");
             for (key, value) in stream.dict.iter() {
-                write!(writer, "{}/{} ", child_indent, String::from_utf8_lossy(key)).unwrap();
+                w!(writer, "{}/{} ", child_indent, String::from_utf8_lossy(key));
                 print_object(writer, value, doc, visited, indent + 1, config, is_contents, child_refs);
-                writeln!(writer).unwrap();
+                wln!(writer);
             }
-            write!(writer, "{}>> stream", indent_str).unwrap();
+            w!(writer, "{}>> stream", indent_str);
 
             if config.raw {
                 print_content_data(writer, &stream.content, "raw, undecoded", &indent_str, config, false, None);
@@ -121,29 +122,30 @@ pub(crate) fn print_object(writer: &mut impl Write, obj: &Object, doc: &Document
             }
         }
         Object::Dictionary(dict) => {
-            writeln!(writer, "<<").unwrap();
+            let child_indent = "  ".repeat(indent + 1);
+            wln!(writer, "<<");
             for (key, value) in dict.iter() {
-                write!(writer, "{}/{} ", child_indent, String::from_utf8_lossy(key)).unwrap();
+                w!(writer, "{}/{} ", child_indent, String::from_utf8_lossy(key));
                 let is_contents = key == b"Contents";
                 print_object(writer, value, doc, visited, indent + 1, config, is_contents, child_refs);
-                writeln!(writer).unwrap();
+                wln!(writer);
             }
-            write!(writer, "{}>>", indent_str).unwrap();
+            w!(writer, "{}>>", indent_str);
         }
         Object::Reference(id) => {
             child_refs.insert((is_contents, *id));
-            write!(writer, "{} {} R", id.0, id.1).unwrap();
+            w!(writer, "{} {} R", id.0, id.1);
             if visited.contains(id) {
-                write!(writer, " (visited)").unwrap();
+                w!(writer, " (visited)");
             } else if config.deref
                 && let Ok(resolved) = doc.get_object(*id) {
-                write!(writer, " => {}", deref_summary(resolved, doc)).unwrap();
+                w!(writer, " => {}", deref_summary(resolved));
             }
         }
     }
 }
 
-pub(crate) fn deref_summary(obj: &Object, _doc: &Document) -> String {
+pub(crate) fn deref_summary(obj: &Object) -> String {
     match obj {
         Object::Null => "null".to_string(),
         Object::Boolean(b) => b.to_string(),
@@ -196,22 +198,21 @@ pub(crate) fn print_single_object(writer: &mut impl Write, doc: &Document, obj_n
     let obj_id = (obj_num, 0);
     match doc.get_object(obj_id) {
         Ok(object) => {
-            writeln!(writer, "Object {} 0 ({}):", obj_num, object_header_label(object)).unwrap();
+            wln!(writer, "Object {} 0 ({}):", obj_num, object_header_label(object));
             let visited = BTreeSet::new();
             let mut child_refs = BTreeSet::new();
             print_object(writer, object, doc, &visited, 1, config, false, &mut child_refs);
-            writeln!(writer).unwrap();
+            wln!(writer);
         }
         Err(_) => {
-            eprintln!("Error: Object {} not found in the document.", obj_num);
-            std::process::exit(1);
+            eprintln!("Error: Object {} not found.", obj_num);
         }
     }
 }
 
 pub(crate) fn print_objects(writer: &mut impl Write, doc: &Document, nums: &[u32], config: &DumpConfig) {
     for (i, &obj_num) in nums.iter().enumerate() {
-        if i > 0 { writeln!(writer).unwrap(); }
+        if i > 0 { wln!(writer); }
         print_single_object(writer, doc, obj_num, config);
     }
 }
@@ -241,7 +242,7 @@ pub(crate) fn print_objects_json(writer: &mut impl Write, doc: &Document, nums: 
             }
         }
         let output = json!({"objects": items});
-        writeln!(writer, "{}", serde_json::to_string_pretty(&output).unwrap()).unwrap();
+        wln!(writer, "{}", serde_json::to_string_pretty(&output).unwrap());
     }
 }
 
@@ -328,11 +329,11 @@ pub(crate) fn print_single_object_json(writer: &mut impl Write, doc: &Document, 
                 "generation": 0,
                 "object": object_to_json(object, doc, config),
             });
-            writeln!(writer, "{}", serde_json::to_string_pretty(&output).unwrap()).unwrap();
+            wln!(writer, "{}", serde_json::to_string_pretty(&output).unwrap());
         }
         Err(_) => {
-            eprintln!("Error: Object {} not found in the document.", obj_num);
-            std::process::exit(1);
+            let output = json!({"error": format!("Object {} not found.", obj_num)});
+            wln!(writer, "{}", serde_json::to_string_pretty(&output).unwrap());
         }
     }
 }
