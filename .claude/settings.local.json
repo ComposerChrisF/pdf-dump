@@ -1,0 +1,29 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(git add:*)",
+      "Bash(git commit:*)",
+      "Bash(cargo clippy:*)",
+      "Bash(cargo test:*)",
+      "Bash(grep:*)",
+      "Bash(cargo check:*)",
+      "Bash(cargo build:*)",
+      "Bash(publish-bin:*)",
+      "Bash(cargo run:*)",
+      "Bash(echo:*)",
+      "Bash(cargo doc:*)",
+      "Bash(cargo --version:*)",
+      "Bash(rustc:*)",
+      "Bash(git push:*)",
+      "Bash(ls:*)",
+      "Bash(wc:*)",
+      "Bash(cargo fix:*)",
+      "Bash(cargo tree:*)",
+      "Bash(/Users/chris/Chris/App/Rust/Pdf/pdf-merger/target/release/pdf-merger:*)",
+      "Bash(git rm:*)",
+      "Bash(git stash:*)",
+      "Bash(pdf-merger:*)",
+      "Bash(version-manager --bump-patch)"
+    ]
+  }
+}

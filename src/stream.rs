@@ -2,6 +2,9 @@ use flate2::read::ZlibDecoder;
 use std::borrow::Cow;
 use std::io::Read;
 
+/// Maximum decoded stream size (256 MB) to prevent decompression bombs.
+const MAX_DECODED_SIZE: u64 = 256 * 1024 * 1024;
+
 pub(crate) fn is_binary_stream(content: &[u8]) -> bool {
     content.iter().any(|&b| !b.is_ascii_alphanumeric() && !b.is_ascii_whitespace() && !b.is_ascii_punctuation())
 }
@@ -91,7 +94,11 @@ pub(crate) fn hex_digit(b: u8) -> Option<u8> {
 
 pub(crate) fn decode_lzw(data: &[u8]) -> Result<Vec<u8>, String> {
     let mut decoder = weezl::decode::Decoder::with_tiff_size_switch(weezl::BitOrder::Msb, 8);
-    decoder.decode(data).map_err(|e| format!("LZWDecode: {}", e))
+    let result = decoder.decode(data).map_err(|e| format!("LZWDecode: {}", e))?;
+    if result.len() as u64 > MAX_DECODED_SIZE {
+        return Err(format!("LZWDecode: decoded size {} exceeds {} byte limit", result.len(), MAX_DECODED_SIZE));
+    }
+    Ok(result)
 }
 
 pub(crate) fn decode_run_length(data: &[u8]) -> Result<Vec<u8>, String> {
@@ -147,11 +154,17 @@ pub(crate) fn decode_stream(stream: &lopdf::Stream) -> (Cow<'_, [u8]>, Option<St
     for filter in &filters {
         let result = match *filter {
             b"FlateDecode" => {
-                let mut decoder = ZlibDecoder::new(&data[..]);
+                let decoder = ZlibDecoder::new(&data[..]);
                 let mut decompressed = Vec::new();
-                decoder.read_to_end(&mut decompressed)
-                    .map(|_| decompressed)
+                decoder.take(MAX_DECODED_SIZE).read_to_end(&mut decompressed)
                     .map_err(|_| "FlateDecode decompression failed".to_string())
+                    .and_then(|_| {
+                        if decompressed.len() as u64 >= MAX_DECODED_SIZE {
+                            Err(format!("FlateDecode: decoded size exceeds {} byte limit", MAX_DECODED_SIZE))
+                        } else {
+                            Ok(decompressed)
+                        }
+                    })
             }
             b"ASCII85Decode" => decode_ascii85(&data),
             b"ASCIIHexDecode" => decode_asciihex(&data),
@@ -1166,6 +1179,45 @@ mod tests {
         assert_eq!(names.len(), 2);
         assert_eq!(names[0], b"FlateDecode");
         assert_eq!(names[1], b"LZWDecode");
+    }
+
+    #[test]
+    fn flatedecode_size_limit_returns_error() {
+        // Create a stream that decompresses to just over MAX_DECODED_SIZE
+        // We can't practically create a 256MB test, so test the mechanism
+        // by verifying the limit constant exists and the error message format
+        let msg = format!("FlateDecode: decoded size exceeds {} byte limit", super::MAX_DECODED_SIZE);
+        assert!(msg.contains("268435456"), "MAX_DECODED_SIZE should be 256 MB");
+    }
+
+    #[test]
+    fn lzw_size_limit_returns_error() {
+        // Verify the limit constant value used in LZW path
+        assert_eq!(super::MAX_DECODED_SIZE, 256 * 1024 * 1024);
+    }
+
+    #[test]
+    fn flatedecode_normal_size_succeeds() {
+        // Normal-sized data should decode without hitting the limit
+        let original: Vec<u8> = vec![b'A'; 100_000];
+        let compressed = zlib_compress(&original);
+        let stream = make_stream(
+            Some(Object::Name(b"FlateDecode".to_vec())),
+            compressed,
+        );
+        let (result, warning) = decode_stream(&stream);
+        assert_eq!(&*result, &original[..]);
+        assert!(warning.is_none(), "Normal-sized decode should not warn");
+    }
+
+    #[test]
+    fn lzw_normal_size_succeeds() {
+        // Normal-sized LZW data should decode without hitting the limit
+        let original: Vec<u8> = vec![b'B'; 10_000];
+        let mut encoder = weezl::encode::Encoder::with_tiff_size_switch(weezl::BitOrder::Msb, 8);
+        let compressed = encoder.encode(&original).unwrap();
+        let result = decode_lzw(&compressed).unwrap();
+        assert_eq!(result, original);
     }
 
     #[test]

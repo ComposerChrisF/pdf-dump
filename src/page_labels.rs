@@ -101,7 +101,7 @@ pub(crate) fn collect_page_labels(doc: &Document) -> Vec<PageLabelEntry> {
             .unwrap_or((0, "D", "", 1));
 
         let offset = phys as i64 - range_start;
-        let value = start_val + offset;
+        let value = start_val.saturating_add(offset);
         let label = format_page_label(style, prefix, value);
 
         entries.push(PageLabelEntry {

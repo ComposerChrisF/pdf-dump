@@ -1,8 +1,6 @@
 /target
 in*.txt
 out*.txt
-out*.tx
-cover.txt
 *.pdf
 *.ttf
 .publish-bin.toml

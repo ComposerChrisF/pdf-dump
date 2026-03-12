@@ -303,7 +303,7 @@ fn check_font_requirements(doc: &Document, issues: &mut Vec<ValidationIssue>) {
             && let (Ok(Object::Integer(first)), Ok(Object::Integer(last))) =
                 (dict.get(b"FirstChar"), dict.get(b"LastChar"))
         {
-            let expected_width_count = (last - first + 1).max(0) as usize;
+            let expected_width_count = last.saturating_sub(*first).saturating_add(1).max(0) as usize;
             if let Ok(Object::Array(widths)) = dict.get(b"Widths")
                 && widths.len() != expected_width_count
             {
