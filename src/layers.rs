@@ -411,4 +411,380 @@ mod tests {
         assert_eq!(layers[0].name, "RefLayer");
     }
 
+    #[test]
+    fn layers_no_d_config_defaults_base_state_on() {
+        let mut doc = Document::new();
+
+        let mut ocg = Dictionary::new();
+        ocg.set("Type", Object::Name(b"OCG".to_vec()));
+        ocg.set("Name", Object::String(b"NoConfig".to_vec(), StringFormat::Literal));
+        doc.objects.insert((10, 0), Object::Dictionary(ocg));
+
+        // OCProperties with OCGs but no /D config dict
+        let mut oc_props = Dictionary::new();
+        oc_props.set("OCGs", Object::Array(vec![Object::Reference((10, 0))]));
+        // Intentionally no "D" key
+
+        let mut catalog = Dictionary::new();
+        catalog.set("Type", Object::Name(b"Catalog".to_vec()));
+        catalog.set("OCProperties", Object::Dictionary(oc_props));
+        doc.objects.insert((1, 0), Object::Dictionary(catalog));
+        doc.trailer.set("Root", Object::Reference((1, 0)));
+
+        let layers = collect_layers(&doc);
+        assert_eq!(layers.len(), 1);
+        assert_eq!(layers[0].name, "NoConfig");
+        assert_eq!(layers[0].default_state, "ON");
+    }
+
+    #[test]
+    fn layers_ocg_on_multiple_pages() {
+        let mut doc = Document::new();
+
+        let mut ocg = Dictionary::new();
+        ocg.set("Type", Object::Name(b"OCG".to_vec()));
+        ocg.set("Name", Object::String(b"MultiPage".to_vec(), StringFormat::Literal));
+        doc.objects.insert((10, 0), Object::Dictionary(ocg));
+
+        let d_config = Dictionary::new();
+        let mut oc_props = Dictionary::new();
+        oc_props.set("OCGs", Object::Array(vec![Object::Reference((10, 0))]));
+        oc_props.set("D", Object::Dictionary(d_config));
+
+        // Page 1 references the OCG
+        let mut props1 = Dictionary::new();
+        props1.set("MC0", Object::Reference((10, 0)));
+        let mut resources1 = Dictionary::new();
+        resources1.set("Properties", Object::Dictionary(props1));
+        let mut page1 = Dictionary::new();
+        page1.set("Type", Object::Name(b"Page".to_vec()));
+        page1.set("Resources", Object::Dictionary(resources1));
+        page1.set("Parent", Object::Reference((2, 0)));
+        doc.objects.insert((3, 0), Object::Dictionary(page1));
+
+        // Page 2 also references the same OCG
+        let mut props2 = Dictionary::new();
+        props2.set("MC1", Object::Reference((10, 0)));
+        let mut resources2 = Dictionary::new();
+        resources2.set("Properties", Object::Dictionary(props2));
+        let mut page2 = Dictionary::new();
+        page2.set("Type", Object::Name(b"Page".to_vec()));
+        page2.set("Resources", Object::Dictionary(resources2));
+        page2.set("Parent", Object::Reference((2, 0)));
+        doc.objects.insert((4, 0), Object::Dictionary(page2));
+
+        let mut pages = Dictionary::new();
+        pages.set("Type", Object::Name(b"Pages".to_vec()));
+        pages.set("Kids", Object::Array(vec![
+            Object::Reference((3, 0)),
+            Object::Reference((4, 0)),
+        ]));
+        pages.set("Count", Object::Integer(2));
+        doc.objects.insert((2, 0), Object::Dictionary(pages));
+
+        let mut catalog = Dictionary::new();
+        catalog.set("Type", Object::Name(b"Catalog".to_vec()));
+        catalog.set("Pages", Object::Reference((2, 0)));
+        catalog.set("OCProperties", Object::Dictionary(oc_props));
+        doc.objects.insert((1, 0), Object::Dictionary(catalog));
+        doc.trailer.set("Root", Object::Reference((1, 0)));
+
+        let layers = collect_layers(&doc);
+        assert_eq!(layers.len(), 1);
+        assert_eq!(layers[0].page_numbers, vec![1, 2]);
+    }
+
+    #[test]
+    fn layers_non_reference_items_in_ocgs_array_skipped() {
+        let mut doc = Document::new();
+
+        let mut ocg = Dictionary::new();
+        ocg.set("Type", Object::Name(b"OCG".to_vec()));
+        ocg.set("Name", Object::String(b"Real".to_vec(), StringFormat::Literal));
+        doc.objects.insert((10, 0), Object::Dictionary(ocg));
+
+        let d_config = Dictionary::new();
+        let mut oc_props = Dictionary::new();
+        // Mix of reference and non-reference items
+        oc_props.set("OCGs", Object::Array(vec![
+            Object::Integer(42),
+            Object::Reference((10, 0)),
+            Object::Name(b"Bogus".to_vec()),
+        ]));
+        oc_props.set("D", Object::Dictionary(d_config));
+
+        let mut catalog = Dictionary::new();
+        catalog.set("Type", Object::Name(b"Catalog".to_vec()));
+        catalog.set("OCProperties", Object::Dictionary(oc_props));
+        doc.objects.insert((1, 0), Object::Dictionary(catalog));
+        doc.trailer.set("Root", Object::Reference((1, 0)));
+
+        let layers = collect_layers(&doc);
+        // Only the valid reference should produce a layer
+        assert_eq!(layers.len(), 1);
+        assert_eq!(layers[0].name, "Real");
+    }
+
+    #[test]
+    fn layers_ocg_object_missing_from_doc_skipped() {
+        let mut doc = Document::new();
+
+        // OCG (10,0) exists
+        let mut ocg = Dictionary::new();
+        ocg.set("Type", Object::Name(b"OCG".to_vec()));
+        ocg.set("Name", Object::String(b"Exists".to_vec(), StringFormat::Literal));
+        doc.objects.insert((10, 0), Object::Dictionary(ocg));
+
+        // OCG (99,0) does NOT exist in doc.objects
+
+        let d_config = Dictionary::new();
+        let mut oc_props = Dictionary::new();
+        oc_props.set("OCGs", Object::Array(vec![
+            Object::Reference((10, 0)),
+            Object::Reference((99, 0)), // dangling reference
+        ]));
+        oc_props.set("D", Object::Dictionary(d_config));
+
+        let mut catalog = Dictionary::new();
+        catalog.set("Type", Object::Name(b"Catalog".to_vec()));
+        catalog.set("OCProperties", Object::Dictionary(oc_props));
+        doc.objects.insert((1, 0), Object::Dictionary(catalog));
+        doc.trailer.set("Root", Object::Reference((1, 0)));
+
+        let layers = collect_layers(&doc);
+        // Only the existing OCG should appear
+        assert_eq!(layers.len(), 1);
+        assert_eq!(layers[0].name, "Exists");
+    }
+
+    #[test]
+    fn layers_resources_inherited_from_parent() {
+        let mut doc = Document::new();
+
+        let mut ocg = Dictionary::new();
+        ocg.set("Type", Object::Name(b"OCG".to_vec()));
+        ocg.set("Name", Object::String(b"Inherited".to_vec(), StringFormat::Literal));
+        doc.objects.insert((10, 0), Object::Dictionary(ocg));
+
+        let d_config = Dictionary::new();
+        let mut oc_props = Dictionary::new();
+        oc_props.set("OCGs", Object::Array(vec![Object::Reference((10, 0))]));
+        oc_props.set("D", Object::Dictionary(d_config));
+
+        // Page has NO Resources — they come from the parent Pages node
+        let mut page = Dictionary::new();
+        page.set("Type", Object::Name(b"Page".to_vec()));
+        page.set("Parent", Object::Reference((2, 0)));
+        doc.objects.insert((3, 0), Object::Dictionary(page));
+
+        // Parent Pages node carries Resources with Properties referencing the OCG
+        let mut props = Dictionary::new();
+        props.set("MC0", Object::Reference((10, 0)));
+        let mut resources = Dictionary::new();
+        resources.set("Properties", Object::Dictionary(props));
+        let mut pages = Dictionary::new();
+        pages.set("Type", Object::Name(b"Pages".to_vec()));
+        pages.set("Kids", Object::Array(vec![Object::Reference((3, 0))]));
+        pages.set("Count", Object::Integer(1));
+        pages.set("Resources", Object::Dictionary(resources));
+        doc.objects.insert((2, 0), Object::Dictionary(pages));
+
+        let mut catalog = Dictionary::new();
+        catalog.set("Type", Object::Name(b"Catalog".to_vec()));
+        catalog.set("Pages", Object::Reference((2, 0)));
+        catalog.set("OCProperties", Object::Dictionary(oc_props));
+        doc.objects.insert((1, 0), Object::Dictionary(catalog));
+        doc.trailer.set("Root", Object::Reference((1, 0)));
+
+        let layers = collect_layers(&doc);
+        assert_eq!(layers.len(), 1);
+        assert_eq!(layers[0].name, "Inherited");
+        assert_eq!(layers[0].page_numbers, vec![1]);
+    }
+
+    #[test]
+    fn layers_properties_entry_non_ocg_not_counted() {
+        let mut doc = Document::new();
+
+        let mut ocg = Dictionary::new();
+        ocg.set("Type", Object::Name(b"OCG".to_vec()));
+        ocg.set("Name", Object::String(b"RealOCG".to_vec(), StringFormat::Literal));
+        doc.objects.insert((10, 0), Object::Dictionary(ocg));
+
+        // A dictionary that is NOT an OCG (different /Type)
+        let mut non_ocg = Dictionary::new();
+        non_ocg.set("Type", Object::Name(b"OCMD".to_vec()));
+        doc.objects.insert((11, 0), Object::Dictionary(non_ocg));
+
+        let d_config = Dictionary::new();
+        let mut oc_props = Dictionary::new();
+        oc_props.set("OCGs", Object::Array(vec![Object::Reference((10, 0))]));
+        oc_props.set("D", Object::Dictionary(d_config));
+
+        // Page Properties references both the OCG and the non-OCG
+        let mut props = Dictionary::new();
+        props.set("MC0", Object::Reference((10, 0)));
+        props.set("MC1", Object::Reference((11, 0)));
+        let mut resources = Dictionary::new();
+        resources.set("Properties", Object::Dictionary(props));
+        let mut page = Dictionary::new();
+        page.set("Type", Object::Name(b"Page".to_vec()));
+        page.set("Resources", Object::Dictionary(resources));
+        page.set("Parent", Object::Reference((2, 0)));
+        doc.objects.insert((3, 0), Object::Dictionary(page));
+
+        let mut pages = Dictionary::new();
+        pages.set("Type", Object::Name(b"Pages".to_vec()));
+        pages.set("Kids", Object::Array(vec![Object::Reference((3, 0))]));
+        pages.set("Count", Object::Integer(1));
+        doc.objects.insert((2, 0), Object::Dictionary(pages));
+
+        let mut catalog = Dictionary::new();
+        catalog.set("Type", Object::Name(b"Catalog".to_vec()));
+        catalog.set("Pages", Object::Reference((2, 0)));
+        catalog.set("OCProperties", Object::Dictionary(oc_props));
+        doc.objects.insert((1, 0), Object::Dictionary(catalog));
+        doc.trailer.set("Root", Object::Reference((1, 0)));
+
+        let layers = collect_layers(&doc);
+        assert_eq!(layers.len(), 1);
+        // Only the real OCG should have page references; non-OCG should not create entries
+        assert_eq!(layers[0].page_numbers, vec![1]);
+    }
+
+    #[test]
+    fn layers_ocgs_array_via_reference() {
+        let mut doc = Document::new();
+
+        let mut ocg = Dictionary::new();
+        ocg.set("Type", Object::Name(b"OCG".to_vec()));
+        ocg.set("Name", Object::String(b"IndirectArr".to_vec(), StringFormat::Literal));
+        doc.objects.insert((10, 0), Object::Dictionary(ocg));
+
+        // Store the OCGs array as a separate object
+        doc.objects.insert((20, 0), Object::Array(vec![Object::Reference((10, 0))]));
+
+        let d_config = Dictionary::new();
+        let mut oc_props = Dictionary::new();
+        // OCGs key is a reference to the array object
+        oc_props.set("OCGs", Object::Reference((20, 0)));
+        oc_props.set("D", Object::Dictionary(d_config));
+
+        let mut catalog = Dictionary::new();
+        catalog.set("Type", Object::Name(b"Catalog".to_vec()));
+        catalog.set("OCProperties", Object::Dictionary(oc_props));
+        doc.objects.insert((1, 0), Object::Dictionary(catalog));
+        doc.trailer.set("Root", Object::Reference((1, 0)));
+
+        let layers = collect_layers(&doc);
+        assert_eq!(layers.len(), 1);
+        assert_eq!(layers[0].name, "IndirectArr");
+    }
+
+    #[test]
+    fn layers_print_no_layers_shows_zero_count_no_header() {
+        let mut doc = Document::new();
+        let mut catalog = Dictionary::new();
+        catalog.set("Type", Object::Name(b"Catalog".to_vec()));
+        doc.objects.insert((1, 0), Object::Dictionary(catalog));
+        doc.trailer.set("Root", Object::Reference((1, 0)));
+
+        let out = output_of(|w| print_layers(w, &doc));
+        assert!(out.contains("0 layers found"));
+        // Should NOT contain the table header since there are no layers
+        assert!(!out.contains("Obj#"));
+        assert!(!out.contains("Default"));
+    }
+
+    #[test]
+    fn layers_json_includes_generation_number() {
+        let mut doc = Document::new();
+
+        let mut ocg = Dictionary::new();
+        ocg.set("Type", Object::Name(b"OCG".to_vec()));
+        ocg.set("Name", Object::String(b"GenTest".to_vec(), StringFormat::Literal));
+        // Use generation 0 (standard)
+        doc.objects.insert((10, 0), Object::Dictionary(ocg));
+
+        let d_config = Dictionary::new();
+        let mut oc_props = Dictionary::new();
+        oc_props.set("OCGs", Object::Array(vec![Object::Reference((10, 0))]));
+        oc_props.set("D", Object::Dictionary(d_config));
+
+        let mut catalog = Dictionary::new();
+        catalog.set("Type", Object::Name(b"Catalog".to_vec()));
+        catalog.set("OCProperties", Object::Dictionary(oc_props));
+        doc.objects.insert((1, 0), Object::Dictionary(catalog));
+        doc.trailer.set("Root", Object::Reference((1, 0)));
+
+        let json_val = layers_json_value(&doc);
+        assert_eq!(json_val["layers"][0]["generation"], 0);
+        assert_eq!(json_val["layers"][0]["object_number"], 10);
+        // Verify the field actually exists (not null)
+        assert!(json_val["layers"][0].get("generation").is_some());
+    }
+
+    #[test]
+    fn layers_print_shows_multiple_page_numbers() {
+        let mut doc = Document::new();
+
+        let mut ocg = Dictionary::new();
+        ocg.set("Type", Object::Name(b"OCG".to_vec()));
+        ocg.set("Name", Object::String(b"TwoPages".to_vec(), StringFormat::Literal));
+        doc.objects.insert((10, 0), Object::Dictionary(ocg));
+
+        let d_config = Dictionary::new();
+        let mut oc_props = Dictionary::new();
+        oc_props.set("OCGs", Object::Array(vec![Object::Reference((10, 0))]));
+        oc_props.set("D", Object::Dictionary(d_config));
+
+        // Page 1 references the OCG
+        let mut props1 = Dictionary::new();
+        props1.set("MC0", Object::Reference((10, 0)));
+        let mut resources1 = Dictionary::new();
+        resources1.set("Properties", Object::Dictionary(props1));
+        let mut page1 = Dictionary::new();
+        page1.set("Type", Object::Name(b"Page".to_vec()));
+        page1.set("Resources", Object::Dictionary(resources1));
+        page1.set("Parent", Object::Reference((2, 0)));
+        doc.objects.insert((3, 0), Object::Dictionary(page1));
+
+        // Page 2 does NOT reference the OCG (no Properties)
+        let mut page2 = Dictionary::new();
+        page2.set("Type", Object::Name(b"Page".to_vec()));
+        page2.set("Parent", Object::Reference((2, 0)));
+        doc.objects.insert((4, 0), Object::Dictionary(page2));
+
+        // Page 3 references the OCG
+        let mut props3 = Dictionary::new();
+        props3.set("MC0", Object::Reference((10, 0)));
+        let mut resources3 = Dictionary::new();
+        resources3.set("Properties", Object::Dictionary(props3));
+        let mut page3 = Dictionary::new();
+        page3.set("Type", Object::Name(b"Page".to_vec()));
+        page3.set("Resources", Object::Dictionary(resources3));
+        page3.set("Parent", Object::Reference((2, 0)));
+        doc.objects.insert((5, 0), Object::Dictionary(page3));
+
+        let mut pages = Dictionary::new();
+        pages.set("Type", Object::Name(b"Pages".to_vec()));
+        pages.set("Kids", Object::Array(vec![
+            Object::Reference((3, 0)),
+            Object::Reference((4, 0)),
+            Object::Reference((5, 0)),
+        ]));
+        pages.set("Count", Object::Integer(3));
+        doc.objects.insert((2, 0), Object::Dictionary(pages));
+
+        let mut catalog = Dictionary::new();
+        catalog.set("Type", Object::Name(b"Catalog".to_vec()));
+        catalog.set("Pages", Object::Reference((2, 0)));
+        catalog.set("OCProperties", Object::Dictionary(oc_props));
+        doc.objects.insert((1, 0), Object::Dictionary(catalog));
+        doc.trailer.set("Root", Object::Reference((1, 0)));
+
+        let out = output_of(|w| print_layers(w, &doc));
+        assert!(out.contains("1, 3"), "Expected pages '1, 3' in output, got:\n{}", out);
+    }
+
 }

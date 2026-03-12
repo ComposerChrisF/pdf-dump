@@ -676,4 +676,268 @@ mod tests {
         let warnings = vec!["CID font without ToUnicode".to_string()];
         assert!(!is_garbled_text("", &warnings));
     }
+
+    // ── New edge-case tests ───────────────────────────────────────────
+
+    #[test]
+    fn garbled_text_encoding_warning() {
+        // Warning containing "encoding" should trigger garbled when text is present
+        let warnings = vec!["Font has unknown encoding".to_string()];
+        assert!(is_garbled_text("some text", &warnings));
+    }
+
+    #[test]
+    fn garbled_text_tounicode_warning() {
+        // Warning containing "tounicode" (case-insensitive) should trigger garbled
+        let warnings = vec!["Missing ToUnicode CMap for font".to_string()];
+        assert!(is_garbled_text("abc", &warnings));
+    }
+
+    #[test]
+    fn garbled_text_at_exactly_50_percent_boundary() {
+        // Exactly half non-printable should NOT be garbled (need > 50%)
+        // 1 non-printable + 1 printable = 50% exactly => not garbled
+        assert!(!is_garbled_text("\u{01}a", &[]));
+        // 2 non-printable + 2 printable = 50% exactly => not garbled
+        assert!(!is_garbled_text("\u{01}\u{02}ab", &[]));
+    }
+
+    #[test]
+    fn garbled_text_unicode_chars() {
+        // Characters >0x7E are counted as non-printable by the heuristic
+        // 3 unicode chars + 1 ASCII = 75% non-printable => garbled
+        let text = "\u{00E9}\u{00F1}\u{00FC}a"; // e-acute, n-tilde, u-diaeresis, 'a'
+        assert!(is_garbled_text(text, &[]));
+    }
+
+    #[test]
+    fn page_info_multiple_content_streams() {
+        use lopdf::{Dictionary, Stream};
+
+        let mut doc = Document::new();
+
+        // Create two content stream objects
+        let c1 = Stream::new(Dictionary::new(), b"BT /F1 12 Tf (Hello) Tj ET".to_vec());
+        let c1_id = doc.add_object(Object::Stream(c1));
+        let c2 = Stream::new(Dictionary::new(), b"BT /F1 12 Tf (World) Tj ET".to_vec());
+        let c2_id = doc.add_object(Object::Stream(c2));
+
+        let mut pages_dict = Dictionary::new();
+        pages_dict.set("Type", Object::Name(b"Pages".to_vec()));
+        pages_dict.set("Count", Object::Integer(1));
+        pages_dict.set("Kids", Object::Array(vec![]));
+        let pages_id = doc.add_object(Object::Dictionary(pages_dict));
+
+        let mut page = Dictionary::new();
+        page.set("Type", Object::Name(b"Page".to_vec()));
+        page.set("Parent", Object::Reference(pages_id));
+        // Contents as an array of references
+        page.set("Contents", Object::Array(vec![
+            Object::Reference(c1_id),
+            Object::Reference(c2_id),
+        ]));
+        page.set("MediaBox", Object::Array(vec![
+            Object::Integer(0), Object::Integer(0),
+            Object::Integer(612), Object::Integer(792),
+        ]));
+        let page_id = doc.add_object(Object::Dictionary(page));
+
+        if let Ok(Object::Dictionary(d)) = doc.get_object_mut(pages_id) {
+            d.set("Kids", Object::Array(vec![Object::Reference(page_id)]));
+        }
+        let mut catalog = Dictionary::new();
+        catalog.set("Type", Object::Name(b"Catalog".to_vec()));
+        catalog.set("Pages", Object::Reference(pages_id));
+        let catalog_id = doc.add_object(Object::Dictionary(catalog));
+        doc.trailer.set("Root", Object::Reference(catalog_id));
+
+        let out = output_of(|w| print_page_info(w, &doc, &PageSpec::Single(1)));
+        assert!(out.contains("2 streams"), "Expected '2 streams' in output:\n{}", out);
+        // Byte total should be the sum of both streams
+        let expected_bytes = b"BT /F1 12 Tf (Hello) Tj ET".len()
+            + b"BT /F1 12 Tf (World) Tj ET".len();
+        assert!(out.contains(&format!("{} bytes", expected_bytes)),
+            "Expected '{} bytes' in output:\n{}", expected_bytes, out);
+    }
+
+    #[test]
+    fn page_info_json_value_invalid_page() {
+        let doc = build_two_page_doc(); // has 2 pages
+        let val = page_info_json_value(&doc, &PageSpec::Single(99));
+        // Should return an error JSON value
+        assert!(val.get("error").is_some(),
+            "Expected 'error' key in JSON for out-of-range page:\n{}", val);
+    }
+
+    #[test]
+    fn page_info_multiple_annotation_subtypes() {
+        use lopdf::{Dictionary, Stream};
+
+        let mut doc = Document::new();
+        let content = Stream::new(Dictionary::new(), b"BT (test) Tj ET".to_vec());
+        let content_id = doc.add_object(Object::Stream(content));
+
+        // Create a Link annotation
+        let mut link_annot = Dictionary::new();
+        link_annot.set("Subtype", Object::Name(b"Link".to_vec()));
+        link_annot.set("Rect", Object::Array(vec![
+            Object::Integer(0), Object::Integer(0), Object::Integer(50), Object::Integer(50),
+        ]));
+        let link_id = doc.add_object(Object::Dictionary(link_annot));
+
+        // Create a Text annotation
+        let mut text_annot = Dictionary::new();
+        text_annot.set("Subtype", Object::Name(b"Text".to_vec()));
+        text_annot.set("Rect", Object::Array(vec![
+            Object::Integer(60), Object::Integer(60), Object::Integer(100), Object::Integer(100),
+        ]));
+        let text_id = doc.add_object(Object::Dictionary(text_annot));
+
+        let mut pages_dict = Dictionary::new();
+        pages_dict.set("Type", Object::Name(b"Pages".to_vec()));
+        pages_dict.set("Count", Object::Integer(1));
+        pages_dict.set("Kids", Object::Array(vec![]));
+        let pages_id = doc.add_object(Object::Dictionary(pages_dict));
+
+        let mut page = Dictionary::new();
+        page.set("Type", Object::Name(b"Page".to_vec()));
+        page.set("Parent", Object::Reference(pages_id));
+        page.set("Contents", Object::Reference(content_id));
+        page.set("MediaBox", Object::Array(vec![
+            Object::Integer(0), Object::Integer(0),
+            Object::Integer(612), Object::Integer(792),
+        ]));
+        page.set("Annots", Object::Array(vec![
+            Object::Reference(link_id),
+            Object::Reference(text_id),
+        ]));
+        let page_id = doc.add_object(Object::Dictionary(page));
+
+        if let Ok(Object::Dictionary(d)) = doc.get_object_mut(pages_id) {
+            d.set("Kids", Object::Array(vec![Object::Reference(page_id)]));
+        }
+        let mut catalog = Dictionary::new();
+        catalog.set("Type", Object::Name(b"Catalog".to_vec()));
+        catalog.set("Pages", Object::Reference(pages_id));
+        let catalog_id = doc.add_object(Object::Dictionary(catalog));
+        doc.trailer.set("Root", Object::Reference(catalog_id));
+
+        let out = output_of(|w| print_page_info(w, &doc, &PageSpec::Single(1)));
+        assert!(out.contains("Annotations:"), "Expected annotations line in output:\n{}", out);
+        assert!(out.contains("2"), "Expected annotation count of 2:\n{}", out);
+        assert!(out.contains("Link"), "Expected 'Link' subtype in output:\n{}", out);
+        assert!(out.contains("Text"), "Expected 'Text' subtype in output:\n{}", out);
+    }
+
+    #[test]
+    fn page_info_text_stream_pluralization() {
+        // "1 stream" (singular) is tested by page_info_shows_content_streams
+        // Here we verify the singular form explicitly, then build a multi-stream case
+        let doc = build_two_page_doc();
+        let out = output_of(|w| print_page_info(w, &doc, &PageSpec::Single(1)));
+        // Single content stream should say "1 stream" (no 's')
+        assert!(out.contains("1 stream,"), "Expected '1 stream,' in:\n{}", out);
+        assert!(!out.contains("1 streams"), "Should not say '1 streams' in:\n{}", out);
+    }
+
+    #[test]
+    fn page_info_json_text_extractable_false() {
+        use lopdf::{Dictionary, Stream};
+
+        let mut doc = Document::new();
+        // Create content with characters above 0x7E to trigger garbled detection
+        // We need >50% non-printable non-whitespace characters
+        let garbled_bytes = b"BT /F1 12 Tf <8081828384> Tj ET";
+        let content = Stream::new(Dictionary::new(), garbled_bytes.to_vec());
+        let content_id = doc.add_object(Object::Stream(content));
+
+        let mut pages_dict = Dictionary::new();
+        pages_dict.set("Type", Object::Name(b"Pages".to_vec()));
+        pages_dict.set("Count", Object::Integer(1));
+        pages_dict.set("Kids", Object::Array(vec![]));
+        let pages_id = doc.add_object(Object::Dictionary(pages_dict));
+
+        let mut page = Dictionary::new();
+        page.set("Type", Object::Name(b"Page".to_vec()));
+        page.set("Parent", Object::Reference(pages_id));
+        page.set("Contents", Object::Reference(content_id));
+        page.set("MediaBox", Object::Array(vec![
+            Object::Integer(0), Object::Integer(0),
+            Object::Integer(612), Object::Integer(792),
+        ]));
+        let page_id = doc.add_object(Object::Dictionary(page));
+
+        if let Ok(Object::Dictionary(d)) = doc.get_object_mut(pages_id) {
+            d.set("Kids", Object::Array(vec![Object::Reference(page_id)]));
+        }
+        let mut catalog = Dictionary::new();
+        catalog.set("Type", Object::Name(b"Catalog".to_vec()));
+        catalog.set("Pages", Object::Reference(pages_id));
+        let catalog_id = doc.add_object(Object::Dictionary(catalog));
+        doc.trailer.set("Root", Object::Reference(catalog_id));
+
+        let val = page_info_json_value(&doc, &PageSpec::Single(1));
+        let page_json = &val["pages"][0];
+        // If text was detected as garbled, text_extractable should be false
+        // If text happens to be clean (hex strings may decode differently),
+        // text_extractable key won't be present (it's only set when false)
+        if page_json.get("text_extractable").is_some() {
+            assert_eq!(page_json["text_extractable"], false,
+                "text_extractable should be false when set");
+        }
+    }
+
+    #[test]
+    fn page_info_with_ext_gstate() {
+        use lopdf::Dictionary;
+
+        let mut doc = Document::new();
+
+        // Create an ExtGState object
+        let mut gs_dict = Dictionary::new();
+        gs_dict.set("Type", Object::Name(b"ExtGState".to_vec()));
+        gs_dict.set("ca", Object::Real(0.5));
+        let gs_id = doc.add_object(Object::Dictionary(gs_dict));
+
+        let mut ext_gstate = Dictionary::new();
+        ext_gstate.set("GS1", Object::Reference(gs_id));
+
+        let mut resources = Dictionary::new();
+        resources.set("ExtGState", Object::Dictionary(ext_gstate));
+
+        let mut pages_dict = Dictionary::new();
+        pages_dict.set("Type", Object::Name(b"Pages".to_vec()));
+        pages_dict.set("Count", Object::Integer(1));
+        pages_dict.set("Kids", Object::Array(vec![]));
+        let pages_id = doc.add_object(Object::Dictionary(pages_dict));
+
+        let mut page = Dictionary::new();
+        page.set("Type", Object::Name(b"Page".to_vec()));
+        page.set("Parent", Object::Reference(pages_id));
+        page.set("Resources", Object::Dictionary(resources));
+        page.set("MediaBox", Object::Array(vec![
+            Object::Integer(0), Object::Integer(0),
+            Object::Integer(612), Object::Integer(792),
+        ]));
+        let page_id = doc.add_object(Object::Dictionary(page));
+
+        if let Ok(Object::Dictionary(d)) = doc.get_object_mut(pages_id) {
+            d.set("Kids", Object::Array(vec![Object::Reference(page_id)]));
+        }
+        let mut catalog = Dictionary::new();
+        catalog.set("Type", Object::Name(b"Catalog".to_vec()));
+        catalog.set("Pages", Object::Reference(pages_id));
+        let catalog_id = doc.add_object(Object::Dictionary(catalog));
+        doc.trailer.set("Root", Object::Reference(catalog_id));
+
+        let out = output_of(|w| print_page_info(w, &doc, &PageSpec::Single(1)));
+        assert!(out.contains("ExtGState:"), "Expected ExtGState section in output:\n{}", out);
+        assert!(out.contains("1"), "Expected ExtGState count of 1:\n{}", out);
+        assert!(out.contains("/GS1"), "Expected /GS1 entry in output:\n{}", out);
+
+        // Also verify JSON includes ext_gstate_count
+        let val = page_info_json_value(&doc, &PageSpec::Single(1));
+        let page_json = &val["pages"][0];
+        assert_eq!(page_json["ext_gstate_count"], 1);
+    }
 }

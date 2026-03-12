@@ -997,4 +997,551 @@ mod tests {
         assert_eq!(assoc, vec![1]);
     }
 
+    // --- New tests below ---
+
+    #[test]
+    fn classify_object_metadata_stream() {
+        // Type=Metadata falls through to Generic since there's no dedicated branch
+        let doc = Document::new();
+        let mut dict = Dictionary::new();
+        dict.set("Type", Object::Name(b"Metadata".to_vec()));
+        dict.set("Subtype", Object::Name(b"XML".to_vec()));
+        let stream = Stream::new(dict, b"<?xml version='1.0'?>".to_vec());
+        let obj = Object::Stream(stream);
+
+        let ObjectClassification { role, description: desc, details } = classify_object(&doc, 20, &obj, &doc.get_pages());
+        assert_eq!(role, "Generic");
+        assert!(desc.contains("stream"), "expected 'stream' in desc, got: {}", desc);
+        assert!(details.iter().any(|(k, v)| k == "Type" && v == "Metadata"));
+        assert!(details.iter().any(|(k, v)| k == "Subtype" && v == "XML"));
+        assert!(details.iter().any(|(k, _)| k == "Stream Size"));
+    }
+
+    #[test]
+    fn classify_object_embedded_font_program_cidfonttype0c() {
+        // Subtype=CIDFontType0C is not a font subtype match, falls to Generic
+        let doc = Document::new();
+        let mut dict = Dictionary::new();
+        dict.set("Subtype", Object::Name(b"CIDFontType0C".to_vec()));
+        let stream = Stream::new(dict, vec![0u8; 100]);
+        let obj = Object::Stream(stream);
+
+        let ObjectClassification { role, details, .. } = classify_object(&doc, 15, &obj, &doc.get_pages());
+        assert_eq!(role, "Generic");
+        assert!(details.iter().any(|(k, v)| k == "Subtype" && v == "CIDFontType0C"));
+    }
+
+    #[test]
+    fn classify_object_embedded_font_program_opentype() {
+        // Subtype=OpenType is not a font subtype match, falls to Generic
+        let doc = Document::new();
+        let mut dict = Dictionary::new();
+        dict.set("Subtype", Object::Name(b"OpenType".to_vec()));
+        let stream = Stream::new(dict, vec![0u8; 200]);
+        let obj = Object::Stream(stream);
+
+        let ObjectClassification { role, details, .. } = classify_object(&doc, 16, &obj, &doc.get_pages());
+        assert_eq!(role, "Generic");
+        assert!(details.iter().any(|(k, v)| k == "Subtype" && v == "OpenType"));
+    }
+
+    #[test]
+    fn classify_font_cid_font_type0() {
+        // CIDFontType0 is recognized via the subtype match arm, calls classify_font
+        let doc = Document::new();
+        let mut dict = Dictionary::new();
+        dict.set("Subtype", Object::Name(b"CIDFontType0".to_vec()));
+        dict.set("BaseFont", Object::Name(b"AdobeSongStd-Light".to_vec()));
+        let obj = Object::Dictionary(dict);
+
+        let ObjectClassification { role, description: desc, details } = classify_object(&doc, 30, &obj, &doc.get_pages());
+        assert_eq!(role, "Font");
+        assert!(desc.contains("CIDFontType0"));
+        assert!(desc.contains("AdobeSongStd-Light"));
+        assert!(details.iter().any(|(k, v)| k == "Subtype" && v == "CIDFontType0"));
+        assert!(details.iter().any(|(k, v)| k == "BaseFont" && v == "AdobeSongStd-Light"));
+    }
+
+    #[test]
+    fn classify_font_cid_font_type2() {
+        let doc = Document::new();
+        let mut dict = Dictionary::new();
+        dict.set("Subtype", Object::Name(b"CIDFontType2".to_vec()));
+        dict.set("BaseFont", Object::Name(b"MSGothic".to_vec()));
+        let obj = Object::Dictionary(dict);
+
+        let ObjectClassification { role, description: desc, .. } = classify_object(&doc, 31, &obj, &doc.get_pages());
+        assert_eq!(role, "Font");
+        assert!(desc.contains("CIDFontType2"));
+        assert!(desc.contains("MSGothic"));
+    }
+
+    #[test]
+    fn classify_font_with_embedded_fontfile2() {
+        // FontDescriptor as a reference to an object containing FontFile2
+        let mut doc = Document::new();
+
+        let mut fd = Dictionary::new();
+        fd.set("Type", Object::Name(b"FontDescriptor".to_vec()));
+        fd.set("FontName", Object::Name(b"ArialMT".to_vec()));
+        fd.set("FontFile2", Object::Reference((50, 0)));
+        doc.objects.insert((40, 0), Object::Dictionary(fd));
+
+        let mut dict = Dictionary::new();
+        dict.set("Type", Object::Name(b"Font".to_vec()));
+        dict.set("Subtype", Object::Name(b"TrueType".to_vec()));
+        dict.set("BaseFont", Object::Name(b"ArialMT".to_vec()));
+        dict.set("FontDescriptor", Object::Reference((40, 0)));
+        let obj = Object::Dictionary(dict);
+
+        let ObjectClassification { role, details, .. } = classify_object(&doc, 35, &obj, &doc.get_pages());
+        assert_eq!(role, "Font");
+        let fd_detail = details.iter().find(|(k, _)| k == "FontDescriptor").unwrap();
+        assert!(fd_detail.1.contains("embedded"), "expected 'embedded' in FontDescriptor detail, got: {}", fd_detail.1);
+        assert!(fd_detail.1.contains("FontFile2"), "expected 'FontFile2' in FontDescriptor detail, got: {}", fd_detail.1);
+    }
+
+    #[test]
+    fn classify_font_with_embedded_fontfile() {
+        // FontDescriptor containing /FontFile (Type1 embedding)
+        let mut doc = Document::new();
+
+        let mut fd = Dictionary::new();
+        fd.set("Type", Object::Name(b"FontDescriptor".to_vec()));
+        fd.set("FontName", Object::Name(b"CourierNew".to_vec()));
+        fd.set("FontFile", Object::Reference((51, 0)));
+        doc.objects.insert((41, 0), Object::Dictionary(fd));
+
+        let mut dict = Dictionary::new();
+        dict.set("Type", Object::Name(b"Font".to_vec()));
+        dict.set("Subtype", Object::Name(b"Type1".to_vec()));
+        dict.set("BaseFont", Object::Name(b"CourierNew".to_vec()));
+        dict.set("FontDescriptor", Object::Reference((41, 0)));
+        let obj = Object::Dictionary(dict);
+
+        let ObjectClassification { details, .. } = classify_object(&doc, 36, &obj, &doc.get_pages());
+        let fd_detail = details.iter().find(|(k, _)| k == "FontDescriptor").unwrap();
+        assert!(fd_detail.1.contains("embedded"), "got: {}", fd_detail.1);
+        assert!(fd_detail.1.contains("FontFile"), "got: {}", fd_detail.1);
+    }
+
+    #[test]
+    fn classify_font_not_embedded() {
+        // FontDescriptor exists but has no FontFile/FontFile2/FontFile3
+        let mut doc = Document::new();
+
+        let mut fd = Dictionary::new();
+        fd.set("Type", Object::Name(b"FontDescriptor".to_vec()));
+        fd.set("FontName", Object::Name(b"Helvetica".to_vec()));
+        doc.objects.insert((42, 0), Object::Dictionary(fd));
+
+        let mut dict = Dictionary::new();
+        dict.set("Type", Object::Name(b"Font".to_vec()));
+        dict.set("Subtype", Object::Name(b"Type1".to_vec()));
+        dict.set("BaseFont", Object::Name(b"Helvetica".to_vec()));
+        dict.set("FontDescriptor", Object::Reference((42, 0)));
+        let obj = Object::Dictionary(dict);
+
+        let ObjectClassification { details, .. } = classify_object(&doc, 37, &obj, &doc.get_pages());
+        let fd_detail = details.iter().find(|(k, _)| k == "FontDescriptor").unwrap();
+        assert!(fd_detail.1.contains("not embedded"), "got: {}", fd_detail.1);
+    }
+
+    #[test]
+    fn classify_font_with_tounicode() {
+        let doc = Document::new();
+        let mut dict = Dictionary::new();
+        dict.set("Type", Object::Name(b"Font".to_vec()));
+        dict.set("Subtype", Object::Name(b"Type0".to_vec()));
+        dict.set("BaseFont", Object::Name(b"KozMinPro-Regular".to_vec()));
+        dict.set("ToUnicode", Object::Reference((60, 0)));
+        let obj = Object::Dictionary(dict);
+
+        let ObjectClassification { details, .. } = classify_object(&doc, 38, &obj, &doc.get_pages());
+        let tu = details.iter().find(|(k, _)| k == "ToUnicode").unwrap();
+        assert_eq!(tu.1, "yes");
+    }
+
+    #[test]
+    fn classify_font_without_tounicode() {
+        let doc = Document::new();
+        let mut dict = Dictionary::new();
+        dict.set("Type", Object::Name(b"Font".to_vec()));
+        dict.set("Subtype", Object::Name(b"Type1".to_vec()));
+        dict.set("BaseFont", Object::Name(b"Symbol".to_vec()));
+        let obj = Object::Dictionary(dict);
+
+        let ObjectClassification { details, .. } = classify_object(&doc, 39, &obj, &doc.get_pages());
+        let tu = details.iter().find(|(k, _)| k == "ToUnicode").unwrap();
+        assert_eq!(tu.1, "no");
+    }
+
+    #[test]
+    fn classify_font_with_firstchar_lastchar() {
+        let doc = Document::new();
+        let mut dict = Dictionary::new();
+        dict.set("Type", Object::Name(b"Font".to_vec()));
+        dict.set("Subtype", Object::Name(b"TrueType".to_vec()));
+        dict.set("BaseFont", Object::Name(b"TimesNewRoman".to_vec()));
+        dict.set("FirstChar", Object::Integer(32));
+        dict.set("LastChar", Object::Integer(255));
+        dict.set("Widths", Object::Array(vec![Object::Integer(250); 224]));
+        let obj = Object::Dictionary(dict);
+
+        let ObjectClassification { details, .. } = classify_object(&doc, 40, &obj, &doc.get_pages());
+        assert!(details.iter().any(|(k, v)| k == "FirstChar" && v == "32"), "details: {:?}", details);
+        assert!(details.iter().any(|(k, v)| k == "LastChar" && v == "255"), "details: {:?}", details);
+    }
+
+    #[test]
+    fn classify_font_inline_font_descriptor() {
+        // FontDescriptor as an inline dictionary (not a reference)
+        let doc = Document::new();
+        let mut fd_dict = Dictionary::new();
+        fd_dict.set("FontName", Object::Name(b"ArialMT".to_vec()));
+
+        let mut dict = Dictionary::new();
+        dict.set("Type", Object::Name(b"Font".to_vec()));
+        dict.set("Subtype", Object::Name(b"TrueType".to_vec()));
+        dict.set("BaseFont", Object::Name(b"ArialMT".to_vec()));
+        dict.set("FontDescriptor", Object::Dictionary(fd_dict));
+        let obj = Object::Dictionary(dict);
+
+        let ObjectClassification { details, .. } = classify_object(&doc, 41, &obj, &doc.get_pages());
+        let fd_detail = details.iter().find(|(k, _)| k == "FontDescriptor").unwrap();
+        assert!(fd_detail.1.contains("inline"), "expected 'inline' in FontDescriptor detail, got: {}", fd_detail.1);
+    }
+
+    #[test]
+    fn classify_image_without_colorspace() {
+        let doc = Document::new();
+        let mut dict = Dictionary::new();
+        dict.set("Subtype", Object::Name(b"Image".to_vec()));
+        dict.set("Width", Object::Integer(640));
+        dict.set("Height", Object::Integer(480));
+        dict.set("BitsPerComponent", Object::Integer(8));
+        // No ColorSpace
+        let stream = Stream::new(dict, vec![0u8; 10]);
+        let obj = Object::Stream(stream);
+
+        let ObjectClassification { role, description: desc, details } = classify_object(&doc, 50, &obj, &doc.get_pages());
+        assert_eq!(role, "Image");
+        assert!(desc.contains("640x480"));
+        assert!(details.iter().any(|(k, v)| k == "Width" && v == "640"));
+        assert!(details.iter().any(|(k, v)| k == "Height" && v == "480"));
+        assert!(!details.iter().any(|(k, _)| k == "ColorSpace"), "should not have ColorSpace detail");
+    }
+
+    #[test]
+    fn classify_image_without_dimensions() {
+        // Image with only Subtype and ColorSpace, no Width/Height
+        let doc = Document::new();
+        let mut dict = Dictionary::new();
+        dict.set("Subtype", Object::Name(b"Image".to_vec()));
+        dict.set("ColorSpace", Object::Name(b"DeviceGray".to_vec()));
+        let stream = Stream::new(dict, vec![0u8; 5]);
+        let obj = Object::Stream(stream);
+
+        let ObjectClassification { role, description: desc, details } = classify_object(&doc, 51, &obj, &doc.get_pages());
+        assert_eq!(role, "Image");
+        // Without both dimensions, no "WxH" in description
+        assert!(!desc.contains('x') || !desc.contains("("), "unexpected dimensions in: {}", desc);
+        assert!(!details.iter().any(|(k, _)| k == "Width"));
+        assert!(!details.iter().any(|(k, _)| k == "Height"));
+        assert!(details.iter().any(|(k, _)| k == "ColorSpace"));
+    }
+
+    #[test]
+    fn classify_image_with_only_width() {
+        // Image with Width but no Height — partial dimensions
+        let doc = Document::new();
+        let mut dict = Dictionary::new();
+        dict.set("Subtype", Object::Name(b"Image".to_vec()));
+        dict.set("Width", Object::Integer(320));
+        let stream = Stream::new(dict, vec![0u8; 5]);
+        let obj = Object::Stream(stream);
+
+        let ObjectClassification { role, details, .. } = classify_object(&doc, 52, &obj, &doc.get_pages());
+        assert_eq!(role, "Image");
+        assert!(details.iter().any(|(k, v)| k == "Width" && v == "320"));
+        assert!(!details.iter().any(|(k, _)| k == "Height"));
+    }
+
+    #[test]
+    fn classify_object_reference() {
+        let doc = Document::new();
+        let obj = Object::Reference((42, 0));
+        let ObjectClassification { role, description: desc, .. } = classify_object(&doc, 5, &obj, &doc.get_pages());
+        assert_eq!(role, "Reference");
+        assert!(desc.contains("42 0 R"), "expected '42 0 R' in desc, got: {}", desc);
+    }
+
+    #[test]
+    fn classify_object_font_heuristic_widths_firstchar() {
+        // Dict with /Widths and /FirstChar but no /Type and no font /Subtype
+        // This falls through to Generic since there's no heuristic branch in the code
+        let doc = Document::new();
+        let mut dict = Dictionary::new();
+        dict.set("Widths", Object::Array(vec![Object::Integer(250); 10]));
+        dict.set("FirstChar", Object::Integer(32));
+        dict.set("LastChar", Object::Integer(41));
+        let obj = Object::Dictionary(dict);
+
+        let ObjectClassification { role, .. } = classify_object(&doc, 55, &obj, &doc.get_pages());
+        assert_eq!(role, "Generic");
+    }
+
+    #[test]
+    fn classify_object_generic_stream() {
+        // A stream with unknown Type/Subtype falls to Generic with "stream" in description
+        let doc = Document::new();
+        let mut dict = Dictionary::new();
+        dict.set("Length", Object::Integer(100));
+        let stream = Stream::new(dict, vec![0u8; 100]);
+        let obj = Object::Stream(stream);
+
+        let ObjectClassification { role, description: desc, details } = classify_object(&doc, 60, &obj, &doc.get_pages());
+        assert_eq!(role, "Generic");
+        assert!(desc.contains("stream"), "expected 'stream' in desc, got: {}", desc);
+        assert!(details.iter().any(|(k, _)| k == "Stream Size"));
+    }
+
+    #[test]
+    fn classify_object_mmtype1_font() {
+        // MMType1 is in the subtype match
+        let doc = Document::new();
+        let mut dict = Dictionary::new();
+        dict.set("Subtype", Object::Name(b"MMType1".to_vec()));
+        dict.set("BaseFont", Object::Name(b"Minion-Regular".to_vec()));
+        let obj = Object::Dictionary(dict);
+
+        let ObjectClassification { role, description: desc, .. } = classify_object(&doc, 70, &obj, &doc.get_pages());
+        assert_eq!(role, "Font");
+        assert!(desc.contains("MMType1"));
+        assert!(desc.contains("Minion-Regular"));
+    }
+
+    #[test]
+    fn classify_object_type3_font() {
+        let doc = Document::new();
+        let mut dict = Dictionary::new();
+        dict.set("Subtype", Object::Name(b"Type3".to_vec()));
+        dict.set("BaseFont", Object::Name(b"CustomFont".to_vec()));
+        let obj = Object::Dictionary(dict);
+
+        let ObjectClassification { role, description: desc, .. } = classify_object(&doc, 71, &obj, &doc.get_pages());
+        assert_eq!(role, "Font");
+        assert!(desc.contains("Type3"));
+    }
+
+    #[test]
+    fn print_info_object_not_found() {
+        let doc = Document::new();
+        let out = output_of(|w| print_info(w, &doc, 999));
+        assert!(out.contains("not found"), "expected 'not found' in output, got: {}", out);
+    }
+
+    #[test]
+    fn print_info_json_object_not_found() {
+        let doc = Document::new();
+        let config = default_config();
+        let out = output_of(|w| print_info_json(w, &doc, 999, &config));
+        let val: Value = serde_json::from_str(&out).unwrap();
+        assert_eq!(val["object_number"], 999);
+        assert_eq!(val["error"], "not found");
+    }
+
+    #[test]
+    fn find_page_associations_multiple_pages() {
+        let mut doc = Document::new();
+
+        // Shared font object
+        let mut font = Dictionary::new();
+        font.set("Type", Object::Name(b"Font".to_vec()));
+        font.set("BaseFont", Object::Name(b"Helvetica".to_vec()));
+        doc.objects.insert((10, 0), Object::Dictionary(font));
+
+        // Page 1 references the font
+        let mut page1 = Dictionary::new();
+        page1.set("Type", Object::Name(b"Page".to_vec()));
+        page1.set("Parent", Object::Reference((2, 0)));
+        let mut res1 = Dictionary::new();
+        let mut fd1 = Dictionary::new();
+        fd1.set("F1", Object::Reference((10, 0)));
+        res1.set("Font", Object::Dictionary(fd1));
+        page1.set("Resources", Object::Dictionary(res1));
+        doc.objects.insert((3, 0), Object::Dictionary(page1));
+
+        // Page 2 also references the font
+        let mut page2 = Dictionary::new();
+        page2.set("Type", Object::Name(b"Page".to_vec()));
+        page2.set("Parent", Object::Reference((2, 0)));
+        let mut res2 = Dictionary::new();
+        let mut fd2 = Dictionary::new();
+        fd2.set("F1", Object::Reference((10, 0)));
+        res2.set("Font", Object::Dictionary(fd2));
+        page2.set("Resources", Object::Dictionary(res2));
+        doc.objects.insert((4, 0), Object::Dictionary(page2));
+
+        // Page tree
+        let mut pages_dict = Dictionary::new();
+        pages_dict.set("Type", Object::Name(b"Pages".to_vec()));
+        pages_dict.set("Kids", Object::Array(vec![
+            Object::Reference((3, 0)),
+            Object::Reference((4, 0)),
+        ]));
+        pages_dict.set("Count", Object::Integer(2));
+        doc.objects.insert((2, 0), Object::Dictionary(pages_dict));
+
+        let mut catalog = Dictionary::new();
+        catalog.set("Type", Object::Name(b"Catalog".to_vec()));
+        catalog.set("Pages", Object::Reference((2, 0)));
+        doc.objects.insert((1, 0), Object::Dictionary(catalog));
+        doc.trailer.set("Root", Object::Reference((1, 0)));
+
+        let assoc = find_page_associations(&doc, 10, &doc.get_pages());
+        assert_eq!(assoc, vec![1, 2]);
+    }
+
+    #[test]
+    fn classify_font_encoding_as_reference() {
+        // Encoding specified as a reference rather than a name
+        let mut doc = Document::new();
+
+        let mut enc = Dictionary::new();
+        enc.set("Type", Object::Name(b"Encoding".to_vec()));
+        enc.set("BaseEncoding", Object::Name(b"WinAnsiEncoding".to_vec()));
+        doc.objects.insert((20, 0), Object::Dictionary(enc));
+
+        let mut dict = Dictionary::new();
+        dict.set("Type", Object::Name(b"Font".to_vec()));
+        dict.set("Subtype", Object::Name(b"Type1".to_vec()));
+        dict.set("BaseFont", Object::Name(b"Helvetica".to_vec()));
+        dict.set("Encoding", Object::Reference((20, 0)));
+        let obj = Object::Dictionary(dict);
+
+        let ObjectClassification { details, .. } = classify_object(&doc, 25, &obj, &doc.get_pages());
+        let enc_detail = details.iter().find(|(k, _)| k == "Encoding").unwrap();
+        assert!(enc_detail.1.contains("20 0 R"), "expected '20 0 R' in Encoding detail, got: {}", enc_detail.1);
+    }
+
+    #[test]
+    fn classify_font_no_basefont() {
+        // Font without BaseFont should use default "-"
+        let doc = Document::new();
+        let mut dict = Dictionary::new();
+        dict.set("Type", Object::Name(b"Font".to_vec()));
+        dict.set("Subtype", Object::Name(b"Type3".to_vec()));
+        let obj = Object::Dictionary(dict);
+
+        let ObjectClassification { details, description: desc, .. } = classify_object(&doc, 26, &obj, &doc.get_pages());
+        assert!(details.iter().any(|(k, v)| k == "BaseFont" && v == "-"));
+        assert!(desc.contains("-"));
+    }
+
+    #[test]
+    fn classify_font_unresolvable_font_descriptor() {
+        // FontDescriptor ref that points to a nonexistent object
+        let doc = Document::new();
+        let mut dict = Dictionary::new();
+        dict.set("Type", Object::Name(b"Font".to_vec()));
+        dict.set("Subtype", Object::Name(b"TrueType".to_vec()));
+        dict.set("BaseFont", Object::Name(b"Arial".to_vec()));
+        dict.set("FontDescriptor", Object::Reference((999, 0)));
+        let obj = Object::Dictionary(dict);
+
+        let ObjectClassification { details, .. } = classify_object(&doc, 27, &obj, &doc.get_pages());
+        let fd_detail = details.iter().find(|(k, _)| k == "FontDescriptor").unwrap();
+        assert!(fd_detail.1.contains("unresolvable"), "expected 'unresolvable', got: {}", fd_detail.1);
+    }
+
+    #[test]
+    fn classify_font_no_font_descriptor() {
+        // Font without any FontDescriptor at all
+        let doc = Document::new();
+        let mut dict = Dictionary::new();
+        dict.set("Type", Object::Name(b"Font".to_vec()));
+        dict.set("Subtype", Object::Name(b"Type1".to_vec()));
+        dict.set("BaseFont", Object::Name(b"Symbol".to_vec()));
+        let obj = Object::Dictionary(dict);
+
+        let ObjectClassification { details, .. } = classify_object(&doc, 28, &obj, &doc.get_pages());
+        let fd_detail = details.iter().find(|(k, _)| k == "FontDescriptor").unwrap();
+        assert_eq!(fd_detail.1, "no FontDescriptor");
+    }
+
+    #[test]
+    fn print_info_json_metadata_stream() {
+        let mut doc = Document::new();
+        let mut dict = Dictionary::new();
+        dict.set("Type", Object::Name(b"Metadata".to_vec()));
+        dict.set("Subtype", Object::Name(b"XML".to_vec()));
+        let stream = Stream::new(dict, b"<rdf:RDF/>".to_vec());
+        doc.objects.insert((20, 0), Object::Stream(stream));
+
+        let config = default_config();
+        let out = output_of(|w| print_info_json(w, &doc, 20, &config));
+        let val: Value = serde_json::from_str(&out).unwrap();
+        assert_eq!(val["role"], "Generic");
+        assert_eq!(val["object_number"], 20);
+        assert!(val["details"]["Type"].as_str().unwrap() == "Metadata");
+    }
+
+    #[test]
+    fn print_info_json_multiple_page_associations() {
+        let mut doc = Document::new();
+
+        // Shared image
+        let mut img_dict = Dictionary::new();
+        img_dict.set("Subtype", Object::Name(b"Image".to_vec()));
+        img_dict.set("Width", Object::Integer(100));
+        img_dict.set("Height", Object::Integer(100));
+        let stream = Stream::new(img_dict, vec![0u8; 10]);
+        doc.objects.insert((10, 0), Object::Stream(stream));
+
+        // Page 1
+        let mut page1 = Dictionary::new();
+        page1.set("Type", Object::Name(b"Page".to_vec()));
+        page1.set("Parent", Object::Reference((2, 0)));
+        let mut res1 = Dictionary::new();
+        let mut xobj1 = Dictionary::new();
+        xobj1.set("Im1", Object::Reference((10, 0)));
+        res1.set("XObject", Object::Dictionary(xobj1));
+        page1.set("Resources", Object::Dictionary(res1));
+        doc.objects.insert((3, 0), Object::Dictionary(page1));
+
+        // Page 2
+        let mut page2 = Dictionary::new();
+        page2.set("Type", Object::Name(b"Page".to_vec()));
+        page2.set("Parent", Object::Reference((2, 0)));
+        let mut res2 = Dictionary::new();
+        let mut xobj2 = Dictionary::new();
+        xobj2.set("Im1", Object::Reference((10, 0)));
+        res2.set("XObject", Object::Dictionary(xobj2));
+        page2.set("Resources", Object::Dictionary(res2));
+        doc.objects.insert((4, 0), Object::Dictionary(page2));
+
+        // Page tree
+        let mut pages_dict = Dictionary::new();
+        pages_dict.set("Type", Object::Name(b"Pages".to_vec()));
+        pages_dict.set("Kids", Object::Array(vec![
+            Object::Reference((3, 0)),
+            Object::Reference((4, 0)),
+        ]));
+        pages_dict.set("Count", Object::Integer(2));
+        doc.objects.insert((2, 0), Object::Dictionary(pages_dict));
+
+        let mut catalog = Dictionary::new();
+        catalog.set("Type", Object::Name(b"Catalog".to_vec()));
+        catalog.set("Pages", Object::Reference((2, 0)));
+        doc.objects.insert((1, 0), Object::Dictionary(catalog));
+        doc.trailer.set("Root", Object::Reference((1, 0)));
+
+        let config = default_config();
+        let out = output_of(|w| print_info_json(w, &doc, 10, &config));
+        let val: Value = serde_json::from_str(&out).unwrap();
+        let pages = val["page_associations"].as_array().unwrap();
+        assert_eq!(pages, &[1, 2]);
+    }
+
 }

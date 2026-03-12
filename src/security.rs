@@ -459,4 +459,185 @@ mod tests {
         assert!(result.is_none());
     }
 
+    // --- New tests below ---
+
+    #[test]
+    fn algorithm_name_v0_undocumented() {
+        assert_eq!(algorithm_name(0, 0), "Undocumented");
+    }
+
+    #[test]
+    fn algorithm_name_v2_default_length() {
+        // When length <= 0, should default to 40
+        assert_eq!(algorithm_name(2, 0), "RC4, 40-bit");
+        assert_eq!(algorithm_name(2, -1), "RC4, 40-bit");
+    }
+
+    #[test]
+    fn algorithm_name_v2_custom_length() {
+        assert_eq!(algorithm_name(2, 128), "RC4, 128-bit");
+        assert_eq!(algorithm_name(2, 56), "RC4, 56-bit");
+    }
+
+    #[test]
+    fn algorithm_name_v3_unpublished() {
+        assert_eq!(algorithm_name(3, 0), "Unpublished");
+    }
+
+    #[test]
+    fn algorithm_name_unknown_version() {
+        assert_eq!(algorithm_name(99, 0), "Unknown (V=99)");
+        assert_eq!(algorithm_name(6, 256), "Unknown (V=6)");
+    }
+
+    #[test]
+    fn decode_permissions_all_denied() {
+        let perms = decode_permissions(0);
+        assert!(!perms["Print"]);
+        assert!(!perms["Modify"]);
+        assert!(!perms["Copy/extract text"]);
+        assert!(!perms["Annotate"]);
+        assert!(!perms["Fill forms"]);
+        assert!(!perms["Accessibility extract"]);
+        assert!(!perms["Assemble"]);
+        assert!(!perms["Print high quality"]);
+    }
+
+    #[test]
+    fn encrypt_dict_inline_in_trailer() {
+        // /Encrypt as an inline dictionary in the trailer, not a reference
+        let mut doc = Document::new();
+        let mut encrypt = Dictionary::new();
+        encrypt.set("V", Object::Integer(5));
+        encrypt.set("R", Object::Integer(6));
+        encrypt.set("Length", Object::Integer(256));
+        encrypt.set("P", Object::Integer(-4));
+        doc.trailer.set("Encrypt", Object::Dictionary(encrypt));
+
+        let info = collect_security(&doc, None);
+        assert!(info.encrypted);
+        assert_eq!(info.algorithm, "AES-256");
+        assert_eq!(info.version, 5);
+        assert_eq!(info.revision, 6);
+        assert_eq!(info.key_length, 256);
+        // No reference, so encrypt_object should be None
+        assert_eq!(info.encrypt_object, None);
+    }
+
+    #[test]
+    fn encrypt_dict_via_xref_stream_fallback() {
+        use lopdf::Stream;
+
+        // Simulate lopdf's post-decryption state: trailer has no /Encrypt,
+        // but an XRef stream object still carries an /Encrypt reference.
+        let mut doc = Document::new();
+
+        // Add the encrypt dict as an object
+        let mut encrypt = Dictionary::new();
+        encrypt.set("V", Object::Integer(4));
+        encrypt.set("R", Object::Integer(4));
+        encrypt.set("Length", Object::Integer(128));
+        encrypt.set("P", Object::Integer(-3904));
+        let enc_id = doc.add_object(Object::Dictionary(encrypt));
+
+        // Create an XRef stream that references the encrypt dict
+        let mut xref_dict = Dictionary::new();
+        xref_dict.set("Type", Object::Name(b"XRef".to_vec()));
+        xref_dict.set("Encrypt", Object::Reference(enc_id));
+        let xref_stream = Stream::new(xref_dict, vec![]);
+        doc.add_object(Object::Stream(xref_stream));
+
+        // Trailer does NOT have /Encrypt (simulating lopdf stripping it)
+        let info = collect_security(&doc, None);
+        assert!(info.encrypted);
+        assert_eq!(info.algorithm, "AES-128");
+        assert_eq!(info.version, 4);
+        assert_eq!(info.encrypt_object, Some(enc_id.0));
+    }
+
+    #[test]
+    fn extract_int_after_key_positive_sign() {
+        let data = b"/V +4";
+        assert_eq!(extract_int_after_key(data, b"/V"), Some(4));
+    }
+
+    #[test]
+    fn extract_int_after_key_sign_only_no_digits() {
+        let data = b"/P - ";
+        assert_eq!(extract_int_after_key(data, b"/P"), None);
+
+        let data2 = b"/P + ";
+        assert_eq!(extract_int_after_key(data2, b"/P"), None);
+    }
+
+    #[test]
+    fn extract_int_after_key_newline_whitespace() {
+        let data = b"/V\n4";
+        assert_eq!(extract_int_after_key(data, b"/V"), Some(4));
+
+        let data2 = b"/V\r\n  42";
+        assert_eq!(extract_int_after_key(data2, b"/V"), Some(42));
+    }
+
+    #[test]
+    fn collect_security_v2_custom_length() {
+        let mut doc = Document::new();
+        let mut encrypt = Dictionary::new();
+        encrypt.set("V", Object::Integer(2));
+        encrypt.set("R", Object::Integer(3));
+        encrypt.set("Length", Object::Integer(56));
+        encrypt.set("P", Object::Integer(-4));
+        let enc_id = doc.add_object(Object::Dictionary(encrypt));
+        doc.trailer.set("Encrypt", Object::Reference(enc_id));
+
+        let info = collect_security(&doc, None);
+        assert!(info.encrypted);
+        assert_eq!(info.algorithm, "RC4, 56-bit");
+        assert_eq!(info.version, 2);
+        assert_eq!(info.key_length, 56);
+    }
+
+    #[test]
+    fn security_json_value_unencrypted() {
+        let doc = Document::new();
+        let dummy = std::path::Path::new("nonexistent.pdf");
+        let val = security_json_value(&doc, dummy);
+
+        assert_eq!(val["encrypted"], false);
+        assert_eq!(val["algorithm"], "-");
+        assert_eq!(val["version"], 0);
+        assert_eq!(val["revision"], 0);
+        assert_eq!(val["key_length"], 0);
+        assert_eq!(val["permissions_raw"], 0);
+        assert!(val["permissions"].is_object());
+        // Unencrypted: permissions map should be empty
+        assert_eq!(val["permissions"].as_object().unwrap().len(), 0);
+        assert!(val["encrypt_object"].is_null());
+    }
+
+    #[test]
+    fn print_security_shows_encrypt_object_number() {
+        let mut doc = Document::new();
+        let mut encrypt = Dictionary::new();
+        encrypt.set("V", Object::Integer(4));
+        encrypt.set("R", Object::Integer(4));
+        encrypt.set("Length", Object::Integer(128));
+        encrypt.set("P", Object::Integer(-1));
+        let enc_id = doc.add_object(Object::Dictionary(encrypt));
+        doc.trailer.set("Encrypt", Object::Reference(enc_id));
+
+        let dummy = std::path::Path::new("nonexistent.pdf");
+        let out = output_of(|w| print_security(w, &doc, dummy));
+        let expected = format!("Encrypt Object: {}", enc_id.0);
+        assert!(out.contains(&expected),
+            "Expected output to contain '{}', got:\n{}", expected, out);
+    }
+
+    #[test]
+    fn parse_encrypt_from_raw_file_nonexistent_path() {
+        let path = std::path::Path::new("/tmp/totally_nonexistent_file_abc123.pdf");
+        let result = parse_encrypt_from_raw_file(path, 1);
+        assert!(result.is_none());
+    }
+
 }

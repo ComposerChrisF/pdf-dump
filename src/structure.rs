@@ -550,4 +550,400 @@ mod tests {
         assert_eq!(tree[1].role, "Span");
     }
 
+    #[test]
+    fn structure_mcid_in_dict_form() {
+        // /K contains a dictionary with /MCID key (not a bare integer)
+        let mut doc = Document::new();
+
+        let mut elem = Dictionary::new();
+        elem.set("S", Object::Name(b"Span".to_vec()));
+        let mut mcid_dict = Dictionary::new();
+        mcid_dict.set("Type", Object::Name(b"MCR".to_vec()));
+        mcid_dict.set("MCID", Object::Integer(42));
+        elem.set("K", Object::Dictionary(mcid_dict));
+        doc.objects.insert((10, 0), Object::Dictionary(elem));
+
+        let mut str_root = Dictionary::new();
+        str_root.set("Type", Object::Name(b"StructTreeRoot".to_vec()));
+        str_root.set("K", Object::Reference((10, 0)));
+        doc.objects.insert((5, 0), Object::Dictionary(str_root));
+
+        let mut catalog = Dictionary::new();
+        catalog.set("Type", Object::Name(b"Catalog".to_vec()));
+        catalog.set("StructTreeRoot", Object::Reference((5, 0)));
+        doc.objects.insert((1, 0), Object::Dictionary(catalog));
+        doc.trailer.set("Root", Object::Reference((1, 0)));
+
+        let (_, tree) = collect_structure_tree(&doc);
+        assert_eq!(tree.len(), 1);
+        assert_eq!(tree[0].role, "Span");
+        assert_eq!(tree[0].mcid, Some(42));
+    }
+
+    #[test]
+    fn structure_mcid_in_array_with_dict_form() {
+        // /K is an array containing a dict with /MCID key
+        let mut doc = Document::new();
+
+        let mut mcid_dict = Dictionary::new();
+        mcid_dict.set("Type", Object::Name(b"MCR".to_vec()));
+        mcid_dict.set("MCID", Object::Integer(5));
+
+        let mut elem = Dictionary::new();
+        elem.set("S", Object::Name(b"P".to_vec()));
+        elem.set("K", Object::Array(vec![Object::Dictionary(mcid_dict)]));
+        doc.objects.insert((10, 0), Object::Dictionary(elem));
+
+        let mut str_root = Dictionary::new();
+        str_root.set("Type", Object::Name(b"StructTreeRoot".to_vec()));
+        str_root.set("K", Object::Reference((10, 0)));
+        doc.objects.insert((5, 0), Object::Dictionary(str_root));
+
+        let mut catalog = Dictionary::new();
+        catalog.set("Type", Object::Name(b"Catalog".to_vec()));
+        catalog.set("StructTreeRoot", Object::Reference((5, 0)));
+        doc.objects.insert((1, 0), Object::Dictionary(catalog));
+        doc.trailer.set("Root", Object::Reference((1, 0)));
+
+        let (_, tree) = collect_structure_tree(&doc);
+        assert_eq!(tree.len(), 1);
+        assert_eq!(tree[0].role, "P");
+        assert_eq!(tree[0].mcid, Some(5));
+    }
+
+    #[test]
+    fn structure_inline_struct_element() {
+        // /K contains an inline dictionary with /S (not a reference)
+        let mut doc = Document::new();
+
+        let mut inline_elem = Dictionary::new();
+        inline_elem.set("S", Object::Name(b"Span".to_vec()));
+        inline_elem.set("K", Object::Integer(7));
+
+        let mut parent = Dictionary::new();
+        parent.set("S", Object::Name(b"P".to_vec()));
+        parent.set("K", Object::Array(vec![Object::Dictionary(inline_elem)]));
+        doc.objects.insert((10, 0), Object::Dictionary(parent));
+
+        let mut str_root = Dictionary::new();
+        str_root.set("Type", Object::Name(b"StructTreeRoot".to_vec()));
+        str_root.set("K", Object::Reference((10, 0)));
+        doc.objects.insert((5, 0), Object::Dictionary(str_root));
+
+        let mut catalog = Dictionary::new();
+        catalog.set("Type", Object::Name(b"Catalog".to_vec()));
+        catalog.set("StructTreeRoot", Object::Reference((5, 0)));
+        doc.objects.insert((1, 0), Object::Dictionary(catalog));
+        doc.trailer.set("Root", Object::Reference((1, 0)));
+
+        let (_, tree) = collect_structure_tree(&doc);
+        assert_eq!(tree.len(), 1);
+        assert_eq!(tree[0].role, "P");
+        assert_eq!(tree[0].children.len(), 1);
+        let inline = &tree[0].children[0];
+        assert_eq!(inline.role, "Span");
+        assert!(inline.object_id.is_none(), "inline elements should have no object_id");
+        assert_eq!(inline.mcid, Some(7));
+    }
+
+    #[test]
+    fn structure_role_as_non_name_type() {
+        // /S is something other than Name — should produce "-"
+        let mut doc = Document::new();
+
+        let mut elem = Dictionary::new();
+        elem.set("S", Object::String(b"NotAName".to_vec(), StringFormat::Literal));
+        doc.objects.insert((10, 0), Object::Dictionary(elem));
+
+        let mut str_root = Dictionary::new();
+        str_root.set("Type", Object::Name(b"StructTreeRoot".to_vec()));
+        str_root.set("K", Object::Reference((10, 0)));
+        doc.objects.insert((5, 0), Object::Dictionary(str_root));
+
+        let mut catalog = Dictionary::new();
+        catalog.set("Type", Object::Name(b"Catalog".to_vec()));
+        catalog.set("StructTreeRoot", Object::Reference((5, 0)));
+        doc.objects.insert((1, 0), Object::Dictionary(catalog));
+        doc.trailer.set("Root", Object::Reference((1, 0)));
+
+        let (_, tree) = collect_structure_tree(&doc);
+        assert_eq!(tree.len(), 1);
+        assert_eq!(tree[0].role, "-");
+    }
+
+    #[test]
+    fn structure_no_k_key() {
+        // struct element with no /K key at all
+        let mut doc = Document::new();
+
+        let mut elem = Dictionary::new();
+        elem.set("S", Object::Name(b"Section".to_vec()));
+        // No /K set
+        doc.objects.insert((10, 0), Object::Dictionary(elem));
+
+        let mut str_root = Dictionary::new();
+        str_root.set("Type", Object::Name(b"StructTreeRoot".to_vec()));
+        str_root.set("K", Object::Reference((10, 0)));
+        doc.objects.insert((5, 0), Object::Dictionary(str_root));
+
+        let mut catalog = Dictionary::new();
+        catalog.set("Type", Object::Name(b"Catalog".to_vec()));
+        catalog.set("StructTreeRoot", Object::Reference((5, 0)));
+        doc.objects.insert((1, 0), Object::Dictionary(catalog));
+        doc.trailer.set("Root", Object::Reference((1, 0)));
+
+        let (_, tree) = collect_structure_tree(&doc);
+        assert_eq!(tree.len(), 1);
+        assert_eq!(tree[0].role, "Section");
+        assert!(tree[0].children.is_empty());
+        assert_eq!(tree[0].mcid, None);
+    }
+
+    #[test]
+    fn structure_deep_nesting_three_levels() {
+        // Deep nesting: Document -> Part -> Section -> P (3+ levels via references)
+        let mut doc = Document::new();
+
+        // Page
+        let mut page = Dictionary::new();
+        page.set("Type", Object::Name(b"Page".to_vec()));
+        page.set("Parent", Object::Reference((2, 0)));
+        doc.objects.insert((3, 0), Object::Dictionary(page));
+
+        let mut pages = Dictionary::new();
+        pages.set("Type", Object::Name(b"Pages".to_vec()));
+        pages.set("Kids", Object::Array(vec![Object::Reference((3, 0))]));
+        pages.set("Count", Object::Integer(1));
+        doc.objects.insert((2, 0), Object::Dictionary(pages));
+
+        // Deepest: P with MCID
+        let mut p_elem = Dictionary::new();
+        p_elem.set("S", Object::Name(b"P".to_vec()));
+        p_elem.set("Pg", Object::Reference((3, 0)));
+        p_elem.set("K", Object::Integer(0));
+        doc.objects.insert((13, 0), Object::Dictionary(p_elem));
+
+        // Section containing P
+        let mut section = Dictionary::new();
+        section.set("S", Object::Name(b"Sect".to_vec()));
+        section.set("K", Object::Array(vec![Object::Reference((13, 0))]));
+        doc.objects.insert((12, 0), Object::Dictionary(section));
+
+        // Part containing Section
+        let mut part = Dictionary::new();
+        part.set("S", Object::Name(b"Part".to_vec()));
+        part.set("K", Object::Array(vec![Object::Reference((12, 0))]));
+        doc.objects.insert((11, 0), Object::Dictionary(part));
+
+        // Document containing Part
+        let mut doc_elem = Dictionary::new();
+        doc_elem.set("S", Object::Name(b"Document".to_vec()));
+        doc_elem.set("K", Object::Array(vec![Object::Reference((11, 0))]));
+        doc.objects.insert((10, 0), Object::Dictionary(doc_elem));
+
+        // StructTreeRoot
+        let mut str_root = Dictionary::new();
+        str_root.set("Type", Object::Name(b"StructTreeRoot".to_vec()));
+        str_root.set("K", Object::Reference((10, 0)));
+        doc.objects.insert((5, 0), Object::Dictionary(str_root));
+
+        let mut mark_info = Dictionary::new();
+        mark_info.set("Marked", Object::Boolean(true));
+
+        let mut catalog = Dictionary::new();
+        catalog.set("Type", Object::Name(b"Catalog".to_vec()));
+        catalog.set("Pages", Object::Reference((2, 0)));
+        catalog.set("StructTreeRoot", Object::Reference((5, 0)));
+        catalog.set("MarkInfo", Object::Dictionary(mark_info));
+        doc.objects.insert((1, 0), Object::Dictionary(catalog));
+        doc.trailer.set("Root", Object::Reference((1, 0)));
+
+        let (is_marked, tree) = collect_structure_tree(&doc);
+        assert!(is_marked);
+        assert_eq!(tree.len(), 1);
+        assert_eq!(tree[0].role, "Document");
+        assert_eq!(tree[0].children[0].role, "Part");
+        assert_eq!(tree[0].children[0].children[0].role, "Sect");
+        assert_eq!(tree[0].children[0].children[0].children[0].role, "P");
+        assert_eq!(tree[0].children[0].children[0].children[0].mcid, Some(0));
+        assert_eq!(tree[0].children[0].children[0].children[0].page, Some(1));
+        assert_eq!(count_struct_elems(&tree), 4);
+    }
+
+    #[test]
+    fn count_struct_elems_empty() {
+        assert_eq!(count_struct_elems(&[]), 0);
+    }
+
+    #[test]
+    fn count_struct_elems_nested() {
+        let tree = vec![
+            StructElemInfo {
+                object_id: Some((10, 0)),
+                role: "Document".to_string(),
+                page: None,
+                mcid: None,
+                title: None,
+                alt: None,
+                children: vec![
+                    StructElemInfo {
+                        object_id: Some((11, 0)),
+                        role: "P".to_string(),
+                        page: None,
+                        mcid: None,
+                        title: None,
+                        alt: None,
+                        children: vec![
+                            StructElemInfo {
+                                object_id: Some((12, 0)),
+                                role: "Span".to_string(),
+                                page: None,
+                                mcid: Some(0),
+                                title: None,
+                                alt: None,
+                                children: vec![],
+                            },
+                        ],
+                    },
+                    StructElemInfo {
+                        object_id: Some((13, 0)),
+                        role: "P".to_string(),
+                        page: None,
+                        mcid: Some(1),
+                        title: None,
+                        alt: None,
+                        children: vec![],
+                    },
+                ],
+            },
+        ];
+        // 1 (Document) + 1 (P) + 1 (Span) + 1 (P) = 4
+        assert_eq!(count_struct_elems(&tree), 4);
+    }
+
+    #[test]
+    fn structure_print_empty_tree_with_mark_info_true() {
+        // MarkInfo Marked=true but empty StructTreeRoot (no /K)
+        let mut doc = Document::new();
+
+        let mut str_root = Dictionary::new();
+        str_root.set("Type", Object::Name(b"StructTreeRoot".to_vec()));
+        // No /K key
+        doc.objects.insert((5, 0), Object::Dictionary(str_root));
+
+        let mut mark_info = Dictionary::new();
+        mark_info.set("Marked", Object::Boolean(true));
+
+        let mut catalog = Dictionary::new();
+        catalog.set("Type", Object::Name(b"Catalog".to_vec()));
+        catalog.set("StructTreeRoot", Object::Reference((5, 0)));
+        catalog.set("MarkInfo", Object::Dictionary(mark_info));
+        doc.objects.insert((1, 0), Object::Dictionary(catalog));
+        doc.trailer.set("Root", Object::Reference((1, 0)));
+
+        let config = default_config();
+        let out = output_of(|w| print_structure(w, &doc, &config));
+        assert!(out.contains("Tagged PDF: yes"));
+        assert!(out.contains("Structure elements: 0"));
+        // Should not contain any element lines (no /Document, /P, etc.)
+        assert!(!out.contains("/Document"));
+        assert!(!out.contains("/P"));
+    }
+
+    #[test]
+    fn structure_json_with_title_and_alt() {
+        let mut doc = Document::new();
+
+        let mut elem = Dictionary::new();
+        elem.set("S", Object::Name(b"Figure".to_vec()));
+        elem.set("T", Object::String(b"Chart Title".to_vec(), StringFormat::Literal));
+        elem.set("Alt", Object::String(b"A bar chart showing revenue".to_vec(), StringFormat::Literal));
+        doc.objects.insert((10, 0), Object::Dictionary(elem));
+
+        let mut str_root = Dictionary::new();
+        str_root.set("Type", Object::Name(b"StructTreeRoot".to_vec()));
+        str_root.set("K", Object::Reference((10, 0)));
+        doc.objects.insert((5, 0), Object::Dictionary(str_root));
+
+        let mut catalog = Dictionary::new();
+        catalog.set("Type", Object::Name(b"Catalog".to_vec()));
+        catalog.set("StructTreeRoot", Object::Reference((5, 0)));
+        doc.objects.insert((1, 0), Object::Dictionary(catalog));
+        doc.trailer.set("Root", Object::Reference((1, 0)));
+
+        let config = default_config();
+        let out = output_of(|w| print_structure_json(w, &doc, &config));
+        let parsed: Value = serde_json::from_str(&out).unwrap();
+        let elem_json = &parsed["structure"][0];
+        assert_eq!(elem_json["role"], "Figure");
+        assert_eq!(elem_json["title"], "Chart Title");
+        assert_eq!(elem_json["alt"], "A bar chart showing revenue");
+    }
+
+    #[test]
+    fn structure_multiple_children_at_same_level() {
+        // StructTreeRoot has /K array with 3 struct elements
+        let mut doc = Document::new();
+
+        let mut elem1 = Dictionary::new();
+        elem1.set("S", Object::Name(b"H1".to_vec()));
+        doc.objects.insert((10, 0), Object::Dictionary(elem1));
+
+        let mut elem2 = Dictionary::new();
+        elem2.set("S", Object::Name(b"P".to_vec()));
+        doc.objects.insert((11, 0), Object::Dictionary(elem2));
+
+        let mut elem3 = Dictionary::new();
+        elem3.set("S", Object::Name(b"Table".to_vec()));
+        doc.objects.insert((12, 0), Object::Dictionary(elem3));
+
+        let mut str_root = Dictionary::new();
+        str_root.set("Type", Object::Name(b"StructTreeRoot".to_vec()));
+        str_root.set("K", Object::Array(vec![
+            Object::Reference((10, 0)),
+            Object::Reference((11, 0)),
+            Object::Reference((12, 0)),
+        ]));
+        doc.objects.insert((5, 0), Object::Dictionary(str_root));
+
+        let mut catalog = Dictionary::new();
+        catalog.set("Type", Object::Name(b"Catalog".to_vec()));
+        catalog.set("StructTreeRoot", Object::Reference((5, 0)));
+        doc.objects.insert((1, 0), Object::Dictionary(catalog));
+        doc.trailer.set("Root", Object::Reference((1, 0)));
+
+        let (_, tree) = collect_structure_tree(&doc);
+        assert_eq!(tree.len(), 3);
+        assert_eq!(tree[0].role, "H1");
+        assert_eq!(tree[1].role, "P");
+        assert_eq!(tree[2].role, "Table");
+        assert_eq!(count_struct_elems(&tree), 3);
+    }
+
+    #[test]
+    fn structure_object_id_in_text_output() {
+        // Verify object IDs like [10] appear in text output
+        let mut doc = Document::new();
+
+        let mut elem = Dictionary::new();
+        elem.set("S", Object::Name(b"P".to_vec()));
+        doc.objects.insert((10, 0), Object::Dictionary(elem));
+
+        let mut str_root = Dictionary::new();
+        str_root.set("Type", Object::Name(b"StructTreeRoot".to_vec()));
+        str_root.set("K", Object::Reference((10, 0)));
+        doc.objects.insert((5, 0), Object::Dictionary(str_root));
+
+        let mut catalog = Dictionary::new();
+        catalog.set("Type", Object::Name(b"Catalog".to_vec()));
+        catalog.set("StructTreeRoot", Object::Reference((5, 0)));
+        doc.objects.insert((1, 0), Object::Dictionary(catalog));
+        doc.trailer.set("Root", Object::Reference((1, 0)));
+
+        let config = default_config();
+        let out = output_of(|w| print_structure(w, &doc, &config));
+        assert!(out.contains("[10]"), "output should contain object ID [10]: {}", out);
+        assert!(out.contains("[10] /P"), "output should contain '[10] /P': {}", out);
+    }
+
 }
