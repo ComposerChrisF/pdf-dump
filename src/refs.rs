@@ -130,6 +130,12 @@ fn collect_refs_recursive(obj: &Object, path: &str, refs: &mut Vec<(String, Obje
                 collect_refs_recursive(val, &child_path, refs);
             }
         }
+        Object::Stream(stream) => {
+            for (key, val) in stream.dict.iter() {
+                let child_path = format!("{}/{}", path, String::from_utf8_lossy(key));
+                collect_refs_recursive(val, &child_path, refs);
+            }
+        }
         _ => {}
     }
 }

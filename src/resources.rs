@@ -1,7 +1,8 @@
 use lopdf::{Document, Object, ObjectId};
 use serde_json::{json, Value};
+use std::collections::BTreeSet;
 
-use crate::helpers::{resolve_dict, format_color_space};
+use crate::helpers::{resolve_dict, format_color_space, find_font_file_id};
 
 pub(crate) struct ResourceEntry {
     pub name: String,
@@ -19,13 +20,14 @@ pub(crate) struct PageResources {
 pub(crate) fn resolve_page_resources(doc: &Document, page_id: ObjectId) -> Option<&lopdf::Dictionary> {
     // Walk up the page tree to find inherited Resources
     let mut current_id = page_id;
+    let mut visited = BTreeSet::new();
     while let Ok(Object::Dictionary(dict)) = doc.get_object(current_id) {
+        if !visited.insert(current_id) { break; }
         if let Ok(res) = dict.get(b"Resources") {
             return resolve_dict(doc, res);
         }
         // Walk up to parent
         if let Ok(parent_ref) = dict.get(b"Parent").and_then(|o| o.as_reference()) {
-            if parent_ref == current_id { break; }
             current_id = parent_ref;
         } else {
             break;
@@ -44,22 +46,7 @@ pub(crate) fn font_detail(doc: &Document, obj_id: ObjectId) -> String {
         .and_then(|v| v.as_name().ok().map(|n| String::from_utf8_lossy(n).into_owned()));
     let subtype = dict.get(b"Subtype").ok()
         .and_then(|v| v.as_name().ok().map(|n| String::from_utf8_lossy(n).into_owned()));
-    let embedded = dict.get(b"FontDescriptor").ok()
-        .and_then(|v| v.as_reference().ok())
-        .and_then(|fd_id| doc.get_object(fd_id).ok())
-        .and_then(|fd_obj| {
-            let fd_dict = match fd_obj {
-                Object::Dictionary(d) => d,
-                Object::Stream(s) => &s.dict,
-                _ => return None,
-            };
-            for key in &[b"FontFile".as_slice(), b"FontFile2", b"FontFile3"] {
-                if fd_dict.get(key).ok().and_then(|v| v.as_reference().ok()).is_some() {
-                    return Some(true);
-                }
-            }
-            None
-        });
+    let embedded = find_font_file_id(doc, dict).map(|_| true);
     let mut parts = Vec::new();
     if let Some(bf) = base_font { parts.push(bf); }
     if let Some(st) = subtype { parts.push(st); }

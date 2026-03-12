@@ -3,6 +3,7 @@ use serde_json::Value;
 use std::collections::BTreeSet;
 
 use crate::types::PageSpec;
+use crate::stream::decode_stream;
 
 pub(crate) fn build_page_list(
     doc: &Document,
@@ -223,6 +224,75 @@ fn walk_number_tree_inner(
     }
 }
 
+
+/// Decoded content stream bytes and any warnings encountered during decoding.
+pub(crate) struct ContentStreamData {
+    pub bytes: Vec<u8>,
+    pub warnings: Vec<String>,
+}
+
+/// Read and decode all content streams for a page, returning accumulated bytes and warnings.
+/// Returns `None` if the page dict or `/Contents` key is not found.
+pub(crate) fn read_content_streams(doc: &Document, page_id: ObjectId) -> Option<ContentStreamData> {
+    let page_dict = match doc.get_object(page_id) {
+        Ok(Object::Dictionary(d)) => d,
+        _ => return None,
+    };
+
+    let content_ids: Vec<ObjectId> = match page_dict.get(b"Contents") {
+        Ok(Object::Reference(id)) => vec![*id],
+        Ok(Object::Array(arr)) => arr.iter().filter_map(|o| o.as_reference().ok()).collect(),
+        _ => return None,
+    };
+
+    let mut bytes = Vec::new();
+    let mut warnings = Vec::new();
+    let mut decode_failed = false;
+    for cid in &content_ids {
+        match doc.get_object(*cid) {
+            Ok(Object::Stream(stream)) => {
+                let (decoded, warning) = decode_stream(stream);
+                if let Some(warn) = warning {
+                    warnings.push(format!("Content stream {} {}: {}", cid.0, cid.1, warn));
+                    decode_failed = true;
+                }
+                bytes.extend_from_slice(&decoded);
+            }
+            Ok(_) => {
+                warnings.push(format!("Content stream {} {} is not a stream object", cid.0, cid.1));
+                decode_failed = true;
+            }
+            Err(_) => {
+                warnings.push(format!("Content stream {} {} not found", cid.0, cid.1));
+            }
+        }
+    }
+
+    if bytes.is_empty() && !content_ids.is_empty() && decode_failed {
+        warnings.push("Content stream could not be decoded".to_string());
+    }
+
+    Some(ContentStreamData { bytes, warnings })
+}
+
+/// Check a font dictionary's FontDescriptor for FontFile/FontFile2/FontFile3.
+/// Returns the ObjectId of the embedded font file stream, if any.
+pub(crate) fn find_font_file_id(doc: &Document, font_dict: &lopdf::Dictionary) -> Option<ObjectId> {
+    let fd_id = font_dict.get(b"FontDescriptor").ok()?.as_reference().ok()?;
+    let fd_obj = doc.get_object(fd_id).ok()?;
+    let fd_dict = match fd_obj {
+        Object::Dictionary(d) => d,
+        Object::Stream(s) => &s.dict,
+        _ => return None,
+    };
+    for key in &[b"FontFile".as_slice(), b"FontFile2", b"FontFile3"] {
+        if let Ok(ff_ref) = fd_dict.get(key)
+            && let Ok(id) = ff_ref.as_reference() {
+                return Some(id);
+        }
+    }
+    None
+}
 
 #[cfg(test)]
 mod tests {

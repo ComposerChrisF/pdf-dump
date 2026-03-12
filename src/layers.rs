@@ -35,7 +35,7 @@ pub(crate) fn collect_layers(doc: &Document) -> Vec<OcgInfo> {
         .and_then(|o| resolve_dict(doc, o))
         .unwrap_or(&empty_dict);
 
-    let base_state: &str = &d_dict.get(b"BaseState").ok()
+    let base_state = d_dict.get(b"BaseState").ok()
         .and_then(name_to_string)
         .unwrap_or_else(|| "ON".to_string());
 

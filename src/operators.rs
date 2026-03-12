@@ -1,9 +1,8 @@
-use lopdf::{content::Content, Document, Object, ObjectId};
+use lopdf::{content::Content, Document, ObjectId};
 use serde_json::{json, Value};
 use std::io::Write;
 
 use crate::types::PageSpec;
-use crate::stream::decode_stream;
 use crate::helpers::{self, format_operation, format_dict_value};
 
 pub(crate) struct OpsResult {
@@ -12,35 +11,14 @@ pub(crate) struct OpsResult {
 }
 
 pub(crate) fn get_page_operations_with_warnings(doc: &Document, page_id: ObjectId) -> OpsResult {
-    let dict = match doc.get_object(page_id) {
-        Ok(Object::Dictionary(d)) => d,
-        _ => return OpsResult { operations: vec![], warnings: vec![] },
+    let stream_data = match helpers::read_content_streams(doc, page_id) {
+        Some(data) => data,
+        None => return OpsResult { operations: vec![], warnings: vec![] },
     };
 
-    let content_ids: Vec<ObjectId> = match dict.get(b"Contents") {
-        Ok(Object::Reference(id)) => vec![*id],
-        Ok(Object::Array(arr)) => arr.iter().filter_map(|o| o.as_reference().ok()).collect(),
-        _ => return OpsResult { operations: vec![], warnings: vec![] },
-    };
+    let mut warnings = stream_data.warnings;
 
-    let mut all_bytes = Vec::new();
-    let mut warnings = Vec::new();
-    for cid in &content_ids {
-        match doc.get_object(*cid) {
-            Ok(Object::Stream(stream)) => {
-                let (decoded, warning) = decode_stream(stream);
-                if let Some(warn) = warning {
-                    warnings.push(format!("Content stream {} {}: {}", cid.0, cid.1, warn));
-                }
-                all_bytes.extend_from_slice(&decoded);
-            }
-            _ => {
-                warnings.push(format!("Content stream {} {} could not be read", cid.0, cid.1));
-            }
-        }
-    }
-
-    match Content::decode(&all_bytes) {
+    match Content::decode(&stream_data.bytes) {
         Ok(content) => OpsResult { operations: content.operations, warnings },
         Err(_) => {
             warnings.push("Content stream has syntax errors".to_string());

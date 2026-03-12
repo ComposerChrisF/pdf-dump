@@ -111,7 +111,7 @@ pub(crate) fn object_matches(obj: &Object, conditions: &[SearchCondition]) -> bo
                     Ok(s) => std::borrow::Cow::Borrowed(s),
                     Err(_) => String::from_utf8_lossy(decoded),
                 };
-                content_str.to_lowercase().contains(&text_lower)
+                content_str.to_ascii_lowercase().contains(&text_lower)
             } else {
                 false
             }
@@ -493,7 +493,7 @@ mod tests {
     fn parse_search_stream_condition() {
         let conditions = parse_search_expr("stream=Hello").unwrap();
         assert_eq!(conditions.len(), 1);
-        matches!(&conditions[0], SearchCondition::StreamContains { text } if text == "Hello");
+        assert!(matches!(&conditions[0], SearchCondition::StreamContains { text } if text == "Hello"));
     }
 
     #[test]

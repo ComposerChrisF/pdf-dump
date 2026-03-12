@@ -2,7 +2,7 @@ use lopdf::{Document, Object, ObjectId};
 use serde_json::{json, Value};
 use std::io::Write;
 
-use crate::helpers::{resolve_dict, resolve_array, obj_to_string_lossy, name_to_string};
+use crate::helpers::{resolve_dict, resolve_array, obj_to_string_lossy, name_to_string, find_font_file_id};
 
 pub(crate) struct FontInfo {
     pub object_id: ObjectId,
@@ -59,23 +59,7 @@ pub(crate) fn collect_fonts(doc: &Document) -> Vec<FontInfo> {
             .unwrap_or_else(|| "-".to_string());
 
         // Check FontDescriptor for embedded font files
-        let embedded = dict.get(b"FontDescriptor").ok()
-            .and_then(|v| v.as_reference().ok())
-            .and_then(|fd_id| doc.get_object(fd_id).ok())
-            .and_then(|fd_obj| {
-                let fd_dict = match fd_obj {
-                    Object::Dictionary(d) => d,
-                    Object::Stream(s) => &s.dict,
-                    _ => return None,
-                };
-                for key in &[b"FontFile".as_slice(), b"FontFile2", b"FontFile3"] {
-                    if let Ok(ff_ref) = fd_dict.get(key)
-                        && let Ok(id) = ff_ref.as_reference() {
-                            return Some(id);
-                    }
-                }
-                None
-            });
+        let embedded = find_font_file_id(doc, dict);
 
         let to_unicode = dict.get(b"ToUnicode").ok()
             .and_then(|v| v.as_reference().ok());

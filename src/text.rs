@@ -3,7 +3,6 @@ use serde_json::{json, Value};
 use std::io::Write;
 
 use crate::types::PageSpec;
-use crate::stream::decode_stream;
 use crate::helpers;
 
 pub(crate) struct TextResult {
@@ -20,50 +19,23 @@ pub(crate) fn extract_text_from_page_with_warnings(doc: &Document, page_id: Obje
     let mut text = String::new();
     let mut warnings = Vec::new();
 
-    // Get content stream(s) for the page
-    let page_dict = match doc.get_object(page_id) {
-        Ok(Object::Dictionary(d)) => d,
-        _ => return TextResult { text, warnings },
-    };
-
     // Check font encodings for this page
-    let font_warnings = check_page_font_encodings(doc, page_dict);
-    warnings.extend(font_warnings);
-
-    let content_ids: Vec<ObjectId> = match page_dict.get(b"Contents") {
-        Ok(Object::Reference(id)) => vec![*id],
-        Ok(Object::Array(arr)) => arr.iter().filter_map(|o| o.as_reference().ok()).collect(),
-        _ => return TextResult { text, warnings },
-    };
-
-    let mut all_bytes = Vec::new();
-    let mut decode_failed = false;
-    for cid in &content_ids {
-        match doc.get_object(*cid) {
-            Ok(Object::Stream(stream)) => {
-                let (decoded, warning) = decode_stream(stream);
-                if let Some(warn) = warning {
-                    warnings.push(format!("Content stream {} {}: {}", cid.0, cid.1, warn));
-                    decode_failed = true;
-                }
-                all_bytes.extend_from_slice(&decoded);
-            }
-            Ok(_) => {
-                warnings.push(format!("Content stream {} {} is not a stream object", cid.0, cid.1));
-                decode_failed = true;
-            }
-            Err(_) => {
-                warnings.push(format!("Content stream {} {} not found", cid.0, cid.1));
-            }
-        }
+    if let Ok(Object::Dictionary(page_dict)) = doc.get_object(page_id) {
+        let font_warnings = check_page_font_encodings(doc, page_dict);
+        warnings.extend(font_warnings);
     }
 
-    if all_bytes.is_empty() && !content_ids.is_empty() && decode_failed {
-        warnings.push("Content stream could not be decoded".to_string());
+    let stream_data = match helpers::read_content_streams(doc, page_id) {
+        Some(data) => data,
+        None => return TextResult { text, warnings },
+    };
+    warnings.extend(stream_data.warnings);
+
+    if stream_data.bytes.is_empty() {
         return TextResult { text, warnings };
     }
 
-    let operations = match Content::decode(&all_bytes) {
+    let operations = match Content::decode(&stream_data.bytes) {
         Ok(content) => content.operations,
         Err(_) => {
             warnings.push("Content stream has syntax errors".to_string());

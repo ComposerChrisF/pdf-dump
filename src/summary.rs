@@ -211,34 +211,16 @@ pub(crate) fn print_overview(writer: &mut impl Write, doc: &Document) {
     let encrypted = is_encrypted(doc);
     wln!(writer, "Encrypted:   {}", if encrypted { "yes" } else { "no" });
 
-    // /Info fields
-    if let Ok(info_ref) = doc.trailer.get(b"Info")
-        && let Ok((_, Object::Dictionary(info))) = doc.dereference(info_ref)
-    {
-        let fields = [
-            b"Producer".as_slice(), b"Creator", b"Title", b"Author",
-            b"Subject", b"Keywords", b"CreationDate", b"ModDate",
-        ];
-        for key in fields {
-            if let Ok(Object::String(bytes, _)) = info.get(key) {
-                wln!(writer, "{:<13}{}", format!("{}:", String::from_utf8_lossy(key)), String::from_utf8_lossy(bytes));
-            }
+    // /Info fields and catalog properties
+    let (info, catalog) = metadata_info(doc);
+    for (key, value) in &info {
+        if let Some(s) = value.as_str() {
+            wln!(writer, "{:<13}{}", format!("{}:", key), s);
         }
     }
-
-    // Catalog properties
-    if let Some(root_ref) = doc.trailer.get(b"Root").ok().and_then(|o| o.as_reference().ok())
-        && let Ok(Object::Dictionary(catalog)) = doc.get_object(root_ref)
-    {
-        for key in [b"PageLayout".as_slice(), b"PageMode", b"Lang"] {
-            if let Ok(val) = catalog.get(key) {
-                let text = match val {
-                    Object::Name(n) => format!("/{}", String::from_utf8_lossy(n)),
-                    Object::String(bytes, _) => String::from_utf8_lossy(bytes).into_owned(),
-                    _ => continue,
-                };
-                wln!(writer, "{:<13}{}", format!("{}:", String::from_utf8_lossy(key)), text);
-            }
+    for (key, value) in &catalog {
+        if let Some(s) = value.as_str() {
+            wln!(writer, "{:<13}{}", format!("{}:", key), s);
         }
     }
 
@@ -263,7 +245,6 @@ pub(crate) fn print_overview(writer: &mut impl Write, doc: &Document) {
     // Object type breakdown
     let type_counts = count_object_types(doc);
     let type_parts: Vec<String> = type_counts.iter()
-        .filter(|(_, count)| **count > 0)
         .map(|(kind, count)| format!("{} {}", count, kind))
         .collect();
     if !type_parts.is_empty() {
@@ -345,7 +326,6 @@ pub(crate) fn print_overview_json(writer: &mut impl Write, doc: &Document) {
     // Object type breakdown
     let type_counts = count_object_types(doc);
     let type_counts_json: serde_json::Map<String, Value> = type_counts.iter()
-        .filter(|(_, count)| **count > 0)
         .map(|(kind, count)| (kind.to_string(), json!(count)))
         .collect();
 
