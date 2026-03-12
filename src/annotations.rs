@@ -454,4 +454,284 @@ mod tests {
         assert!(annot.get("target").is_some());
     }
 
+    #[test]
+    fn annotations_link_gotor_type() {
+        let mut doc = Document::new();
+        let mut action = Dictionary::new();
+        action.set("S", Object::Name(b"GoToR".to_vec()));
+        action.set("F", Object::String(b"other.pdf".to_vec(), StringFormat::Literal));
+        action.set("D", Object::Array(vec![Object::Integer(0), Object::Name(b"Fit".to_vec())]));
+
+        let mut annot = Dictionary::new();
+        annot.set("Subtype", Object::Name(b"Link".to_vec()));
+        annot.set("Rect", Object::Array(vec![Object::Integer(0), Object::Integer(0), Object::Integer(100), Object::Integer(20)]));
+        annot.set("A", Object::Dictionary(action));
+        doc.objects.insert((20, 0), Object::Dictionary(annot));
+
+        let mut pages_dict = Dictionary::new();
+        pages_dict.set("Type", Object::Name(b"Pages".to_vec()));
+        pages_dict.set("Count", Object::Integer(1));
+        pages_dict.set("Kids", Object::Array(vec![Object::Reference((10, 0))]));
+        doc.objects.insert((2, 0), Object::Dictionary(pages_dict));
+        make_page_with_annots(&mut doc, (10, 0), (2, 0), vec![(20, 0)]);
+
+        let mut catalog = Dictionary::new();
+        catalog.set("Type", Object::Name(b"Catalog".to_vec()));
+        catalog.set("Pages", Object::Reference((2, 0)));
+        doc.objects.insert((1, 0), Object::Dictionary(catalog));
+        doc.trailer.set("Root", Object::Reference((1, 0)));
+
+        let annotations = collect_annotations(&doc, None);
+        assert_eq!(annotations[0].link_type.as_deref(), Some("GoToR"));
+        assert!(annotations[0].target.as_ref().unwrap().contains("other.pdf"));
+    }
+
+    #[test]
+    fn annotations_link_named_type() {
+        let mut doc = Document::new();
+        let mut action = Dictionary::new();
+        action.set("S", Object::Name(b"Named".to_vec()));
+        action.set("N", Object::Name(b"NextPage".to_vec()));
+
+        let mut annot = Dictionary::new();
+        annot.set("Subtype", Object::Name(b"Link".to_vec()));
+        annot.set("Rect", Object::Array(vec![Object::Integer(0), Object::Integer(0), Object::Integer(100), Object::Integer(20)]));
+        annot.set("A", Object::Dictionary(action));
+        doc.objects.insert((20, 0), Object::Dictionary(annot));
+
+        let mut pages_dict = Dictionary::new();
+        pages_dict.set("Type", Object::Name(b"Pages".to_vec()));
+        pages_dict.set("Count", Object::Integer(1));
+        pages_dict.set("Kids", Object::Array(vec![Object::Reference((10, 0))]));
+        doc.objects.insert((2, 0), Object::Dictionary(pages_dict));
+        make_page_with_annots(&mut doc, (10, 0), (2, 0), vec![(20, 0)]);
+
+        let mut catalog = Dictionary::new();
+        catalog.set("Type", Object::Name(b"Catalog".to_vec()));
+        catalog.set("Pages", Object::Reference((2, 0)));
+        doc.objects.insert((1, 0), Object::Dictionary(catalog));
+        doc.trailer.set("Root", Object::Reference((1, 0)));
+
+        let annotations = collect_annotations(&doc, None);
+        assert_eq!(annotations[0].link_type.as_deref(), Some("Named"));
+        assert_eq!(annotations[0].target.as_deref(), Some("NextPage"));
+    }
+
+    #[test]
+    fn annotations_link_launch_type() {
+        let mut doc = Document::new();
+        let mut action = Dictionary::new();
+        action.set("S", Object::Name(b"Launch".to_vec()));
+        action.set("F", Object::String(b"app.exe".to_vec(), StringFormat::Literal));
+
+        let mut annot = Dictionary::new();
+        annot.set("Subtype", Object::Name(b"Link".to_vec()));
+        annot.set("Rect", Object::Array(vec![Object::Integer(0), Object::Integer(0), Object::Integer(100), Object::Integer(20)]));
+        annot.set("A", Object::Dictionary(action));
+        doc.objects.insert((20, 0), Object::Dictionary(annot));
+
+        let mut pages_dict = Dictionary::new();
+        pages_dict.set("Type", Object::Name(b"Pages".to_vec()));
+        pages_dict.set("Count", Object::Integer(1));
+        pages_dict.set("Kids", Object::Array(vec![Object::Reference((10, 0))]));
+        doc.objects.insert((2, 0), Object::Dictionary(pages_dict));
+        make_page_with_annots(&mut doc, (10, 0), (2, 0), vec![(20, 0)]);
+
+        let mut catalog = Dictionary::new();
+        catalog.set("Type", Object::Name(b"Catalog".to_vec()));
+        catalog.set("Pages", Object::Reference((2, 0)));
+        doc.objects.insert((1, 0), Object::Dictionary(catalog));
+        doc.trailer.set("Root", Object::Reference((1, 0)));
+
+        let annotations = collect_annotations(&doc, None);
+        assert_eq!(annotations[0].link_type.as_deref(), Some("Launch"));
+        assert_eq!(annotations[0].target.as_deref(), Some("app.exe"));
+    }
+
+    #[test]
+    fn annotations_missing_subtype() {
+        let mut doc = Document::new();
+        let mut annot = Dictionary::new();
+        // No Subtype
+        annot.set("Rect", Object::Array(vec![Object::Integer(0), Object::Integer(0), Object::Integer(50), Object::Integer(50)]));
+        doc.objects.insert((20, 0), Object::Dictionary(annot));
+
+        let mut pages_dict = Dictionary::new();
+        pages_dict.set("Type", Object::Name(b"Pages".to_vec()));
+        pages_dict.set("Count", Object::Integer(1));
+        pages_dict.set("Kids", Object::Array(vec![Object::Reference((10, 0))]));
+        doc.objects.insert((2, 0), Object::Dictionary(pages_dict));
+        make_page_with_annots(&mut doc, (10, 0), (2, 0), vec![(20, 0)]);
+
+        let mut catalog = Dictionary::new();
+        catalog.set("Type", Object::Name(b"Catalog".to_vec()));
+        catalog.set("Pages", Object::Reference((2, 0)));
+        doc.objects.insert((1, 0), Object::Dictionary(catalog));
+        doc.trailer.set("Root", Object::Reference((1, 0)));
+
+        let annotations = collect_annotations(&doc, None);
+        assert_eq!(annotations.len(), 1);
+        assert_eq!(annotations[0].subtype, "-");
+    }
+
+    #[test]
+    fn annotations_missing_rect() {
+        let mut doc = Document::new();
+        let mut annot = Dictionary::new();
+        annot.set("Subtype", Object::Name(b"Text".to_vec()));
+        // No Rect
+        doc.objects.insert((20, 0), Object::Dictionary(annot));
+
+        let mut pages_dict = Dictionary::new();
+        pages_dict.set("Type", Object::Name(b"Pages".to_vec()));
+        pages_dict.set("Count", Object::Integer(1));
+        pages_dict.set("Kids", Object::Array(vec![Object::Reference((10, 0))]));
+        doc.objects.insert((2, 0), Object::Dictionary(pages_dict));
+        make_page_with_annots(&mut doc, (10, 0), (2, 0), vec![(20, 0)]);
+
+        let mut catalog = Dictionary::new();
+        catalog.set("Type", Object::Name(b"Catalog".to_vec()));
+        catalog.set("Pages", Object::Reference((2, 0)));
+        doc.objects.insert((1, 0), Object::Dictionary(catalog));
+        doc.trailer.set("Root", Object::Reference((1, 0)));
+
+        let annotations = collect_annotations(&doc, None);
+        assert_eq!(annotations.len(), 1);
+        assert_eq!(annotations[0].rect, "-");
+    }
+
+    #[test]
+    fn annotations_highlight_type() {
+        let mut doc = Document::new();
+        let mut annot = Dictionary::new();
+        annot.set("Subtype", Object::Name(b"Highlight".to_vec()));
+        annot.set("Rect", Object::Array(vec![Object::Integer(10), Object::Integer(20), Object::Integer(30), Object::Integer(40)]));
+        annot.set("Contents", Object::String(b"Highlighted text".to_vec(), StringFormat::Literal));
+        doc.objects.insert((20, 0), Object::Dictionary(annot));
+
+        let mut pages_dict = Dictionary::new();
+        pages_dict.set("Type", Object::Name(b"Pages".to_vec()));
+        pages_dict.set("Count", Object::Integer(1));
+        pages_dict.set("Kids", Object::Array(vec![Object::Reference((10, 0))]));
+        doc.objects.insert((2, 0), Object::Dictionary(pages_dict));
+        make_page_with_annots(&mut doc, (10, 0), (2, 0), vec![(20, 0)]);
+
+        let mut catalog = Dictionary::new();
+        catalog.set("Type", Object::Name(b"Catalog".to_vec()));
+        catalog.set("Pages", Object::Reference((2, 0)));
+        doc.objects.insert((1, 0), Object::Dictionary(catalog));
+        doc.trailer.set("Root", Object::Reference((1, 0)));
+
+        let annotations = collect_annotations(&doc, None);
+        assert_eq!(annotations[0].subtype, "Highlight");
+        assert_eq!(annotations[0].contents, "Highlighted text");
+        // Highlight is not a Link, so no link_type
+        assert!(annotations[0].link_type.is_none());
+    }
+
+    #[test]
+    fn annotations_multiple_on_same_page() {
+        let mut doc = Document::new();
+
+        let mut a1 = Dictionary::new();
+        a1.set("Subtype", Object::Name(b"Text".to_vec()));
+        a1.set("Rect", Object::Array(vec![Object::Integer(0), Object::Integer(0), Object::Integer(50), Object::Integer(50)]));
+        doc.objects.insert((20, 0), Object::Dictionary(a1));
+
+        let mut a2 = Dictionary::new();
+        a2.set("Subtype", Object::Name(b"Link".to_vec()));
+        a2.set("Rect", Object::Array(vec![Object::Integer(60), Object::Integer(60), Object::Integer(100), Object::Integer(100)]));
+        doc.objects.insert((21, 0), Object::Dictionary(a2));
+
+        let mut pages_dict = Dictionary::new();
+        pages_dict.set("Type", Object::Name(b"Pages".to_vec()));
+        pages_dict.set("Count", Object::Integer(1));
+        pages_dict.set("Kids", Object::Array(vec![Object::Reference((10, 0))]));
+        doc.objects.insert((2, 0), Object::Dictionary(pages_dict));
+        make_page_with_annots(&mut doc, (10, 0), (2, 0), vec![(20, 0), (21, 0)]);
+
+        let mut catalog = Dictionary::new();
+        catalog.set("Type", Object::Name(b"Catalog".to_vec()));
+        catalog.set("Pages", Object::Reference((2, 0)));
+        doc.objects.insert((1, 0), Object::Dictionary(catalog));
+        doc.trailer.set("Root", Object::Reference((1, 0)));
+
+        let annotations = collect_annotations(&doc, None);
+        assert_eq!(annotations.len(), 2);
+    }
+
+    #[test]
+    fn annotations_annots_as_reference() {
+        // Arrange: /Annots is an indirect reference to an array
+        let mut doc = Document::new();
+        let mut annot = Dictionary::new();
+        annot.set("Subtype", Object::Name(b"Text".to_vec()));
+        annot.set("Rect", Object::Array(vec![Object::Integer(0), Object::Integer(0), Object::Integer(50), Object::Integer(50)]));
+        doc.objects.insert((20, 0), Object::Dictionary(annot));
+
+        // Annots array as its own object
+        let annots_array = Object::Array(vec![Object::Reference((20, 0))]);
+        doc.objects.insert((30, 0), annots_array);
+
+        let mut page = Dictionary::new();
+        page.set("Type", Object::Name(b"Page".to_vec()));
+        page.set("Parent", Object::Reference((2, 0)));
+        page.set("MediaBox", Object::Array(vec![Object::Integer(0), Object::Integer(0), Object::Integer(612), Object::Integer(792)]));
+        page.set("Annots", Object::Reference((30, 0))); // Reference to array
+        doc.objects.insert((10, 0), Object::Dictionary(page));
+
+        let mut pages_dict = Dictionary::new();
+        pages_dict.set("Type", Object::Name(b"Pages".to_vec()));
+        pages_dict.set("Count", Object::Integer(1));
+        pages_dict.set("Kids", Object::Array(vec![Object::Reference((10, 0))]));
+        doc.objects.insert((2, 0), Object::Dictionary(pages_dict));
+
+        let mut catalog = Dictionary::new();
+        catalog.set("Type", Object::Name(b"Catalog".to_vec()));
+        catalog.set("Pages", Object::Reference((2, 0)));
+        doc.objects.insert((1, 0), Object::Dictionary(catalog));
+        doc.trailer.set("Root", Object::Reference((1, 0)));
+
+        let annotations = collect_annotations(&doc, None);
+        assert_eq!(annotations.len(), 1);
+        assert_eq!(annotations[0].subtype, "Text");
+    }
+
+    #[test]
+    fn annotations_page_range_filter() {
+        let doc = make_doc_with_annotations();
+        let spec = PageSpec::Range(1, 1);
+        let annotations = collect_annotations(&doc, Some(&spec));
+        assert_eq!(annotations.len(), 1);
+    }
+
+    #[test]
+    fn annotations_link_unknown_action() {
+        let mut doc = Document::new();
+        let mut action = Dictionary::new();
+        action.set("S", Object::Name(b"CustomAction".to_vec()));
+
+        let mut annot = Dictionary::new();
+        annot.set("Subtype", Object::Name(b"Link".to_vec()));
+        annot.set("Rect", Object::Array(vec![Object::Integer(0), Object::Integer(0), Object::Integer(100), Object::Integer(20)]));
+        annot.set("A", Object::Dictionary(action));
+        doc.objects.insert((20, 0), Object::Dictionary(annot));
+
+        let mut pages_dict = Dictionary::new();
+        pages_dict.set("Type", Object::Name(b"Pages".to_vec()));
+        pages_dict.set("Count", Object::Integer(1));
+        pages_dict.set("Kids", Object::Array(vec![Object::Reference((10, 0))]));
+        doc.objects.insert((2, 0), Object::Dictionary(pages_dict));
+        make_page_with_annots(&mut doc, (10, 0), (2, 0), vec![(20, 0)]);
+
+        let mut catalog = Dictionary::new();
+        catalog.set("Type", Object::Name(b"Catalog".to_vec()));
+        catalog.set("Pages", Object::Reference((2, 0)));
+        doc.objects.insert((1, 0), Object::Dictionary(catalog));
+        doc.trailer.set("Root", Object::Reference((1, 0)));
+
+        let annotations = collect_annotations(&doc, None);
+        assert_eq!(annotations[0].link_type.as_deref(), Some("CustomAction"));
+    }
+
 }

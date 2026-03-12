@@ -25,10 +25,9 @@ pub(crate) fn collect_form_fields(doc: &Document) -> (Option<ObjectId>, bool, Ve
     };
     let acroform_ref = match catalog.get(b"AcroForm") {
         Ok(Object::Reference(id)) => *id,
-        Ok(Object::Dictionary(_)) => {
+        Ok(Object::Dictionary(d)) => {
             // Inline AcroForm - use catalog_id as placeholder
-            // We need to work with the dict directly
-            return collect_form_fields_from_dict(doc, catalog, catalog_id);
+            return collect_form_fields_from_dict(doc, d, catalog_id);
         }
         _ => return (None, false, vec![]),
     };
@@ -402,6 +401,286 @@ mod tests {
         let parsed: Value = serde_json::from_str(&out).unwrap();
         assert!(parsed["acroform_object"].is_null());
         assert_eq!(parsed["field_count"], 0);
+    }
+
+    #[test]
+    fn forms_inline_acroform() {
+        // Arrange: AcroForm is inlined in catalog (not a reference)
+        let mut doc = Document::new();
+        let mut field = Dictionary::new();
+        field.set("T", Object::String(b"Name".to_vec(), StringFormat::Literal));
+        field.set("FT", Object::Name(b"Tx".to_vec()));
+        doc.objects.insert((20, 0), Object::Dictionary(field));
+
+        let mut acroform = Dictionary::new();
+        acroform.set("Fields", Object::Array(vec![Object::Reference((20, 0))]));
+
+        let mut catalog = Dictionary::new();
+        catalog.set("Type", Object::Name(b"Catalog".to_vec()));
+        catalog.set("AcroForm", Object::Dictionary(acroform));
+        let mut pages_dict = Dictionary::new();
+        pages_dict.set("Type", Object::Name(b"Pages".to_vec()));
+        pages_dict.set("Count", Object::Integer(0));
+        pages_dict.set("Kids", Object::Array(vec![]));
+        doc.objects.insert((5, 0), Object::Dictionary(pages_dict));
+        catalog.set("Pages", Object::Reference((5, 0)));
+        doc.objects.insert((4, 0), Object::Dictionary(catalog));
+        doc.trailer.set("Root", Object::Reference((4, 0)));
+
+        let (acroform_id, _, fields) = collect_form_fields(&doc);
+        assert!(acroform_id.is_some());
+        assert_eq!(fields.len(), 1);
+        assert_eq!(fields[0].qualified_name, "Name");
+    }
+
+    #[test]
+    fn forms_field_missing_type() {
+        // Field without /FT should show "-"
+        let mut doc = Document::new();
+        let mut field = Dictionary::new();
+        field.set("T", Object::String(b"NoType".to_vec(), StringFormat::Literal));
+        // No FT key
+        doc.objects.insert((20, 0), Object::Dictionary(field));
+
+        let mut acroform = Dictionary::new();
+        acroform.set("Fields", Object::Array(vec![Object::Reference((20, 0))]));
+        doc.objects.insert((15, 0), Object::Dictionary(acroform));
+
+        let mut catalog = Dictionary::new();
+        catalog.set("Type", Object::Name(b"Catalog".to_vec()));
+        catalog.set("AcroForm", Object::Reference((15, 0)));
+        let mut pages_dict = Dictionary::new();
+        pages_dict.set("Type", Object::Name(b"Pages".to_vec()));
+        pages_dict.set("Count", Object::Integer(0));
+        pages_dict.set("Kids", Object::Array(vec![]));
+        doc.objects.insert((5, 0), Object::Dictionary(pages_dict));
+        catalog.set("Pages", Object::Reference((5, 0)));
+        doc.objects.insert((4, 0), Object::Dictionary(catalog));
+        doc.trailer.set("Root", Object::Reference((4, 0)));
+
+        let (_, _, fields) = collect_form_fields(&doc);
+        assert_eq!(fields.len(), 1);
+        assert_eq!(fields[0].field_type, "-");
+    }
+
+    #[test]
+    fn forms_field_missing_value() {
+        // Field without /V should show "(empty)"
+        let mut doc = Document::new();
+        let mut field = Dictionary::new();
+        field.set("T", Object::String(b"Empty".to_vec(), StringFormat::Literal));
+        field.set("FT", Object::Name(b"Tx".to_vec()));
+        // No V key
+        doc.objects.insert((20, 0), Object::Dictionary(field));
+
+        let mut acroform = Dictionary::new();
+        acroform.set("Fields", Object::Array(vec![Object::Reference((20, 0))]));
+        doc.objects.insert((15, 0), Object::Dictionary(acroform));
+        let mut catalog = Dictionary::new();
+        catalog.set("Type", Object::Name(b"Catalog".to_vec()));
+        catalog.set("AcroForm", Object::Reference((15, 0)));
+        let mut pages_dict = Dictionary::new();
+        pages_dict.set("Type", Object::Name(b"Pages".to_vec()));
+        pages_dict.set("Count", Object::Integer(0));
+        pages_dict.set("Kids", Object::Array(vec![]));
+        doc.objects.insert((5, 0), Object::Dictionary(pages_dict));
+        catalog.set("Pages", Object::Reference((5, 0)));
+        doc.objects.insert((4, 0), Object::Dictionary(catalog));
+        doc.trailer.set("Root", Object::Reference((4, 0)));
+
+        let (_, _, fields) = collect_form_fields(&doc);
+        assert_eq!(fields[0].value, "(empty)");
+    }
+
+    #[test]
+    fn forms_field_missing_name() {
+        // Field without /T — partial name defaults to empty string
+        let mut doc = Document::new();
+        let mut field = Dictionary::new();
+        field.set("FT", Object::Name(b"Tx".to_vec()));
+        // No T key
+        doc.objects.insert((20, 0), Object::Dictionary(field));
+
+        let mut acroform = Dictionary::new();
+        acroform.set("Fields", Object::Array(vec![Object::Reference((20, 0))]));
+        doc.objects.insert((15, 0), Object::Dictionary(acroform));
+        let mut catalog = Dictionary::new();
+        catalog.set("Type", Object::Name(b"Catalog".to_vec()));
+        catalog.set("AcroForm", Object::Reference((15, 0)));
+        let mut pages_dict = Dictionary::new();
+        pages_dict.set("Type", Object::Name(b"Pages".to_vec()));
+        pages_dict.set("Count", Object::Integer(0));
+        pages_dict.set("Kids", Object::Array(vec![]));
+        doc.objects.insert((5, 0), Object::Dictionary(pages_dict));
+        catalog.set("Pages", Object::Reference((5, 0)));
+        doc.objects.insert((4, 0), Object::Dictionary(catalog));
+        doc.trailer.set("Root", Object::Reference((4, 0)));
+
+        let (_, _, fields) = collect_form_fields(&doc);
+        assert_eq!(fields.len(), 1);
+        assert_eq!(fields[0].qualified_name, "");
+    }
+
+    #[test]
+    fn forms_value_types() {
+        // Test different /V value types
+        let mut doc = Document::new();
+
+        // Integer value
+        let mut f1 = Dictionary::new();
+        f1.set("T", Object::String(b"IntField".to_vec(), StringFormat::Literal));
+        f1.set("FT", Object::Name(b"Tx".to_vec()));
+        f1.set("V", Object::Integer(42));
+        doc.objects.insert((20, 0), Object::Dictionary(f1));
+
+        // Boolean value
+        let mut f2 = Dictionary::new();
+        f2.set("T", Object::String(b"BoolField".to_vec(), StringFormat::Literal));
+        f2.set("FT", Object::Name(b"Btn".to_vec()));
+        f2.set("V", Object::Boolean(true));
+        doc.objects.insert((21, 0), Object::Dictionary(f2));
+
+        // Array value
+        let mut f3 = Dictionary::new();
+        f3.set("T", Object::String(b"ArrayField".to_vec(), StringFormat::Literal));
+        f3.set("FT", Object::Name(b"Ch".to_vec()));
+        f3.set("V", Object::Array(vec![Object::Integer(1)]));
+        doc.objects.insert((22, 0), Object::Dictionary(f3));
+
+        let mut acroform = Dictionary::new();
+        acroform.set("Fields", Object::Array(vec![
+            Object::Reference((20, 0)),
+            Object::Reference((21, 0)),
+            Object::Reference((22, 0)),
+        ]));
+        doc.objects.insert((15, 0), Object::Dictionary(acroform));
+        let mut catalog = Dictionary::new();
+        catalog.set("Type", Object::Name(b"Catalog".to_vec()));
+        catalog.set("AcroForm", Object::Reference((15, 0)));
+        let mut pages_dict = Dictionary::new();
+        pages_dict.set("Type", Object::Name(b"Pages".to_vec()));
+        pages_dict.set("Count", Object::Integer(0));
+        pages_dict.set("Kids", Object::Array(vec![]));
+        doc.objects.insert((5, 0), Object::Dictionary(pages_dict));
+        catalog.set("Pages", Object::Reference((5, 0)));
+        doc.objects.insert((4, 0), Object::Dictionary(catalog));
+        doc.trailer.set("Root", Object::Reference((4, 0)));
+
+        let (_, _, fields) = collect_form_fields(&doc);
+        assert_eq!(fields.len(), 3);
+        assert_eq!(fields[0].value, "42");
+        assert_eq!(fields[1].value, "true");
+        assert_eq!(fields[2].value, "[array]");
+    }
+
+    #[test]
+    fn forms_need_appearances_false() {
+        let mut doc = Document::new();
+        let mut acroform = Dictionary::new();
+        acroform.set("NeedAppearances", Object::Boolean(false));
+        acroform.set("Fields", Object::Array(vec![]));
+        doc.objects.insert((15, 0), Object::Dictionary(acroform));
+        let mut catalog = Dictionary::new();
+        catalog.set("Type", Object::Name(b"Catalog".to_vec()));
+        catalog.set("AcroForm", Object::Reference((15, 0)));
+        let mut pages_dict = Dictionary::new();
+        pages_dict.set("Type", Object::Name(b"Pages".to_vec()));
+        pages_dict.set("Count", Object::Integer(0));
+        pages_dict.set("Kids", Object::Array(vec![]));
+        doc.objects.insert((5, 0), Object::Dictionary(pages_dict));
+        catalog.set("Pages", Object::Reference((5, 0)));
+        doc.objects.insert((4, 0), Object::Dictionary(catalog));
+        doc.trailer.set("Root", Object::Reference((4, 0)));
+
+        let (_, need_appearances, _) = collect_form_fields(&doc);
+        assert!(!need_appearances);
+    }
+
+    #[test]
+    fn forms_deeply_nested_hierarchy() {
+        // Arrange: grandparent -> parent -> child field
+        let mut doc = Document::new();
+
+        let mut child = Dictionary::new();
+        child.set("T", Object::String(b"City".to_vec(), StringFormat::Literal));
+        child.set("FT", Object::Name(b"Tx".to_vec()));
+        child.set("V", Object::String(b"NYC".to_vec(), StringFormat::Literal));
+        doc.objects.insert((30, 0), Object::Dictionary(child));
+
+        let mut parent = Dictionary::new();
+        parent.set("T", Object::String(b"Address".to_vec(), StringFormat::Literal));
+        parent.set("Kids", Object::Array(vec![Object::Reference((30, 0))]));
+        doc.objects.insert((20, 0), Object::Dictionary(parent));
+
+        let mut grandparent = Dictionary::new();
+        grandparent.set("T", Object::String(b"Person".to_vec(), StringFormat::Literal));
+        grandparent.set("Kids", Object::Array(vec![Object::Reference((20, 0))]));
+        doc.objects.insert((10, 0), Object::Dictionary(grandparent));
+
+        let mut acroform = Dictionary::new();
+        acroform.set("Fields", Object::Array(vec![Object::Reference((10, 0))]));
+        doc.objects.insert((15, 0), Object::Dictionary(acroform));
+        let mut catalog = Dictionary::new();
+        catalog.set("Type", Object::Name(b"Catalog".to_vec()));
+        catalog.set("AcroForm", Object::Reference((15, 0)));
+        let mut pages_dict = Dictionary::new();
+        pages_dict.set("Type", Object::Name(b"Pages".to_vec()));
+        pages_dict.set("Count", Object::Integer(0));
+        pages_dict.set("Kids", Object::Array(vec![]));
+        doc.objects.insert((5, 0), Object::Dictionary(pages_dict));
+        catalog.set("Pages", Object::Reference((5, 0)));
+        doc.objects.insert((4, 0), Object::Dictionary(catalog));
+        doc.trailer.set("Root", Object::Reference((4, 0)));
+
+        let (_, _, fields) = collect_form_fields(&doc);
+        assert_eq!(fields.len(), 1);
+        assert_eq!(fields[0].qualified_name, "Person.Address.City");
+    }
+
+    #[test]
+    fn forms_flags_preserved() {
+        let mut doc = Document::new();
+        let mut field = Dictionary::new();
+        field.set("T", Object::String(b"ReadOnly".to_vec(), StringFormat::Literal));
+        field.set("FT", Object::Name(b"Tx".to_vec()));
+        field.set("Ff", Object::Integer(1)); // ReadOnly flag
+        doc.objects.insert((20, 0), Object::Dictionary(field));
+
+        let mut acroform = Dictionary::new();
+        acroform.set("Fields", Object::Array(vec![Object::Reference((20, 0))]));
+        doc.objects.insert((15, 0), Object::Dictionary(acroform));
+        let mut catalog = Dictionary::new();
+        catalog.set("Type", Object::Name(b"Catalog".to_vec()));
+        catalog.set("AcroForm", Object::Reference((15, 0)));
+        let mut pages_dict = Dictionary::new();
+        pages_dict.set("Type", Object::Name(b"Pages".to_vec()));
+        pages_dict.set("Count", Object::Integer(0));
+        pages_dict.set("Kids", Object::Array(vec![]));
+        doc.objects.insert((5, 0), Object::Dictionary(pages_dict));
+        catalog.set("Pages", Object::Reference((5, 0)));
+        doc.objects.insert((4, 0), Object::Dictionary(catalog));
+        doc.trailer.set("Root", Object::Reference((4, 0)));
+
+        let (_, _, fields) = collect_form_fields(&doc);
+        assert_eq!(fields[0].flags, 1);
+    }
+
+    #[test]
+    fn forms_json_structure_complete() {
+        let doc = build_form_doc();
+        let val = forms_json_value(&doc);
+        assert!(val["acroform_object"].is_number());
+        assert_eq!(val["need_appearances"], true);
+        assert_eq!(val["field_count"], 2);
+        let fields = val["fields"].as_array().unwrap();
+        let f = &fields[0];
+        assert!(f.get("object_number").is_some());
+        assert!(f.get("generation").is_some());
+        assert!(f.get("field_name").is_some());
+        assert!(f.get("field_type").is_some());
+        assert!(f.get("value").is_some());
+        assert!(f.get("flags").is_some());
+        assert!(f.get("page_number").is_some());
     }
 
 }

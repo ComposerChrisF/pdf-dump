@@ -11,6 +11,9 @@ struct PageMatch {
 }
 
 fn find_matches(doc: &Document, pattern: &str, page_filter: Option<&PageSpec>) -> Vec<PageMatch> {
+    if pattern.is_empty() {
+        return Vec::new();
+    }
     let pages = doc.get_pages();
     let lower_pattern = pattern.to_lowercase();
 
@@ -178,5 +181,70 @@ mod tests {
         let v: serde_json::Value = serde_json::from_str(&out).unwrap();
         assert_eq!(v["match_count"], 0);
         assert_eq!(v["pages"].as_array().unwrap().len(), 0);
+    }
+
+    #[test]
+    fn find_text_multiple_matches_on_same_page() {
+        let doc = build_page_doc_with_content(b"BT (foo bar foo baz foo) Tj ET");
+        let out = output_of(|w| print_find_text(w, &doc, "foo", None));
+        assert!(out.contains("3 times"));
+        assert!(out.contains("1 page"));
+    }
+
+    #[test]
+    fn find_text_context_shown() {
+        let doc = build_page_doc_with_content(b"BT (The quick brown fox jumps) Tj ET");
+        let out = output_of(|w| print_find_text(w, &doc, "brown", None));
+        // Snippet should include surrounding context
+        assert!(out.contains("quick"));
+        assert!(out.contains("fox"));
+    }
+
+    #[test]
+    fn find_text_empty_pattern() {
+        // Empty pattern should return no matches (avoids infinite loop)
+        let doc = build_page_doc_with_content(b"BT (Hi) Tj ET");
+        let out = output_of(|w| print_find_text(w, &doc, "", None));
+        assert!(out.contains("No matches"));
+    }
+
+    #[test]
+    fn find_text_page_range_filter() {
+        let doc = build_two_page_doc();
+        let spec = PageSpec::Range(1, 2);
+        let out = output_of(|w| print_find_text(w, &doc, "Page", Some(&spec)));
+        assert!(out.contains("Page 1:"));
+        assert!(out.contains("Page 2:"));
+    }
+
+    #[test]
+    fn find_text_page_filter_nonexistent_page() {
+        let doc = build_page_doc_with_content(b"BT (Hello) Tj ET");
+        let spec = PageSpec::Single(99);
+        let out = output_of(|w| print_find_text(w, &doc, "Hello", Some(&spec)));
+        assert!(out.contains("No matches"));
+    }
+
+    #[test]
+    fn find_text_json_multiple_pages() {
+        let doc = build_two_page_doc();
+        let out = output_of(|w| print_find_text_json(w, &doc, "Page", None));
+        let v: serde_json::Value = serde_json::from_str(&out).unwrap();
+        assert!(v["match_count"].as_u64().unwrap() >= 2);
+        assert!(v["pages"].as_array().unwrap().len() >= 2);
+    }
+
+    #[test]
+    fn find_text_singular_plural() {
+        // 1 time on 1 page
+        let doc = build_page_doc_with_content(b"BT (Hello World) Tj ET");
+        let out = output_of(|w| print_find_text(w, &doc, "Hello", None));
+        assert!(out.contains("1 time on 1 page"));
+
+        // 2 times on 2 pages
+        let doc2 = build_two_page_doc();
+        let out2 = output_of(|w| print_find_text(w, &doc2, "Page", None));
+        assert!(out2.contains("times"));
+        assert!(out2.contains("pages"));
     }
 }

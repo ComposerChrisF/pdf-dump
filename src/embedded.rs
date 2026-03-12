@@ -251,4 +251,241 @@ mod tests {
         assert_eq!(parsed["embedded_files"].as_array().unwrap().len(), 0);
     }
 
+    #[test]
+    fn embedded_files_uf_fallback_to_f() {
+        // Arrange: filespec has /F but no /UF — should use /F for filename
+        let mut doc = Document::new();
+        let mut ef_stream_dict = Dictionary::new();
+        ef_stream_dict.set("Type", Object::Name(b"EmbeddedFile".to_vec()));
+        let ef_stream = Stream::new(ef_stream_dict, b"data".to_vec());
+        doc.objects.insert((10, 0), Object::Stream(ef_stream));
+
+        let mut ef = Dictionary::new();
+        ef.set("F", Object::Reference((10, 0)));
+        let mut filespec = Dictionary::new();
+        filespec.set("Type", Object::Name(b"Filespec".to_vec()));
+        filespec.set("F", Object::String(b"readme.txt".to_vec(), StringFormat::Literal));
+        // No /UF key
+        filespec.set("EF", Object::Dictionary(ef));
+        doc.objects.insert((11, 0), Object::Dictionary(filespec));
+
+        let mut ef_tree = Dictionary::new();
+        ef_tree.set("Names", Object::Array(vec![
+            Object::String(b"readme.txt".to_vec(), StringFormat::Literal),
+            Object::Reference((11, 0)),
+        ]));
+        doc.objects.insert((12, 0), Object::Dictionary(ef_tree));
+
+        let mut names_dict = Dictionary::new();
+        names_dict.set("EmbeddedFiles", Object::Reference((12, 0)));
+        doc.objects.insert((13, 0), Object::Dictionary(names_dict));
+
+        let mut catalog = Dictionary::new();
+        catalog.set("Type", Object::Name(b"Catalog".to_vec()));
+        catalog.set("Names", Object::Reference((13, 0)));
+        doc.objects.insert((1, 0), Object::Dictionary(catalog));
+        doc.trailer.set("Root", Object::Reference((1, 0)));
+
+        // Act
+        let files = collect_embedded_files(&doc);
+
+        // Assert
+        assert_eq!(files.len(), 1);
+        assert_eq!(files[0].filename, "readme.txt");
+    }
+
+    #[test]
+    fn embedded_files_missing_params_size() {
+        // Arrange: stream without /Params/Size
+        let mut doc = Document::new();
+        let ef_stream_dict = Dictionary::new(); // No Params
+        let ef_stream = Stream::new(ef_stream_dict, b"data".to_vec());
+        doc.objects.insert((10, 0), Object::Stream(ef_stream));
+
+        let mut ef = Dictionary::new();
+        ef.set("F", Object::Reference((10, 0)));
+        let mut filespec = Dictionary::new();
+        filespec.set("Type", Object::Name(b"Filespec".to_vec()));
+        filespec.set("F", Object::String(b"test.bin".to_vec(), StringFormat::Literal));
+        filespec.set("EF", Object::Dictionary(ef));
+        doc.objects.insert((11, 0), Object::Dictionary(filespec));
+
+        let mut ef_tree = Dictionary::new();
+        ef_tree.set("Names", Object::Array(vec![
+            Object::String(b"test.bin".to_vec(), StringFormat::Literal),
+            Object::Reference((11, 0)),
+        ]));
+        doc.objects.insert((12, 0), Object::Dictionary(ef_tree));
+
+        let mut names_dict = Dictionary::new();
+        names_dict.set("EmbeddedFiles", Object::Reference((12, 0)));
+        doc.objects.insert((13, 0), Object::Dictionary(names_dict));
+
+        let mut catalog = Dictionary::new();
+        catalog.set("Type", Object::Name(b"Catalog".to_vec()));
+        catalog.set("Names", Object::Reference((13, 0)));
+        doc.objects.insert((1, 0), Object::Dictionary(catalog));
+        doc.trailer.set("Root", Object::Reference((1, 0)));
+
+        // Act
+        let files = collect_embedded_files(&doc);
+
+        // Assert
+        assert_eq!(files.len(), 1);
+        assert!(files[0].size.is_none());
+    }
+
+    #[test]
+    fn embedded_files_missing_mime_type() {
+        // Arrange: stream without /Subtype
+        let mut doc = Document::new();
+        let ef_stream_dict = Dictionary::new(); // No Subtype
+        let ef_stream = Stream::new(ef_stream_dict, b"data".to_vec());
+        doc.objects.insert((10, 0), Object::Stream(ef_stream));
+
+        let mut ef = Dictionary::new();
+        ef.set("F", Object::Reference((10, 0)));
+        let mut filespec = Dictionary::new();
+        filespec.set("Type", Object::Name(b"Filespec".to_vec()));
+        filespec.set("F", Object::String(b"test.bin".to_vec(), StringFormat::Literal));
+        filespec.set("EF", Object::Dictionary(ef));
+        doc.objects.insert((11, 0), Object::Dictionary(filespec));
+
+        let mut ef_tree = Dictionary::new();
+        ef_tree.set("Names", Object::Array(vec![
+            Object::String(b"test.bin".to_vec(), StringFormat::Literal),
+            Object::Reference((11, 0)),
+        ]));
+        doc.objects.insert((12, 0), Object::Dictionary(ef_tree));
+
+        let mut names_dict = Dictionary::new();
+        names_dict.set("EmbeddedFiles", Object::Reference((12, 0)));
+        doc.objects.insert((13, 0), Object::Dictionary(names_dict));
+
+        let mut catalog = Dictionary::new();
+        catalog.set("Type", Object::Name(b"Catalog".to_vec()));
+        catalog.set("Names", Object::Reference((13, 0)));
+        doc.objects.insert((1, 0), Object::Dictionary(catalog));
+        doc.trailer.set("Root", Object::Reference((1, 0)));
+
+        // Act
+        let files = collect_embedded_files(&doc);
+
+        // Assert
+        assert_eq!(files.len(), 1);
+        assert_eq!(files[0].mime_type, "-");
+    }
+
+    #[test]
+    fn embedded_files_json_structure_with_file() {
+        let mut doc = Document::new();
+        let mut ef_stream_dict = Dictionary::new();
+        ef_stream_dict.set("Subtype", Object::Name(b"text#2Fplain".to_vec()));
+        let mut params = Dictionary::new();
+        params.set("Size", Object::Integer(100));
+        ef_stream_dict.set("Params", Object::Dictionary(params));
+        let ef_stream = Stream::new(ef_stream_dict, b"hello".to_vec());
+        doc.objects.insert((10, 0), Object::Stream(ef_stream));
+
+        let mut ef = Dictionary::new();
+        ef.set("F", Object::Reference((10, 0)));
+        let mut filespec = Dictionary::new();
+        filespec.set("Type", Object::Name(b"Filespec".to_vec()));
+        filespec.set("UF", Object::String(b"notes.txt".to_vec(), StringFormat::Literal));
+        filespec.set("EF", Object::Dictionary(ef));
+        doc.objects.insert((11, 0), Object::Dictionary(filespec));
+
+        let mut ef_tree = Dictionary::new();
+        ef_tree.set("Names", Object::Array(vec![
+            Object::String(b"notes.txt".to_vec(), StringFormat::Literal),
+            Object::Reference((11, 0)),
+        ]));
+        doc.objects.insert((12, 0), Object::Dictionary(ef_tree));
+
+        let mut names_dict = Dictionary::new();
+        names_dict.set("EmbeddedFiles", Object::Reference((12, 0)));
+        doc.objects.insert((13, 0), Object::Dictionary(names_dict));
+
+        let mut catalog = Dictionary::new();
+        catalog.set("Type", Object::Name(b"Catalog".to_vec()));
+        catalog.set("Names", Object::Reference((13, 0)));
+        doc.objects.insert((1, 0), Object::Dictionary(catalog));
+        doc.trailer.set("Root", Object::Reference((1, 0)));
+
+        let out = output_of(|w| print_embedded_files_json(w, &doc));
+        let parsed: Value = serde_json::from_str(&out).unwrap();
+        assert_eq!(parsed["embedded_file_count"], 1);
+        let file = &parsed["embedded_files"][0];
+        assert_eq!(file["filename"], "notes.txt");
+        assert_eq!(file["size"], 100);
+        assert_eq!(file["object_number"], 10);
+        assert!(file["filespec_object"].as_u64().is_some());
+    }
+
+    #[test]
+    fn embedded_files_non_reference_value_skipped() {
+        // Arrange: name tree entry value is not a Reference (should be skipped)
+        let mut doc = Document::new();
+        let mut ef_tree = Dictionary::new();
+        ef_tree.set("Names", Object::Array(vec![
+            Object::String(b"bad.pdf".to_vec(), StringFormat::Literal),
+            Object::Integer(42), // not a reference — should be skipped
+        ]));
+        doc.objects.insert((12, 0), Object::Dictionary(ef_tree));
+
+        let mut names_dict = Dictionary::new();
+        names_dict.set("EmbeddedFiles", Object::Reference((12, 0)));
+        doc.objects.insert((13, 0), Object::Dictionary(names_dict));
+
+        let mut catalog = Dictionary::new();
+        catalog.set("Type", Object::Name(b"Catalog".to_vec()));
+        catalog.set("Names", Object::Reference((13, 0)));
+        doc.objects.insert((1, 0), Object::Dictionary(catalog));
+        doc.trailer.set("Root", Object::Reference((1, 0)));
+
+        let files = collect_embedded_files(&doc);
+        assert!(files.is_empty());
+    }
+
+    #[test]
+    fn embedded_files_print_with_file() {
+        // Build doc with one embedded file
+        let mut doc = Document::new();
+        let mut ef_stream_dict = Dictionary::new();
+        ef_stream_dict.set("Subtype", Object::Name(b"application#2Fpdf".to_vec()));
+        let mut params = Dictionary::new();
+        params.set("Size", Object::Integer(5000));
+        ef_stream_dict.set("Params", Object::Dictionary(params));
+        let ef_stream = Stream::new(ef_stream_dict, b"pdf".to_vec());
+        doc.objects.insert((10, 0), Object::Stream(ef_stream));
+
+        let mut ef = Dictionary::new();
+        ef.set("F", Object::Reference((10, 0)));
+        let mut filespec = Dictionary::new();
+        filespec.set("Type", Object::Name(b"Filespec".to_vec()));
+        filespec.set("F", Object::String(b"report.pdf".to_vec(), StringFormat::Literal));
+        filespec.set("EF", Object::Dictionary(ef));
+        doc.objects.insert((11, 0), Object::Dictionary(filespec));
+
+        let mut ef_tree = Dictionary::new();
+        ef_tree.set("Names", Object::Array(vec![
+            Object::String(b"report.pdf".to_vec(), StringFormat::Literal),
+            Object::Reference((11, 0)),
+        ]));
+        doc.objects.insert((12, 0), Object::Dictionary(ef_tree));
+        let mut names_dict = Dictionary::new();
+        names_dict.set("EmbeddedFiles", Object::Reference((12, 0)));
+        doc.objects.insert((13, 0), Object::Dictionary(names_dict));
+        let mut catalog = Dictionary::new();
+        catalog.set("Type", Object::Name(b"Catalog".to_vec()));
+        catalog.set("Names", Object::Reference((13, 0)));
+        doc.objects.insert((1, 0), Object::Dictionary(catalog));
+        doc.trailer.set("Root", Object::Reference((1, 0)));
+
+        let out = output_of(|w| print_embedded_files(w, &doc));
+        assert!(out.contains("1 embedded files"));
+        assert!(out.contains("report.pdf"));
+        assert!(out.contains("5000"));
+    }
+
 }

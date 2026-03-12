@@ -308,6 +308,7 @@ pub(crate) struct DumpConfig {
     pub raw: bool,
 }
 
+#[derive(Debug)]
 pub(crate) enum PageSpec {
     Single(u32),
     Range(u32, u32),
@@ -460,6 +461,156 @@ mod tests {
         assert!(parse_object_spec("abc").is_err());
         assert!(parse_object_spec("").is_err());
         assert!(parse_object_spec("5-3").is_err());
+    }
+
+    // ── PageSpec edge cases ─────────────────────────────────────────
+
+    #[test]
+    fn page_spec_parse_whitespace() {
+        let spec = PageSpec::parse("  5  ").unwrap();
+        assert!(matches!(spec, PageSpec::Single(5)));
+
+        let spec = PageSpec::parse(" 1 - 3 ").unwrap();
+        assert!(matches!(spec, PageSpec::Range(1, 3)));
+    }
+
+    #[test]
+    fn page_spec_parse_single_page_boundary() {
+        // Minimum valid page
+        let spec = PageSpec::parse("1").unwrap();
+        assert!(matches!(spec, PageSpec::Single(1)));
+
+        // Large page number
+        let spec = PageSpec::parse("999999").unwrap();
+        assert!(matches!(spec, PageSpec::Single(999999)));
+    }
+
+    #[test]
+    fn page_spec_parse_same_start_end_range() {
+        // Range where start == end is valid (equivalent to single)
+        let spec = PageSpec::parse("5-5").unwrap();
+        assert!(matches!(spec, PageSpec::Range(5, 5)));
+        assert_eq!(spec.pages(), vec![5]);
+    }
+
+    #[test]
+    fn page_spec_error_messages() {
+        let err = PageSpec::parse("abc").unwrap_err();
+        assert!(err.contains("Invalid page number"), "got: {}", err);
+
+        let err = PageSpec::parse("0").unwrap_err();
+        assert!(err.contains(">= 1"), "got: {}", err);
+
+        let err = PageSpec::parse("5-3").unwrap_err();
+        assert!(err.contains("5 > 3"), "got: {}", err);
+
+        let err = PageSpec::parse("a-5").unwrap_err();
+        assert!(err.contains("Invalid page range start"), "got: {}", err);
+
+        let err = PageSpec::parse("1-b").unwrap_err();
+        assert!(err.contains("Invalid page range end"), "got: {}", err);
+    }
+
+    #[test]
+    fn page_spec_contains_boundary() {
+        let range = PageSpec::Range(1, 1);
+        assert!(range.contains(1));
+        assert!(!range.contains(0));
+        assert!(!range.contains(2));
+    }
+
+    // ── parse_object_spec edge cases ────────────────────────────────
+
+    #[test]
+    fn parse_object_spec_deduplicates() {
+        let result = parse_object_spec("1,1,5,5").unwrap();
+        assert_eq!(result, vec![1, 5]);
+    }
+
+    #[test]
+    fn parse_object_spec_sorts() {
+        let result = parse_object_spec("10,5,1").unwrap();
+        assert_eq!(result, vec![1, 5, 10]);
+    }
+
+    #[test]
+    fn parse_object_spec_trailing_comma() {
+        // Empty parts from trailing comma should be skipped
+        let result = parse_object_spec("1,5,").unwrap();
+        assert_eq!(result, vec![1, 5]);
+    }
+
+    #[test]
+    fn parse_object_spec_whitespace() {
+        let result = parse_object_spec(" 1 , 5 , 10 - 12 ").unwrap();
+        assert_eq!(result, vec![1, 5, 10, 11, 12]);
+    }
+
+    #[test]
+    fn parse_object_spec_overlap_deduped() {
+        // Ranges that overlap should be deduped
+        let result = parse_object_spec("1-3,2-4").unwrap();
+        assert_eq!(result, vec![1, 2, 3, 4]);
+    }
+
+    #[test]
+    fn parse_object_spec_single_element_range() {
+        let result = parse_object_spec("5-5").unwrap();
+        assert_eq!(result, vec![5]);
+    }
+
+    #[test]
+    fn parse_object_spec_reversed_range_error() {
+        let err = parse_object_spec("10-5").unwrap_err();
+        assert!(err.contains("10 > 5"), "got: {}", err);
+    }
+
+    #[test]
+    fn parse_object_spec_non_numeric_in_range() {
+        let err = parse_object_spec("a-5").unwrap_err();
+        assert!(err.contains("Invalid object number"), "got: {}", err);
+    }
+
+    // ── DocMode label/json_key ──────────────────────────────────────
+
+    #[test]
+    fn doc_mode_label_all_variants() {
+        assert_eq!(DocMode::List.label(), "List");
+        assert_eq!(DocMode::Validate.label(), "Validate");
+        assert_eq!(DocMode::Fonts.label(), "Fonts");
+        assert_eq!(DocMode::Images.label(), "Images");
+        assert_eq!(DocMode::Forms.label(), "Forms");
+        assert_eq!(DocMode::Bookmarks.label(), "Bookmarks");
+        assert_eq!(DocMode::Annotations.label(), "Annotations");
+        assert_eq!(DocMode::Text.label(), "Text");
+        assert_eq!(DocMode::Operators.label(), "Operators");
+        assert_eq!(DocMode::Tags.label(), "Tags");
+        assert_eq!(DocMode::Tree.label(), "Tree");
+        assert_eq!(DocMode::FindText.label(), "Find Text");
+        assert_eq!(DocMode::Detail(DetailSub::Security).label(), "Security");
+        assert_eq!(DocMode::Detail(DetailSub::Embedded).label(), "Embedded Files");
+        assert_eq!(DocMode::Detail(DetailSub::Labels).label(), "Page Labels");
+        assert_eq!(DocMode::Detail(DetailSub::Layers).label(), "Layers");
+    }
+
+    #[test]
+    fn doc_mode_json_key_all_variants() {
+        assert_eq!(DocMode::List.json_key(), "list");
+        assert_eq!(DocMode::Validate.json_key(), "validate");
+        assert_eq!(DocMode::Fonts.json_key(), "fonts");
+        assert_eq!(DocMode::Images.json_key(), "images");
+        assert_eq!(DocMode::Forms.json_key(), "forms");
+        assert_eq!(DocMode::Bookmarks.json_key(), "bookmarks");
+        assert_eq!(DocMode::Annotations.json_key(), "annotations");
+        assert_eq!(DocMode::Text.json_key(), "text");
+        assert_eq!(DocMode::Operators.json_key(), "operators");
+        assert_eq!(DocMode::Tags.json_key(), "tags");
+        assert_eq!(DocMode::Tree.json_key(), "tree");
+        assert_eq!(DocMode::FindText.json_key(), "find_text");
+        assert_eq!(DocMode::Detail(DetailSub::Security).json_key(), "security");
+        assert_eq!(DocMode::Detail(DetailSub::Embedded).json_key(), "embedded_files");
+        assert_eq!(DocMode::Detail(DetailSub::Labels).json_key(), "page_labels");
+        assert_eq!(DocMode::Detail(DetailSub::Layers).json_key(), "layers");
     }
 
 }

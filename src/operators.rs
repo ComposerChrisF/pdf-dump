@@ -162,4 +162,92 @@ mod tests {
         assert!(out.contains("0 operations"));
     }
 
+    #[test]
+    fn operators_get_page_operations_direct() {
+        // Arrange
+        let doc = build_page_doc_with_content(b"BT /F1 12 Tf (Hello) Tj ET");
+        let pages = doc.get_pages();
+        let page_id = *pages.get(&1).unwrap();
+
+        // Act
+        let result = get_page_operations_with_warnings(&doc, page_id);
+
+        // Assert
+        assert!(result.warnings.is_empty());
+        assert!(result.operations.len() >= 3); // BT, Tf, Tj, ET
+        let op_names: Vec<&str> = result.operations.iter().map(|o| o.operator.as_str()).collect();
+        assert!(op_names.contains(&"BT"));
+        assert!(op_names.contains(&"Tj"));
+        assert!(op_names.contains(&"ET"));
+    }
+
+    #[test]
+    fn operators_get_page_operations_no_content() {
+        // Arrange: page without any content stream
+        let mut doc = Document::new();
+        let mut page_dict = Dictionary::new();
+        page_dict.set("Type", Object::Name(b"Page".to_vec()));
+        page_dict.set("Parent", Object::Reference((2, 0)));
+        doc.objects.insert((1, 0), Object::Dictionary(page_dict));
+
+        // Act
+        let result = get_page_operations_with_warnings(&doc, (1, 0));
+
+        // Assert
+        assert!(result.operations.is_empty());
+        assert!(result.warnings.is_empty());
+    }
+
+    #[test]
+    fn operators_syntax_error_in_stream() {
+        // Arrange: content stream with malformed operator data
+        let doc = build_page_doc_with_content(b"<<<INVALID>>>");
+        let pages = doc.get_pages();
+        let page_id = *pages.get(&1).unwrap();
+
+        // Act
+        let result = get_page_operations_with_warnings(&doc, page_id);
+
+        // Assert: either it parses partially or reports a warning
+        // The behavior depends on lopdf's Content::decode tolerance
+        // At minimum, it should not panic
+        let _ = result;
+    }
+
+    #[test]
+    fn operators_multiple_pages() {
+        let doc = build_two_page_doc();
+        let out = output_of(|w| print_operators(w, &doc, None));
+        assert!(out.contains("Page 1"));
+        assert!(out.contains("Page 2"));
+    }
+
+    #[test]
+    fn operators_page_filter_excludes() {
+        let doc = build_two_page_doc();
+        let spec = PageSpec::Single(2);
+        let out = output_of(|w| print_operators(w, &doc, Some(&spec)));
+        assert!(!out.contains("Page 1"));
+        assert!(out.contains("Page 2"));
+    }
+
+    #[test]
+    fn operators_json_no_warnings_key_when_clean() {
+        let doc = build_page_doc_with_content(b"BT (Test) Tj ET");
+        let val = operators_json_value(&doc, None);
+        let page = &val["pages"][0];
+        // No warnings key when there are none
+        assert!(page.get("warnings").is_none());
+    }
+
+    #[test]
+    fn operators_json_page_filter() {
+        let doc = build_two_page_doc();
+        let spec = PageSpec::Single(1);
+        let val = operators_json_value(&doc, Some(&spec));
+        let pages = val["pages"].as_array().unwrap();
+        assert_eq!(pages.len(), 1);
+        assert_eq!(pages[0]["page_number"], 1);
+    }
+
 }

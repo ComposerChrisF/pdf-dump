@@ -442,4 +442,238 @@ mod tests {
         assert!(out.contains("/Im1"));
         assert!(out.contains("Image, 100x200, DeviceRGB"));
     }
+
+    #[test]
+    fn page_info_with_rotation() {
+        use lopdf::{Dictionary, Stream};
+
+        let mut doc = Document::new();
+        let content = Stream::new(Dictionary::new(), b"BT (test) Tj ET".to_vec());
+        let content_id = doc.add_object(Object::Stream(content));
+
+        let mut pages_dict = Dictionary::new();
+        pages_dict.set("Type", Object::Name(b"Pages".to_vec()));
+        pages_dict.set("Count", Object::Integer(1));
+        pages_dict.set("Kids", Object::Array(vec![]));
+        let pages_id = doc.add_object(Object::Dictionary(pages_dict));
+
+        let mut page = Dictionary::new();
+        page.set("Type", Object::Name(b"Page".to_vec()));
+        page.set("Parent", Object::Reference(pages_id));
+        page.set("Contents", Object::Reference(content_id));
+        page.set("MediaBox", Object::Array(vec![
+            Object::Integer(0), Object::Integer(0),
+            Object::Integer(612), Object::Integer(792),
+        ]));
+        page.set("Rotate", Object::Integer(90));
+        let page_id = doc.add_object(Object::Dictionary(page));
+
+        if let Ok(Object::Dictionary(d)) = doc.get_object_mut(pages_id) {
+            d.set("Kids", Object::Array(vec![Object::Reference(page_id)]));
+        }
+        let mut catalog = Dictionary::new();
+        catalog.set("Type", Object::Name(b"Catalog".to_vec()));
+        catalog.set("Pages", Object::Reference(pages_id));
+        let catalog_id = doc.add_object(Object::Dictionary(catalog));
+        doc.trailer.set("Root", Object::Reference(catalog_id));
+
+        let out = output_of(|w| print_page_info(w, &doc, &PageSpec::Single(1)));
+        assert!(out.contains("Rotate:"));
+        assert!(out.contains("90"));
+    }
+
+    #[test]
+    fn page_info_with_crop_box() {
+        use lopdf::{Dictionary, Stream};
+
+        let mut doc = Document::new();
+        let content = Stream::new(Dictionary::new(), b"BT (test) Tj ET".to_vec());
+        let content_id = doc.add_object(Object::Stream(content));
+
+        let mut pages_dict = Dictionary::new();
+        pages_dict.set("Type", Object::Name(b"Pages".to_vec()));
+        pages_dict.set("Count", Object::Integer(1));
+        pages_dict.set("Kids", Object::Array(vec![]));
+        let pages_id = doc.add_object(Object::Dictionary(pages_dict));
+
+        let mut page = Dictionary::new();
+        page.set("Type", Object::Name(b"Page".to_vec()));
+        page.set("Parent", Object::Reference(pages_id));
+        page.set("Contents", Object::Reference(content_id));
+        page.set("MediaBox", Object::Array(vec![
+            Object::Integer(0), Object::Integer(0),
+            Object::Integer(612), Object::Integer(792),
+        ]));
+        page.set("CropBox", Object::Array(vec![
+            Object::Integer(50), Object::Integer(50),
+            Object::Integer(562), Object::Integer(742),
+        ]));
+        let page_id = doc.add_object(Object::Dictionary(page));
+
+        if let Ok(Object::Dictionary(d)) = doc.get_object_mut(pages_id) {
+            d.set("Kids", Object::Array(vec![Object::Reference(page_id)]));
+        }
+        let mut catalog = Dictionary::new();
+        catalog.set("Type", Object::Name(b"Catalog".to_vec()));
+        catalog.set("Pages", Object::Reference(pages_id));
+        let catalog_id = doc.add_object(Object::Dictionary(catalog));
+        doc.trailer.set("Root", Object::Reference(catalog_id));
+
+        let out = output_of(|w| print_page_info(w, &doc, &PageSpec::Single(1)));
+        assert!(out.contains("CropBox:"));
+        assert!(out.contains("[50 50 562 742]"));
+    }
+
+    #[test]
+    fn page_info_no_content_streams() {
+        use lopdf::Dictionary;
+
+        let mut doc = Document::new();
+        let mut pages_dict = Dictionary::new();
+        pages_dict.set("Type", Object::Name(b"Pages".to_vec()));
+        pages_dict.set("Count", Object::Integer(1));
+        pages_dict.set("Kids", Object::Array(vec![]));
+        let pages_id = doc.add_object(Object::Dictionary(pages_dict));
+
+        let mut page = Dictionary::new();
+        page.set("Type", Object::Name(b"Page".to_vec()));
+        page.set("Parent", Object::Reference(pages_id));
+        page.set("MediaBox", Object::Array(vec![
+            Object::Integer(0), Object::Integer(0),
+            Object::Integer(612), Object::Integer(792),
+        ]));
+        // No Contents
+        let page_id = doc.add_object(Object::Dictionary(page));
+
+        if let Ok(Object::Dictionary(d)) = doc.get_object_mut(pages_id) {
+            d.set("Kids", Object::Array(vec![Object::Reference(page_id)]));
+        }
+        let mut catalog = Dictionary::new();
+        catalog.set("Type", Object::Name(b"Catalog".to_vec()));
+        catalog.set("Pages", Object::Reference(pages_id));
+        let catalog_id = doc.add_object(Object::Dictionary(catalog));
+        doc.trailer.set("Root", Object::Reference(catalog_id));
+
+        let out = output_of(|w| print_page_info(w, &doc, &PageSpec::Single(1)));
+        assert!(out.contains("Page 1"));
+        // Should not contain Content: line
+        assert!(!out.contains("Content:"));
+    }
+
+    #[test]
+    fn page_info_with_annotations() {
+        use lopdf::{Dictionary, Stream};
+
+        let mut doc = Document::new();
+        let content = Stream::new(Dictionary::new(), b"BT (test) Tj ET".to_vec());
+        let content_id = doc.add_object(Object::Stream(content));
+
+        let mut annot = Dictionary::new();
+        annot.set("Subtype", Object::Name(b"Text".to_vec()));
+        annot.set("Rect", Object::Array(vec![
+            Object::Integer(0), Object::Integer(0), Object::Integer(50), Object::Integer(50),
+        ]));
+        let annot_id = doc.add_object(Object::Dictionary(annot));
+
+        let mut pages_dict = Dictionary::new();
+        pages_dict.set("Type", Object::Name(b"Pages".to_vec()));
+        pages_dict.set("Count", Object::Integer(1));
+        pages_dict.set("Kids", Object::Array(vec![]));
+        let pages_id = doc.add_object(Object::Dictionary(pages_dict));
+
+        let mut page = Dictionary::new();
+        page.set("Type", Object::Name(b"Page".to_vec()));
+        page.set("Parent", Object::Reference(pages_id));
+        page.set("Contents", Object::Reference(content_id));
+        page.set("MediaBox", Object::Array(vec![
+            Object::Integer(0), Object::Integer(0),
+            Object::Integer(612), Object::Integer(792),
+        ]));
+        page.set("Annots", Object::Array(vec![Object::Reference(annot_id)]));
+        let page_id = doc.add_object(Object::Dictionary(page));
+
+        if let Ok(Object::Dictionary(d)) = doc.get_object_mut(pages_id) {
+            d.set("Kids", Object::Array(vec![Object::Reference(page_id)]));
+        }
+        let mut catalog = Dictionary::new();
+        catalog.set("Type", Object::Name(b"Catalog".to_vec()));
+        catalog.set("Pages", Object::Reference(pages_id));
+        let catalog_id = doc.add_object(Object::Dictionary(catalog));
+        doc.trailer.set("Root", Object::Reference(catalog_id));
+
+        let out = output_of(|w| print_page_info(w, &doc, &PageSpec::Single(1)));
+        assert!(out.contains("Annotations:"));
+        assert!(out.contains("1 Text"));
+    }
+
+    #[test]
+    fn page_info_json_with_rotation() {
+        use lopdf::{Dictionary, Stream};
+
+        let mut doc = Document::new();
+        let content = Stream::new(Dictionary::new(), b"BT (test) Tj ET".to_vec());
+        let content_id = doc.add_object(Object::Stream(content));
+
+        let mut pages_dict = Dictionary::new();
+        pages_dict.set("Type", Object::Name(b"Pages".to_vec()));
+        pages_dict.set("Count", Object::Integer(1));
+        pages_dict.set("Kids", Object::Array(vec![]));
+        let pages_id = doc.add_object(Object::Dictionary(pages_dict));
+
+        let mut page = Dictionary::new();
+        page.set("Type", Object::Name(b"Page".to_vec()));
+        page.set("Parent", Object::Reference(pages_id));
+        page.set("Contents", Object::Reference(content_id));
+        page.set("MediaBox", Object::Array(vec![
+            Object::Integer(0), Object::Integer(0),
+            Object::Integer(612), Object::Integer(792),
+        ]));
+        page.set("Rotate", Object::Integer(180));
+        let page_id = doc.add_object(Object::Dictionary(page));
+
+        if let Ok(Object::Dictionary(d)) = doc.get_object_mut(pages_id) {
+            d.set("Kids", Object::Array(vec![Object::Reference(page_id)]));
+        }
+        let mut catalog = Dictionary::new();
+        catalog.set("Type", Object::Name(b"Catalog".to_vec()));
+        catalog.set("Pages", Object::Reference(pages_id));
+        let catalog_id = doc.add_object(Object::Dictionary(catalog));
+        doc.trailer.set("Root", Object::Reference(catalog_id));
+
+        let out = output_of(|w| print_page_info_json(w, &doc, &PageSpec::Single(1)));
+        let val: serde_json::Value = serde_json::from_str(&out).unwrap();
+        assert_eq!(val["pages"][0]["rotate"], 180);
+    }
+
+    // ── is_garbled_text ─────────────────────────────────────────────
+
+    #[test]
+    fn garbled_text_detection_clean() {
+        assert!(!is_garbled_text("Hello World", &[]));
+    }
+
+    #[test]
+    fn garbled_text_detection_empty() {
+        assert!(!is_garbled_text("", &[]));
+        assert!(!is_garbled_text("   ", &[]));
+    }
+
+    #[test]
+    fn garbled_text_detection_mostly_non_ascii() {
+        // More than 50% non-printable -> garbled
+        assert!(is_garbled_text("\u{00}\u{01}\u{02}a", &[]));
+    }
+
+    #[test]
+    fn garbled_text_detection_cid_warning() {
+        let warnings = vec!["CID font without ToUnicode".to_string()];
+        assert!(is_garbled_text("some text", &warnings));
+    }
+
+    #[test]
+    fn garbled_text_cid_warning_empty_text() {
+        // CID warning but no text => not garbled
+        let warnings = vec!["CID font without ToUnicode".to_string()];
+        assert!(!is_garbled_text("", &warnings));
+    }
 }

@@ -377,4 +377,210 @@ mod tests {
         assert_eq!(val["bookmark_count"], 0);
     }
 
+    #[test]
+    fn bookmarks_cycle_detection() {
+        // Arrange: bookmark A -> Next -> B -> Next -> A (cycle)
+        let mut doc = Document::new();
+        let bm_a_id = (10, 0u16);
+        let bm_b_id = (11, 0u16);
+
+        let mut bm_a = Dictionary::new();
+        bm_a.set("Title", Object::String(b"A".to_vec(), StringFormat::Literal));
+        bm_a.set("Next", Object::Reference(bm_b_id));
+        doc.objects.insert(bm_a_id, Object::Dictionary(bm_a));
+
+        let mut bm_b = Dictionary::new();
+        bm_b.set("Title", Object::String(b"B".to_vec(), StringFormat::Literal));
+        bm_b.set("Next", Object::Reference(bm_a_id));
+        doc.objects.insert(bm_b_id, Object::Dictionary(bm_b));
+
+        // Act - should not hang
+        let items = collect_outline_items(&doc, bm_a_id);
+
+        // Assert: should visit each once
+        assert_eq!(items.len(), 2);
+    }
+
+    #[test]
+    fn bookmarks_with_goto_action() {
+        let mut doc = Document::new();
+
+        let mut action = Dictionary::new();
+        action.set("S", Object::Name(b"GoTo".to_vec()));
+        action.set("D", Object::Array(vec![
+            Object::Reference((50, 0)),
+            Object::Name(b"XYZ".to_vec()),
+        ]));
+
+        let mut bm = Dictionary::new();
+        bm.set("Title", Object::String(b"Internal".to_vec(), StringFormat::Literal));
+        bm.set("A", Object::Dictionary(action));
+        let bm_id = doc.add_object(Object::Dictionary(bm));
+
+        let mut outlines = Dictionary::new();
+        outlines.set("Type", Object::Name(b"Outlines".to_vec()));
+        outlines.set("First", Object::Reference(bm_id));
+        let outlines_id = doc.add_object(Object::Dictionary(outlines));
+
+        let mut catalog = Dictionary::new();
+        catalog.set("Type", Object::Name(b"Catalog".to_vec()));
+        catalog.set("Outlines", Object::Reference(outlines_id));
+        let catalog_id = doc.add_object(Object::Dictionary(catalog));
+        doc.trailer.set("Root", Object::Reference(catalog_id));
+
+        let out = output_of(|w| print_bookmarks(w, &doc));
+        assert!(out.contains("GoTo("));
+        assert!(out.contains("/XYZ"));
+    }
+
+    #[test]
+    fn bookmarks_with_named_dest() {
+        let mut doc = Document::new();
+
+        let mut bm = Dictionary::new();
+        bm.set("Title", Object::String(b"Named".to_vec(), StringFormat::Literal));
+        bm.set("Dest", Object::Name(b"chapter1".to_vec()));
+        let bm_id = doc.add_object(Object::Dictionary(bm));
+
+        let mut outlines = Dictionary::new();
+        outlines.set("Type", Object::Name(b"Outlines".to_vec()));
+        outlines.set("First", Object::Reference(bm_id));
+        let outlines_id = doc.add_object(Object::Dictionary(outlines));
+
+        let mut catalog = Dictionary::new();
+        catalog.set("Type", Object::Name(b"Catalog".to_vec()));
+        catalog.set("Outlines", Object::Reference(outlines_id));
+        let catalog_id = doc.add_object(Object::Dictionary(catalog));
+        doc.trailer.set("Root", Object::Reference(catalog_id));
+
+        let out = output_of(|w| print_bookmarks(w, &doc));
+        assert!(out.contains("/chapter1"));
+    }
+
+    #[test]
+    fn bookmarks_no_dest_no_action() {
+        let mut doc = Document::new();
+
+        let mut bm = Dictionary::new();
+        bm.set("Title", Object::String(b"Nowhere".to_vec(), StringFormat::Literal));
+        // No /Dest, no /A
+        let bm_id = doc.add_object(Object::Dictionary(bm));
+
+        let mut outlines = Dictionary::new();
+        outlines.set("Type", Object::Name(b"Outlines".to_vec()));
+        outlines.set("First", Object::Reference(bm_id));
+        let outlines_id = doc.add_object(Object::Dictionary(outlines));
+
+        let mut catalog = Dictionary::new();
+        catalog.set("Type", Object::Name(b"Catalog".to_vec()));
+        catalog.set("Outlines", Object::Reference(outlines_id));
+        let catalog_id = doc.add_object(Object::Dictionary(catalog));
+        doc.trailer.set("Root", Object::Reference(catalog_id));
+
+        let out = output_of(|w| print_bookmarks(w, &doc));
+        assert!(out.contains("Nowhere"));
+        assert!(out.contains("-> -")); // No destination
+    }
+
+    #[test]
+    fn bookmarks_json_nested_children() {
+        let mut doc = Document::new();
+
+        let mut child = Dictionary::new();
+        child.set("Title", Object::String(b"Section 1.1".to_vec(), StringFormat::Literal));
+        let child_id = doc.add_object(Object::Dictionary(child));
+
+        let mut parent = Dictionary::new();
+        parent.set("Title", Object::String(b"Chapter 1".to_vec(), StringFormat::Literal));
+        parent.set("First", Object::Reference(child_id));
+        let parent_id = doc.add_object(Object::Dictionary(parent));
+
+        let mut outlines = Dictionary::new();
+        outlines.set("Type", Object::Name(b"Outlines".to_vec()));
+        outlines.set("First", Object::Reference(parent_id));
+        let outlines_id = doc.add_object(Object::Dictionary(outlines));
+
+        let mut catalog = Dictionary::new();
+        catalog.set("Type", Object::Name(b"Catalog".to_vec()));
+        catalog.set("Outlines", Object::Reference(outlines_id));
+        let catalog_id = doc.add_object(Object::Dictionary(catalog));
+        doc.trailer.set("Root", Object::Reference(catalog_id));
+
+        let out = output_of(|w| print_bookmarks_json(w, &doc));
+        let val: Value = serde_json::from_str(&out).unwrap();
+        assert_eq!(val["bookmark_count"], 2);
+        let bm = &val["bookmarks"][0];
+        assert_eq!(bm["title"], "Chapter 1");
+        let children = bm["children"].as_array().unwrap();
+        assert_eq!(children.len(), 1);
+        assert_eq!(children[0]["title"], "Section 1.1");
+    }
+
+    #[test]
+    fn bookmarks_count_function() {
+        let doc = make_doc_with_bookmarks();
+        assert_eq!(count_bookmarks(&doc), 2);
+    }
+
+    #[test]
+    fn bookmarks_count_no_outlines() {
+        let mut doc = Document::new();
+        let mut catalog = Dictionary::new();
+        catalog.set("Type", Object::Name(b"Catalog".to_vec()));
+        let catalog_id = doc.add_object(Object::Dictionary(catalog));
+        doc.trailer.set("Root", Object::Reference(catalog_id));
+        assert_eq!(count_bookmarks(&doc), 0);
+    }
+
+    #[test]
+    fn bookmarks_with_string_dest() {
+        let mut doc = Document::new();
+
+        let mut bm = Dictionary::new();
+        bm.set("Title", Object::String(b"StrDest".to_vec(), StringFormat::Literal));
+        bm.set("Dest", Object::String(b"page1dest".to_vec(), StringFormat::Literal));
+        let bm_id = doc.add_object(Object::Dictionary(bm));
+
+        let mut outlines = Dictionary::new();
+        outlines.set("Type", Object::Name(b"Outlines".to_vec()));
+        outlines.set("First", Object::Reference(bm_id));
+        let outlines_id = doc.add_object(Object::Dictionary(outlines));
+
+        let mut catalog = Dictionary::new();
+        catalog.set("Type", Object::Name(b"Catalog".to_vec()));
+        catalog.set("Outlines", Object::Reference(outlines_id));
+        let catalog_id = doc.add_object(Object::Dictionary(catalog));
+        doc.trailer.set("Root", Object::Reference(catalog_id));
+
+        let out = output_of(|w| print_bookmarks(w, &doc));
+        assert!(out.contains("(page1dest)"));
+    }
+
+    #[test]
+    fn bookmarks_with_unknown_action() {
+        let mut doc = Document::new();
+
+        let mut action = Dictionary::new();
+        action.set("S", Object::Name(b"JavaScript".to_vec()));
+
+        let mut bm = Dictionary::new();
+        bm.set("Title", Object::String(b"JSAction".to_vec(), StringFormat::Literal));
+        bm.set("A", Object::Dictionary(action));
+        let bm_id = doc.add_object(Object::Dictionary(bm));
+
+        let mut outlines = Dictionary::new();
+        outlines.set("Type", Object::Name(b"Outlines".to_vec()));
+        outlines.set("First", Object::Reference(bm_id));
+        let outlines_id = doc.add_object(Object::Dictionary(outlines));
+
+        let mut catalog = Dictionary::new();
+        catalog.set("Type", Object::Name(b"Catalog".to_vec()));
+        catalog.set("Outlines", Object::Reference(outlines_id));
+        let catalog_id = doc.add_object(Object::Dictionary(catalog));
+        doc.trailer.set("Root", Object::Reference(catalog_id));
+
+        let out = output_of(|w| print_bookmarks(w, &doc));
+        assert!(out.contains("Action(JavaScript)"));
+    }
+
 }
