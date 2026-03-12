@@ -106,12 +106,10 @@ pub(crate) fn object_matches(obj: &Object, conditions: &[SearchCondition]) -> bo
         }
         SearchCondition::StreamContains { text } => {
             if let Some(ref decoded) = decoded_content {
-                let text_lower = text.to_lowercase();
-                let content_str = match std::str::from_utf8(decoded) {
-                    Ok(s) => std::borrow::Cow::Borrowed(s),
-                    Err(_) => String::from_utf8_lossy(decoded),
-                };
-                content_str.to_ascii_lowercase().contains(&text_lower)
+                let needle = text.as_bytes();
+                decoded.windows(needle.len()).any(|w|
+                    w.eq_ignore_ascii_case(needle)
+                )
             } else {
                 false
             }

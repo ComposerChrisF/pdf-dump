@@ -90,11 +90,13 @@ fn collect_page_info(doc: &Document, page_num: u32, page_id: ObjectId, annots: &
 
     // Annotations (pre-filtered by caller)
     let annotation_count = annots.len();
-    let mut subtype_counts = std::collections::BTreeMap::new();
+    let mut subtype_counts: std::collections::BTreeMap<&str, usize> = std::collections::BTreeMap::new();
     for a in annots {
-        *subtype_counts.entry(a.subtype.clone()).or_insert(0usize) += 1;
+        *subtype_counts.entry(a.subtype.as_str()).or_insert(0usize) += 1;
     }
-    let annotation_subtypes: Vec<(String, usize)> = subtype_counts.into_iter().collect();
+    let annotation_subtypes: Vec<(String, usize)> = subtype_counts.into_iter()
+        .map(|(k, v)| (k.to_string(), v))
+        .collect();
 
     // Content streams
     let content_ids: Vec<ObjectId> = match page_dict.get(b"Contents") {

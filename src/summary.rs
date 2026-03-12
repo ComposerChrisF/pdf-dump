@@ -165,15 +165,15 @@ fn count_object_types(doc: &Document) -> BTreeMap<&str, usize> {
 pub(crate) struct StreamStats {
     pub count: usize,
     pub total_bytes: usize,
-    pub total_decoded_bytes: usize,
+    pub total_decoded_bytes: Option<usize>,
     pub filter_counts: BTreeMap<String, usize>,
     pub largest: Vec<(u32, usize)>,
 }
 
-fn collect_stream_stats(doc: &Document) -> StreamStats {
+fn collect_stream_stats(doc: &Document, decode: bool) -> StreamStats {
     let mut count = 0usize;
     let mut total_bytes = 0usize;
-    let mut total_decoded_bytes = 0usize;
+    let mut total_decoded_bytes = if decode { Some(0usize) } else { None };
     let mut filter_counts: BTreeMap<String, usize> = BTreeMap::new();
     let mut largest: Vec<(u32, usize)> = Vec::new();
 
@@ -183,8 +183,10 @@ fn collect_stream_stats(doc: &Document) -> StreamStats {
             let raw_bytes = stream.content.len();
             total_bytes += raw_bytes;
 
-            let (decoded, _) = decode_stream(stream);
-            total_decoded_bytes += decoded.len();
+            if decode {
+                let (decoded, _) = decode_stream(stream);
+                *total_decoded_bytes.as_mut().unwrap() += decoded.len();
+            }
 
             for filter in get_filter_names(stream) {
                 let name = String::from_utf8_lossy(filter).into_owned();
@@ -202,11 +204,13 @@ fn collect_stream_stats(doc: &Document) -> StreamStats {
 
 // ── Overview (default mode) ──────────────────────────────────────────
 
-pub(crate) fn print_overview(writer: &mut impl Write, doc: &Document) {
+pub(crate) fn print_overview(writer: &mut impl Write, doc: &Document, decode: bool) {
+    let pages = doc.get_pages();
+
     // Basic counts
     wln!(writer, "PDF Version: {}", doc.version);
     wln!(writer, "Objects:     {}", doc.objects.len());
-    wln!(writer, "Pages:       {}", doc.get_pages().len());
+    wln!(writer, "Pages:       {}", pages.len());
 
     let encrypted = is_encrypted(doc);
     wln!(writer, "Encrypted:   {}", if encrypted { "yes" } else { "no" });
@@ -225,7 +229,7 @@ pub(crate) fn print_overview(writer: &mut impl Write, doc: &Document) {
     }
 
     // Validation summary
-    let report = validate_pdf(doc);
+    let report = validate_pdf(doc, Some(&pages));
     wln!(writer);
     if report.issues.is_empty() {
         wln!(writer, "Validation:  no issues found");
@@ -233,12 +237,7 @@ pub(crate) fn print_overview(writer: &mut impl Write, doc: &Document) {
         wln!(writer, "Validation:  {} errors, {} warnings, {} info",
             report.error_count, report.warn_count, report.info_count);
         for issue in &report.issues {
-            let prefix = match issue.level {
-                crate::validate::ValidationLevel::Error => "[ERROR]",
-                crate::validate::ValidationLevel::Warn => "[WARN]",
-                crate::validate::ValidationLevel::Info => "[INFO]",
-            };
-            wln!(writer, "  {} {}", prefix, issue.message);
+            wln!(writer, "  {} {}", issue.level.bracket_label(), issue.message);
         }
     }
 
@@ -252,12 +251,14 @@ pub(crate) fn print_overview(writer: &mut impl Write, doc: &Document) {
     }
 
     // Stream stats
-    let stats = collect_stream_stats(doc);
+    let stats = collect_stream_stats(doc, decode);
 
     wln!(writer);
-    if stats.total_decoded_bytes != stats.total_bytes {
+    if let Some(decoded) = stats.total_decoded_bytes
+        && decoded != stats.total_bytes
+    {
         wln!(writer, "Streams:     {} ({} bytes raw, {} decoded)",
-            stats.count, stats.total_bytes, stats.total_decoded_bytes);
+            stats.count, stats.total_bytes, decoded);
     } else {
         wln!(writer, "Streams:     {} ({} bytes)", stats.count, stats.total_bytes);
     }
@@ -308,17 +309,14 @@ pub(crate) fn print_overview(writer: &mut impl Write, doc: &Document) {
     wln!(writer, "\nTip: Use --json for machine-readable output.");
 }
 
-pub(crate) fn print_overview_json(writer: &mut impl Write, doc: &Document) {
+pub(crate) fn print_overview_json(writer: &mut impl Write, doc: &Document, decode: bool) {
+    let pages = doc.get_pages();
     let (info, catalog) = metadata_info(doc);
-    let report = validate_pdf(doc);
+    let report = validate_pdf(doc, Some(&pages));
 
     let issues: Vec<Value> = report.issues.iter().map(|i| {
         json!({
-            "level": match i.level {
-                crate::validate::ValidationLevel::Error => "error",
-                crate::validate::ValidationLevel::Warn => "warning",
-                crate::validate::ValidationLevel::Info => "info",
-            },
+            "level": i.level.label(),
             "message": i.message,
         })
     }).collect();
@@ -330,7 +328,7 @@ pub(crate) fn print_overview_json(writer: &mut impl Write, doc: &Document) {
         .collect();
 
     // Stream stats
-    let stats = collect_stream_stats(doc);
+    let stats = collect_stream_stats(doc, decode);
 
     let filter_counts_json: serde_json::Map<String, Value> = stats.filter_counts.iter()
         .map(|(name, count)| (name.clone(), json!(count)))
@@ -351,7 +349,7 @@ pub(crate) fn print_overview_json(writer: &mut impl Write, doc: &Document) {
     let output = json!({
         "version": doc.version,
         "object_count": doc.objects.len(),
-        "page_count": doc.get_pages().len(),
+        "page_count": pages.len(),
         "encrypted": encrypted,
         "info": info,
         "catalog": catalog,
@@ -369,6 +367,7 @@ pub(crate) fn print_overview_json(writer: &mut impl Write, doc: &Document) {
             "filters": filter_counts_json,
             "largest": largest_json,
         },
+
         "features": {
             "bookmark_count": bookmark_count,
             "form_field_count": form_fields.len(),
@@ -648,7 +647,7 @@ mod tests {
     #[test]
     fn overview_shows_encrypted_via_encryption_state() {
         let doc = build_minimal_encrypted_doc();
-        let out = output_of(|w| print_overview(w, &doc));
+        let out = output_of(|w| print_overview(w, &doc, false));
         assert!(out.contains("Encrypted:   yes"),
             "Should detect encryption via encryption_state, got: {}", out);
     }
@@ -656,7 +655,7 @@ mod tests {
     #[test]
     fn overview_json_shows_encrypted_via_encryption_state() {
         let doc = build_minimal_encrypted_doc();
-        let out = output_of(|w| print_overview_json(w, &doc));
+        let out = output_of(|w| print_overview_json(w, &doc, false));
         let parsed: Value = serde_json::from_str(&out).expect("Should be valid JSON");
         assert_eq!(parsed["encrypted"], true,
             "JSON should show encrypted: true via encryption_state");
@@ -677,7 +676,7 @@ mod tests {
         doc.objects.insert((2, 0), Object::Dictionary(catalog));
         doc.trailer.set(b"Root", Object::Reference((2, 0)));
 
-        let out = output_of(|w| print_overview(w, &doc));
+        let out = output_of(|w| print_overview(w, &doc, false));
         assert!(out.contains("Encrypted:   no"),
             "Should show not encrypted, got: {}", out);
     }
@@ -697,7 +696,7 @@ mod tests {
         doc.objects.insert((3, 0), Object::Integer(42));
         doc.trailer.set(b"Root", Object::Reference((2, 0)));
 
-        let out = output_of(|w| print_overview(w, &doc));
+        let out = output_of(|w| print_overview(w, &doc, false));
         assert!(out.contains("Types:"), "Should show type breakdown, got: {}", out);
         assert!(out.contains("dictionaries"), "Should list dictionaries");
         assert!(out.contains("integers"), "Should list integers");
@@ -721,13 +720,13 @@ mod tests {
         doc.objects.insert((3, 0), Object::Stream(stream));
         doc.trailer.set(b"Root", Object::Reference((2, 0)));
 
-        let out = output_of(|w| print_overview(w, &doc));
+        let out = output_of(|w| print_overview(w, &doc, false));
         assert!(out.contains("Filters:"), "Should show filter histogram, got: {}", out);
         assert!(out.contains("FlateDecode"), "Should list FlateDecode");
     }
 
     #[test]
-    fn overview_shows_decoded_bytes_when_different() {
+    fn overview_skips_decoded_bytes_by_default() {
         let mut doc = Document::new();
         let mut pages = Dictionary::new();
         pages.set(b"Type", Object::Name(b"Pages".to_vec()));
@@ -745,9 +744,10 @@ mod tests {
         doc.objects.insert((3, 0), Object::Stream(stream));
         doc.trailer.set(b"Root", Object::Reference((2, 0)));
 
-        let out = output_of(|w| print_overview(w, &doc));
-        assert!(out.contains("raw"), "Should show 'raw' when decoded differs from raw, got: {}", out);
-        assert!(out.contains("decoded"), "Should show 'decoded' when decoded differs from raw");
+        let out = output_of(|w| print_overview(w, &doc, false));
+        // Overview no longer decodes streams, so should show raw bytes only
+        assert!(!out.contains("decoded"), "Overview should not decode streams by default, got: {}", out);
+        assert!(out.contains("bytes"), "Should still show byte count");
     }
 
     #[test]
@@ -768,10 +768,10 @@ mod tests {
         doc.objects.insert((3, 0), Object::Stream(stream));
         doc.trailer.set(b"Root", Object::Reference((2, 0)));
 
-        let out = output_of(|w| print_overview_json(w, &doc));
+        let out = output_of(|w| print_overview_json(w, &doc, false));
         let parsed: Value = serde_json::from_str(&out).expect("Valid JSON");
         assert!(parsed.get("object_types").is_some(), "Should have object_types");
-        assert!(parsed["streams"]["total_decoded_bytes"].is_number(), "Should have decoded bytes");
+        assert!(parsed["streams"]["total_decoded_bytes"].is_null(), "Decoded bytes should be null when not decoding");
         assert!(parsed["streams"]["filters"].is_object(), "Should have filters");
         assert!(parsed["streams"]["largest"].is_array(), "Should have largest");
     }

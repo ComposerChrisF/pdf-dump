@@ -13,6 +13,24 @@ pub(crate) enum ValidationLevel {
     Info,
 }
 
+impl ValidationLevel {
+    pub fn label(&self) -> &'static str {
+        match self {
+            ValidationLevel::Error => "error",
+            ValidationLevel::Warn => "warning",
+            ValidationLevel::Info => "info",
+        }
+    }
+
+    pub fn bracket_label(&self) -> &'static str {
+        match self {
+            ValidationLevel::Error => "[ERROR]",
+            ValidationLevel::Warn => "[WARN]",
+            ValidationLevel::Info => "[INFO]",
+        }
+    }
+}
+
 pub(crate) struct ValidationIssue {
     pub level: ValidationLevel,
     pub message: String,
@@ -25,19 +43,23 @@ pub(crate) struct ValidationReport {
     pub info_count: usize,
 }
 
-pub(crate) fn validate_pdf(doc: &Document) -> ValidationReport {
+pub(crate) fn validate_pdf(doc: &Document, cached_pages: Option<&BTreeMap<u32, ObjectId>>) -> ValidationReport {
     let mut issues = Vec::new();
     let xref_ids = collect_xref_stream_ids(doc);
-    let pages = doc.get_pages();
+    let owned_pages;
+    let pages = match cached_pages {
+        Some(p) => p,
+        None => { owned_pages = doc.get_pages(); &owned_pages }
+    };
 
     check_broken_references(doc, &xref_ids, &mut issues);
     check_unreachable_objects(doc, &xref_ids, &mut issues);
-    check_required_keys(doc, &pages, &mut issues);
+    check_required_keys(doc, pages, &mut issues);
     check_stream_lengths(doc, &mut issues);
-    check_page_tree(doc, &pages, &mut issues);
-    check_content_stream_syntax(doc, &pages, &mut issues);
+    check_page_tree(doc, pages, &mut issues);
+    check_content_stream_syntax(doc, pages, &mut issues);
     check_font_requirements(doc, &mut issues);
-    check_page_tree_cycles(doc, &pages, &mut issues);
+    check_page_tree_cycles(doc, pages, &mut issues);
     check_names_tree_structure(doc, &mut issues);
     check_duplicate_objects(doc, &mut issues);
 
@@ -437,7 +459,7 @@ fn check_duplicate_objects(doc: &Document, issues: &mut Vec<ValidationIssue>) {
 }
 
 pub(crate) fn print_validation(writer: &mut impl Write, doc: &Document) {
-    let report = validate_pdf(doc);
+    let report = validate_pdf(doc, None);
 
     if report.issues.is_empty() {
         wln!(writer, "[OK] No issues found.");
@@ -445,27 +467,18 @@ pub(crate) fn print_validation(writer: &mut impl Write, doc: &Document) {
     }
 
     for issue in &report.issues {
-        let prefix = match issue.level {
-            ValidationLevel::Error => "[ERROR]",
-            ValidationLevel::Warn => "[WARN]",
-            ValidationLevel::Info => "[INFO]",
-        };
-        wln!(writer, "{} {}", prefix, issue.message);
+        wln!(writer, "{} {}", issue.level.bracket_label(), issue.message);
     }
     wln!(writer, "\nSummary: {} errors, {} warnings, {} info",
         report.error_count, report.warn_count, report.info_count);
 }
 
 pub(crate) fn validation_json_value(doc: &Document) -> Value {
-    let report = validate_pdf(doc);
+    let report = validate_pdf(doc, None);
 
     let issues: Vec<Value> = report.issues.iter().map(|i| {
         json!({
-            "level": match i.level {
-                ValidationLevel::Error => "error",
-                ValidationLevel::Warn => "warning",
-                ValidationLevel::Info => "info",
-            },
+            "level": i.level.label(),
             "message": i.message,
         })
     }).collect();
@@ -500,7 +513,7 @@ mod tests {
     #[test]
     fn validate_empty_doc_reports_missing_root() {
         let doc = Document::new();
-        let report = validate_pdf(&doc);
+        let report = validate_pdf(&doc, None);
         assert!(report.issues.iter().any(|i|
             i.level == ValidationLevel::Error && i.message.contains("Trailer missing /Root")));
     }
@@ -940,7 +953,7 @@ mod tests {
         // Missing root → error
         // Object 1 unreachable → warn
 
-        let report = validate_pdf(&doc);
+        let report = validate_pdf(&doc, None);
         assert!(report.error_count > 0); // missing root + broken ref
         assert!(report.warn_count > 0);  // unreachable
         assert_eq!(report.error_count + report.warn_count + report.info_count,
@@ -1264,7 +1277,7 @@ mod tests {
         let xref_stream = Stream::new(xref_dict, vec![]);
         doc.objects.insert((202, 0), Object::Stream(xref_stream));
 
-        let report = validate_pdf(&doc);
+        let report = validate_pdf(&doc, None);
 
         // Should NOT report broken ref from XRef stream
         assert!(!report.issues.iter().any(|i|

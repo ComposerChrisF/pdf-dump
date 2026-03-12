@@ -137,9 +137,9 @@ fn dispatch_default(
             page_info::print_page_info(out, doc, spec);
         }
     } else if config.json {
-        summary::print_overview_json(out, doc);
+        summary::print_overview_json(out, doc, config.decode);
     } else {
-        summary::print_overview(out, doc);
+        summary::print_overview(out, doc, config.decode);
     }
 }
 

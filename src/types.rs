@@ -205,7 +205,7 @@ pub(crate) struct Args {
     #[arg(long, help_heading = "Modifiers")]
     pub json: bool,
 
-    /// Decode and print the content of streams
+    /// Decode and print the content of streams (also enables decoded byte counts in overview)
     #[arg(long, help_heading = "Modifiers")]
     pub decode: bool,
 

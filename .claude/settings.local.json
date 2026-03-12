@@ -23,7 +23,9 @@
       "Bash(git rm:*)",
       "Bash(git stash:*)",
       "Bash(pdf-merger:*)",
-      "Bash(version-manager --bump-patch)"
+      "Bash(version-manager --bump-patch)",
+      "Bash(/tmp/test_analysis.txt:*)",
+      "Read(//tmp/**)"
     ]
   }
 }

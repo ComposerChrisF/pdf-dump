@@ -24,7 +24,7 @@ The tool is split across ~28 source files in `src/`. The flow is:
    - `Default` → page info if `--page` present, else overview
    - `Standalone(mode)` → extract-stream, object, inspect, or search
    - `Combined(modes)` → single mode calls directly; multiple modes get section headers (text) or are wrapped in a JSON object (json). Uses `*_json_value()` functions for JSON output.
-4. **Overview mode** (default, no flags) — Shows PDF version, page/object counts, encryption status, all /Info fields (Producer, Creator, Title, Author, Subject, Keywords, CreationDate, ModDate), catalog properties (PageLayout, PageMode, Lang), validation summary, stream stats (raw + decoded bytes, filter histogram, largest streams), object type breakdown, and feature indicators (bookmarks, forms, layers, embedded files, page labels, tagged structure). Encryption detection checks both the trailer `/Encrypt` key and XRef stream objects (fallback for post-decryption state where lopdf strips the trailer key).
+4. **Overview mode** (default, no flags) — Shows PDF version, page/object counts, encryption status, all /Info fields (Producer, Creator, Title, Author, Subject, Keywords, CreationDate, ModDate), catalog properties (PageLayout, PageMode, Lang), validation summary, stream stats (raw bytes, filter histogram, largest streams), object type breakdown, and feature indicators (bookmarks, forms, layers, embedded files, page labels, tagged structure). Decoded byte counts and compression ratio are only shown when `--decode` is passed (to avoid decompressing every stream in large PDFs). Encryption detection checks both the trailer `/Encrypt` key and XRef stream objects (fallback for post-decryption state where lopdf strips the trailer key).
 5. **Extract mode** (`--extract-stream`) — Pulls a single stream object by ID number (generation 0 assumed), decodes it, and writes raw bytes to a file.
 6. **Object mode** (`--object N` or `--object 1,5,10-15`) — Prints one or more objects without following references. Accepts single numbers, comma-separated lists, ranges, or mixed. Shows type label in header. `--deref` expands references inline.
 7. **List mode** (`--list`) — One-line-per-object table showing kind, /Type, and details.
@@ -74,7 +74,7 @@ The tool is split across ~28 source files in `src/`. The flow is:
 **Modifier flags** (combine with modes):
 - `--json` — Structured JSON output (works with every mode)
 - `--page N` or `--page N-M` — Filter to specific pages (with `--text`, `--annotations`, `--operators`, `--find-text`); shows page info when used alone
-- `--decode` — Decompress and display stream contents (works with `--object`, `--search`). Supports FlateDecode, ASCII85Decode, ASCIIHexDecode, LZWDecode, RunLengthDecode filter pipelines.
+- `--decode` — Decompress and display stream contents (works with `--object`, `--search`). In overview mode, enables decoded byte counts and compression ratio in stream stats. Supports FlateDecode, ASCII85Decode, ASCIIHexDecode, LZWDecode, RunLengthDecode filter pipelines.
 - `--truncate <N>` — Limit binary stream output to N bytes
 - `--hex` — Display binary streams as hex dump (use with `--decode`)
 - `--depth N` — Limit traversal depth (0 = root only). Works with tree, tags, and JSON modes.
