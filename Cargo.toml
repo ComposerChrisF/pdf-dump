@@ -10,7 +10,7 @@ homepage = "https://github.com/ComposerChrisF/pdf-dump"
 readme = "README.md"
 keywords = ["pdf", "cli", "inspect", "debug"]
 categories = ["command-line-utilities"]
-exclude = ["CLAUDE.md", "DEBUGGING_WITH_PDF_DUMP.md", ".github/", "feature-plan-*", "docs/"]
+exclude = ["CLAUDE.md", "DEBUGGING_WITH_PDF_DUMP.md", ".github/", ".claude/", "feature-plan-*", "docs/"]
 
 [lib]
 name = "pdf_dump"
