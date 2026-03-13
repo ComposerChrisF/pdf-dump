@@ -209,7 +209,7 @@ pub(crate) struct Args {
     #[arg(long, help_heading = "Modifiers")]
     pub decode: bool,
 
-    /// Inline-expand references to show target summaries (use with --object or --page)
+    /// Inline-expand references to show target summaries (use with --object)
     #[arg(long, help_heading = "Modifiers")]
     pub deref: bool,
 

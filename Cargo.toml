@@ -2,6 +2,15 @@
 name = "pdf-dump"
 version = "0.12.5"
 edition = "2024"
+rust-version = "1.91"
+description = "CLI tool for inspecting and debugging PDF internals"
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/ComposerChrisF/pdf-dump"
+homepage = "https://github.com/ComposerChrisF/pdf-dump"
+readme = "README.md"
+keywords = ["pdf", "cli", "inspect", "debug"]
+categories = ["command-line-utilities"]
+exclude = ["CLAUDE.md", "DEBUGGING_WITH_PDF_DUMP.md", ".github/", "feature-plan-*", "docs/"]
 
 [lib]
 name = "pdf_dump"
