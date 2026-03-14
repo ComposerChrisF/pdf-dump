@@ -112,7 +112,7 @@ FlateDecode, ASCII85Decode, ASCIIHexDecode, LZWDecode, RunLengthDecode — appli
 
 ## Acknowledgments
 
-Built on [lopdf](https://github.com/nickel-org/lopdf), a pure-Rust PDF parsing library.
+Built on [lopdf](https://github.com/J-F-Liu/lopdf), a pure-Rust PDF parsing library.
 
 ## Related Projects
 
