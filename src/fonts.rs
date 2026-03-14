@@ -1,8 +1,10 @@
 use lopdf::{Document, Object, ObjectId};
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 use std::io::Write;
 
-use crate::helpers::{resolve_dict, resolve_array, obj_to_string_lossy, name_to_string, find_font_file_id};
+use crate::helpers::{
+    find_font_file_id, name_to_string, obj_to_string_lossy, resolve_array, resolve_dict,
+};
 
 pub(crate) struct FontInfo {
     pub object_id: ObjectId,
@@ -20,7 +22,13 @@ pub(crate) struct FontInfo {
 
 pub(crate) fn collect_fonts(doc: &Document) -> Vec<FontInfo> {
     let font_subtypes: &[&[u8]] = &[
-        b"Type1", b"TrueType", b"Type0", b"CIDFontType0", b"CIDFontType2", b"MMType1", b"Type3",
+        b"Type1",
+        b"TrueType",
+        b"Type0",
+        b"CIDFontType0",
+        b"CIDFontType2",
+        b"MMType1",
+        b"Type3",
     ];
 
     let mut fonts = Vec::new();
@@ -40,17 +48,25 @@ pub(crate) fn collect_fonts(doc: &Document) -> Vec<FontInfo> {
                 }
             });
 
-        if !is_font { continue; }
+        if !is_font {
+            continue;
+        }
 
-        let base_font = dict.get(b"BaseFont").ok()
+        let base_font = dict
+            .get(b"BaseFont")
+            .ok()
             .and_then(name_to_string)
             .unwrap_or_else(|| "-".to_string());
 
-        let subtype = dict.get(b"Subtype").ok()
+        let subtype = dict
+            .get(b"Subtype")
+            .ok()
             .and_then(name_to_string)
             .unwrap_or_else(|| "-".to_string());
 
-        let encoding = dict.get(b"Encoding").ok()
+        let encoding = dict
+            .get(b"Encoding")
+            .ok()
             .map(|v| match v {
                 Object::Name(n) => String::from_utf8_lossy(n).into_owned(),
                 Object::Reference(id) => format!("{} {} R", id.0, id.1),
@@ -61,31 +77,42 @@ pub(crate) fn collect_fonts(doc: &Document) -> Vec<FontInfo> {
         // Check FontDescriptor for embedded font files
         let embedded = find_font_file_id(doc, dict);
 
-        let to_unicode = dict.get(b"ToUnicode").ok()
+        let to_unicode = dict
+            .get(b"ToUnicode")
+            .ok()
             .and_then(|v| v.as_reference().ok());
 
-        let first_char = dict.get(b"FirstChar").ok()
-            .and_then(|v| v.as_i64().ok());
+        let first_char = dict.get(b"FirstChar").ok().and_then(|v| v.as_i64().ok());
 
-        let last_char = dict.get(b"LastChar").ok()
-            .and_then(|v| v.as_i64().ok());
+        let last_char = dict.get(b"LastChar").ok().and_then(|v| v.as_i64().ok());
 
-        let widths_len = dict.get(b"Widths").ok()
-            .and_then(|v| match v {
-                Object::Array(arr) => Some(arr.len()),
-                Object::Reference(id) => doc.get_object(*id).ok().and_then(|o| {
-                    if let Object::Array(arr) = o { Some(arr.len()) } else { None }
-                }),
-                _ => None,
-            });
+        let widths_len = dict.get(b"Widths").ok().and_then(|v| match v {
+            Object::Array(arr) => Some(arr.len()),
+            Object::Reference(id) => doc.get_object(*id).ok().and_then(|o| {
+                if let Object::Array(arr) = o {
+                    Some(arr.len())
+                } else {
+                    None
+                }
+            }),
+            _ => None,
+        });
 
         let encoding_differences = extract_encoding_differences(doc, dict);
         let cid_system_info = extract_cid_system_info(doc, dict);
 
         fonts.push(FontInfo {
-            object_id: obj_id, base_font, subtype, encoding, embedded,
-            to_unicode, first_char, last_char, widths_len,
-            encoding_differences, cid_system_info,
+            object_id: obj_id,
+            base_font,
+            subtype,
+            encoding,
+            embedded,
+            to_unicode,
+            first_char,
+            last_char,
+            widths_len,
+            encoding_differences,
+            cid_system_info,
         });
     }
 
@@ -93,7 +120,10 @@ pub(crate) fn collect_fonts(doc: &Document) -> Vec<FontInfo> {
     fonts
 }
 
-pub(crate) fn extract_encoding_differences(doc: &Document, dict: &lopdf::Dictionary) -> Option<String> {
+pub(crate) fn extract_encoding_differences(
+    doc: &Document,
+    dict: &lopdf::Dictionary,
+) -> Option<String> {
     let enc_obj = dict.get(b"Encoding").ok()?;
     let enc_dict = resolve_dict(doc, enc_obj)?;
     let diffs = enc_dict.get(b"Differences").ok()?;
@@ -104,7 +134,9 @@ pub(crate) fn extract_encoding_differences(doc: &Document, dict: &lopdf::Diction
     let mut total_names = 0usize;
     for item in arr {
         match item {
-            Object::Integer(n) => { current_code = Some(*n); }
+            Object::Integer(n) => {
+                current_code = Some(*n);
+            }
             Object::Name(n) => {
                 total_names += 1;
                 if parts.len() < 5 {
@@ -150,13 +182,19 @@ pub(crate) fn extract_cid_system_info(doc: &Document, dict: &lopdf::Dictionary) 
     let csi = cid_font_dict.get(b"CIDSystemInfo").ok()?;
     let csi_dict = resolve_dict(doc, csi)?;
 
-    let registry = csi_dict.get(b"Registry").ok()
+    let registry = csi_dict
+        .get(b"Registry")
+        .ok()
         .and_then(obj_to_string_lossy)
         .unwrap_or_else(|| "?".to_string());
-    let ordering = csi_dict.get(b"Ordering").ok()
+    let ordering = csi_dict
+        .get(b"Ordering")
+        .ok()
         .and_then(obj_to_string_lossy)
         .unwrap_or_else(|| "?".to_string());
-    let supplement = csi_dict.get(b"Supplement").ok()
+    let supplement = csi_dict
+        .get(b"Supplement")
+        .ok()
         .and_then(|v| v.as_i64().ok())
         .map(|n| n.to_string())
         .unwrap_or_else(|| "?".to_string());
@@ -167,21 +205,45 @@ pub(crate) fn extract_cid_system_info(doc: &Document, dict: &lopdf::Dictionary) 
 pub(crate) fn print_fonts(writer: &mut impl Write, doc: &Document) {
     let fonts = collect_fonts(doc);
     wln!(writer, "{} fonts found\n", fonts.len());
-    wln!(writer, "  {:>4}  {:<30} {:<14} {:<18} Embedded", "Obj#", "BaseFont", "Subtype", "Encoding");
+    wln!(
+        writer,
+        "  {:>4}  {:<30} {:<14} {:<18} Embedded",
+        "Obj#",
+        "BaseFont",
+        "Subtype",
+        "Encoding"
+    );
     for f in &fonts {
         let embedded_str = match f.embedded {
             Some(id) => format!("yes ({})", id.0),
             None => "no".to_string(),
         };
-        wln!(writer, "  {:>4}  {:<30} {:<14} {:<18} {}", f.object_id.0, f.base_font, f.subtype, f.encoding, embedded_str);
+        wln!(
+            writer,
+            "  {:>4}  {:<30} {:<14} {:<18} {}",
+            f.object_id.0,
+            f.base_font,
+            f.subtype,
+            f.encoding,
+            embedded_str
+        );
         // Diagnostic details
         if let Some(id) = f.to_unicode {
             wln!(writer, "          ToUnicode: {} 0 R", id.0);
         }
         if f.first_char.is_some() || f.last_char.is_some() || f.widths_len.is_some() {
-            let fc = f.first_char.map(|n| n.to_string()).unwrap_or_else(|| "-".to_string());
-            let lc = f.last_char.map(|n| n.to_string()).unwrap_or_else(|| "-".to_string());
-            let wl = f.widths_len.map(|n| n.to_string()).unwrap_or_else(|| "-".to_string());
+            let fc = f
+                .first_char
+                .map(|n| n.to_string())
+                .unwrap_or_else(|| "-".to_string());
+            let lc = f
+                .last_char
+                .map(|n| n.to_string())
+                .unwrap_or_else(|| "-".to_string());
+            let wl = f
+                .widths_len
+                .map(|n| n.to_string())
+                .unwrap_or_else(|| "-".to_string());
             wln!(writer, "          CharRange: {}-{}, Widths: {}", fc, lc, wl);
         }
         if let Some(ref diffs) = f.encoding_differences {
@@ -195,39 +257,42 @@ pub(crate) fn print_fonts(writer: &mut impl Write, doc: &Document) {
 
 pub(crate) fn fonts_json_value(doc: &Document) -> Value {
     let fonts = collect_fonts(doc);
-    let items: Vec<Value> = fonts.iter().map(|f| {
-        let mut obj = json!({
-            "object_number": f.object_id.0,
-            "generation": f.object_id.1,
-            "base_font": f.base_font,
-            "subtype": f.subtype,
-            "encoding": f.encoding,
-        });
-        if let Some(id) = f.embedded {
-            obj["embedded"] = json!({"object_number": id.0, "generation": id.1});
-        } else {
-            obj["embedded"] = json!(null);
-        }
-        if let Some(id) = f.to_unicode {
-            obj["to_unicode"] = json!({"object_number": id.0, "generation": id.1});
-        }
-        if let Some(fc) = f.first_char {
-            obj["first_char"] = json!(fc);
-        }
-        if let Some(lc) = f.last_char {
-            obj["last_char"] = json!(lc);
-        }
-        if let Some(wl) = f.widths_len {
-            obj["widths_count"] = json!(wl);
-        }
-        if let Some(ref diffs) = f.encoding_differences {
-            obj["encoding_differences"] = json!(diffs);
-        }
-        if let Some(ref csi) = f.cid_system_info {
-            obj["cid_system_info"] = json!(csi);
-        }
-        obj
-    }).collect();
+    let items: Vec<Value> = fonts
+        .iter()
+        .map(|f| {
+            let mut obj = json!({
+                "object_number": f.object_id.0,
+                "generation": f.object_id.1,
+                "base_font": f.base_font,
+                "subtype": f.subtype,
+                "encoding": f.encoding,
+            });
+            if let Some(id) = f.embedded {
+                obj["embedded"] = json!({"object_number": id.0, "generation": id.1});
+            } else {
+                obj["embedded"] = json!(null);
+            }
+            if let Some(id) = f.to_unicode {
+                obj["to_unicode"] = json!({"object_number": id.0, "generation": id.1});
+            }
+            if let Some(fc) = f.first_char {
+                obj["first_char"] = json!(fc);
+            }
+            if let Some(lc) = f.last_char {
+                obj["last_char"] = json!(lc);
+            }
+            if let Some(wl) = f.widths_len {
+                obj["widths_count"] = json!(wl);
+            }
+            if let Some(ref diffs) = f.encoding_differences {
+                obj["encoding_differences"] = json!(diffs);
+            }
+            if let Some(ref csi) = f.cid_system_info {
+                obj["cid_system_info"] = json!(csi);
+            }
+            obj
+        })
+        .collect();
     json!({
         "font_count": items.len(),
         "fonts": items,
@@ -241,15 +306,14 @@ pub(crate) fn print_fonts_json(writer: &mut impl Write, doc: &Document) {
     writeln!(writer, "{}", json_pretty(&output)).unwrap();
 }
 
-
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::test_utils::*;
+    use lopdf::Object;
     use lopdf::{Dictionary, Stream};
     use pretty_assertions::assert_eq;
-    use serde_json::{Value};
-    use lopdf::Object;
+    use serde_json::Value;
 
     #[test]
     fn collect_fonts_finds_typed_font() {
@@ -696,10 +760,14 @@ mod tests {
         let mut doc = Document::new();
         let mut enc = Dictionary::new();
         enc.set("Type", Object::Name(b"Encoding".to_vec()));
-        enc.set("Differences", Object::Array(vec![
-            Object::Integer(32), Object::Name(b"space".to_vec()),
-            Object::Name(b"exclam".to_vec()),
-        ]));
+        enc.set(
+            "Differences",
+            Object::Array(vec![
+                Object::Integer(32),
+                Object::Name(b"space".to_vec()),
+                Object::Name(b"exclam".to_vec()),
+            ]),
+        );
         let mut font = Dictionary::new();
         font.set("Type", Object::Name(b"Font".to_vec()));
         font.set("Subtype", Object::Name(b"Type1".to_vec()));
@@ -738,8 +806,14 @@ mod tests {
     fn fonts_cid_system_info() {
         let mut doc = Document::new();
         let mut csi = Dictionary::new();
-        csi.set("Registry", Object::String(b"Adobe".to_vec(), lopdf::StringFormat::Literal));
-        csi.set("Ordering", Object::String(b"Identity".to_vec(), lopdf::StringFormat::Literal));
+        csi.set(
+            "Registry",
+            Object::String(b"Adobe".to_vec(), lopdf::StringFormat::Literal),
+        );
+        csi.set(
+            "Ordering",
+            Object::String(b"Identity".to_vec(), lopdf::StringFormat::Literal),
+        );
         csi.set("Supplement", Object::Integer(0));
         let mut cid_font = Dictionary::new();
         cid_font.set("Type", Object::Name(b"Font".to_vec()));
@@ -752,12 +826,18 @@ mod tests {
         type0.set("Type", Object::Name(b"Font".to_vec()));
         type0.set("Subtype", Object::Name(b"Type0".to_vec()));
         type0.set("BaseFont", Object::Name(b"NotoSans".to_vec()));
-        type0.set("DescendantFonts", Object::Array(vec![Object::Reference((2, 0))]));
+        type0.set(
+            "DescendantFonts",
+            Object::Array(vec![Object::Reference((2, 0))]),
+        );
         doc.objects.insert((1, 0), Object::Dictionary(type0));
 
         let fonts = collect_fonts(&doc);
         let type0_font = fonts.iter().find(|f| f.subtype == "Type0").unwrap();
-        assert_eq!(type0_font.cid_system_info.as_deref(), Some("Adobe-Identity-0"));
+        assert_eq!(
+            type0_font.cid_system_info.as_deref(),
+            Some("Adobe-Identity-0")
+        );
     }
 
     #[test]
@@ -811,8 +891,14 @@ mod tests {
     fn fonts_json_cid_system_info() {
         let mut doc = Document::new();
         let mut csi = Dictionary::new();
-        csi.set("Registry", Object::String(b"Adobe".to_vec(), lopdf::StringFormat::Literal));
-        csi.set("Ordering", Object::String(b"Japan1".to_vec(), lopdf::StringFormat::Literal));
+        csi.set(
+            "Registry",
+            Object::String(b"Adobe".to_vec(), lopdf::StringFormat::Literal),
+        );
+        csi.set(
+            "Ordering",
+            Object::String(b"Japan1".to_vec(), lopdf::StringFormat::Literal),
+        );
         csi.set("Supplement", Object::Integer(6));
         let mut cid_font = Dictionary::new();
         cid_font.set("Subtype", Object::Name(b"CIDFontType0".to_vec()));
@@ -824,14 +910,24 @@ mod tests {
         type0.set("Type", Object::Name(b"Font".to_vec()));
         type0.set("Subtype", Object::Name(b"Type0".to_vec()));
         type0.set("BaseFont", Object::Name(b"KozMin".to_vec()));
-        type0.set("DescendantFonts", Object::Array(vec![Object::Reference((2, 0))]));
+        type0.set(
+            "DescendantFonts",
+            Object::Array(vec![Object::Reference((2, 0))]),
+        );
         doc.objects.insert((1, 0), Object::Dictionary(type0));
 
         let out = output_of(|w| print_fonts_json(w, &doc));
         let parsed: Value = serde_json::from_str(&out).unwrap();
-        let type0_json = parsed["fonts"].as_array().unwrap()
-            .iter().find(|f| f["subtype"] == "Type0").unwrap();
-        assert_eq!(type0_json["cid_system_info"].as_str().unwrap(), "Adobe-Japan1-6");
+        let type0_json = parsed["fonts"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|f| f["subtype"] == "Type0")
+            .unwrap();
+        assert_eq!(
+            type0_json["cid_system_info"].as_str().unwrap(),
+            "Adobe-Japan1-6"
+        );
     }
 
     #[test]
@@ -873,9 +969,10 @@ mod tests {
     fn fonts_encoding_differences_via_reference() {
         let mut doc = Document::new();
         let mut enc = Dictionary::new();
-        enc.set("Differences", Object::Array(vec![
-            Object::Integer(65), Object::Name(b"A".to_vec()),
-        ]));
+        enc.set(
+            "Differences",
+            Object::Array(vec![Object::Integer(65), Object::Name(b"A".to_vec())]),
+        );
         doc.objects.insert((10, 0), Object::Dictionary(enc));
 
         let mut font = Dictionary::new();
@@ -889,5 +986,4 @@ mod tests {
         let diffs = fonts[0].encoding_differences.as_ref().unwrap();
         assert!(diffs.contains("65=/A"));
     }
-
 }

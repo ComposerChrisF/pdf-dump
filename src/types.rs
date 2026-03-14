@@ -110,7 +110,6 @@ pub(crate) struct Args {
     pub file: PathBuf,
 
     // ── Overview ──────────────────────────────────────────────────────
-
     /// Print a one-line listing of every object
     #[arg(short = 's', long, help_heading = "Overview")]
     pub list: bool,
@@ -120,7 +119,6 @@ pub(crate) struct Args {
     pub validate: bool,
 
     // ── Content ──────────────────────────────────────────────────────
-
     /// Extract readable text from page content streams
     #[arg(long, help_heading = "Content")]
     pub text: bool,
@@ -142,7 +140,6 @@ pub(crate) struct Args {
     pub images: bool,
 
     // ── Structure ────────────────────────────────────────────────────
-
     /// Show the object graph as an indented reference tree
     #[arg(long, help_heading = "Structure")]
     pub tree: bool,
@@ -156,7 +153,6 @@ pub(crate) struct Args {
     pub tags: bool,
 
     // ── Annotations & Forms ──────────────────────────────────────────
-
     /// Show annotations with link targets (all pages, or filtered with --page)
     #[arg(long, help_heading = "Annotations & Forms")]
     pub annotations: bool,
@@ -166,7 +162,6 @@ pub(crate) struct Args {
     pub forms: bool,
 
     // ── Objects ──────────────────────────────────────────────────────
-
     /// Print one or more objects by number (e.g. 5, 1,5,12, 3-7, 1,5,10-15)
     #[arg(short = 'o', long, help_heading = "Objects")]
     pub object: Option<String>,
@@ -180,13 +175,11 @@ pub(crate) struct Args {
     pub search: Option<String>,
 
     // ── Detail ────────────────────────────────────────────────────────
-
     /// Show detail: security, embedded, labels, layers
     #[arg(long, value_enum, help_heading = "Detail")]
     pub detail: Vec<DetailSub>,
 
     // ── Export ────────────────────────────────────────────────────────
-
     /// Extract a stream object to a file
     #[arg(long, requires = "output", help_heading = "Export")]
     pub extract_stream: Option<u32>,
@@ -196,7 +189,6 @@ pub(crate) struct Args {
     pub output: Option<PathBuf>,
 
     // ── Modifiers ────────────────────────────────────────────────────
-
     /// Dump the object tree for a specific page or range (e.g. 1, 1-3)
     #[arg(long, help_heading = "Modifiers")]
     pub page: Option<String>,
@@ -264,17 +256,39 @@ impl Args {
         if self.list && self.search.is_none() {
             doc_modes.push(DocMode::List);
         }
-        if self.validate { doc_modes.push(DocMode::Validate); }
-        if self.fonts { doc_modes.push(DocMode::Fonts); }
-        if self.images { doc_modes.push(DocMode::Images); }
-        if self.forms { doc_modes.push(DocMode::Forms); }
-        if self.bookmarks { doc_modes.push(DocMode::Bookmarks); }
-        if self.annotations { doc_modes.push(DocMode::Annotations); }
-        if self.text { doc_modes.push(DocMode::Text); }
-        if self.operators { doc_modes.push(DocMode::Operators); }
-        if self.tags { doc_modes.push(DocMode::Tags); }
-        if self.tree { doc_modes.push(DocMode::Tree); }
-        if self.find_text.is_some() { doc_modes.push(DocMode::FindText); }
+        if self.validate {
+            doc_modes.push(DocMode::Validate);
+        }
+        if self.fonts {
+            doc_modes.push(DocMode::Fonts);
+        }
+        if self.images {
+            doc_modes.push(DocMode::Images);
+        }
+        if self.forms {
+            doc_modes.push(DocMode::Forms);
+        }
+        if self.bookmarks {
+            doc_modes.push(DocMode::Bookmarks);
+        }
+        if self.annotations {
+            doc_modes.push(DocMode::Annotations);
+        }
+        if self.text {
+            doc_modes.push(DocMode::Text);
+        }
+        if self.operators {
+            doc_modes.push(DocMode::Operators);
+        }
+        if self.tags {
+            doc_modes.push(DocMode::Tags);
+        }
+        if self.tree {
+            doc_modes.push(DocMode::Tree);
+        }
+        if self.find_text.is_some() {
+            doc_modes.push(DocMode::FindText);
+        }
         for sub in &self.detail {
             doc_modes.push(DocMode::Detail(*sub));
         }
@@ -319,9 +333,13 @@ pub(crate) enum PageSpec {
 impl PageSpec {
     pub fn parse(s: &str) -> Result<PageSpec, String> {
         if let Some((start_s, end_s)) = s.split_once('-') {
-            let start: u32 = start_s.trim().parse()
+            let start: u32 = start_s
+                .trim()
+                .parse()
                 .map_err(|_| format!("Invalid page range start: '{}'", start_s.trim()))?;
-            let end: u32 = end_s.trim().parse()
+            let end: u32 = end_s
+                .trim()
+                .parse()
                 .map_err(|_| format!("Invalid page range end: '{}'", end_s.trim()))?;
             if start == 0 || end == 0 {
                 return Err("Page numbers must be >= 1".to_string());
@@ -331,7 +349,9 @@ impl PageSpec {
             }
             Ok(PageSpec::Range(start, end))
         } else {
-            let num: u32 = s.trim().parse()
+            let num: u32 = s
+                .trim()
+                .parse()
                 .map_err(|_| format!("Invalid page number: '{}'", s.trim()))?;
             if num == 0 {
                 return Err("Page numbers must be >= 1".to_string());
@@ -359,18 +379,25 @@ pub(crate) fn parse_object_spec(s: &str) -> Result<Vec<u32>, String> {
     let mut result = Vec::new();
     for part in s.split(',') {
         let part = part.trim();
-        if part.is_empty() { continue; }
+        if part.is_empty() {
+            continue;
+        }
         if let Some((start_s, end_s)) = part.split_once('-') {
-            let start: u32 = start_s.trim().parse()
+            let start: u32 = start_s
+                .trim()
+                .parse()
                 .map_err(|_| format!("Invalid object number: '{}'", start_s.trim()))?;
-            let end: u32 = end_s.trim().parse()
+            let end: u32 = end_s
+                .trim()
+                .parse()
                 .map_err(|_| format!("Invalid object number: '{}'", end_s.trim()))?;
             if start > end {
                 return Err(format!("Invalid object range: {} > {}", start, end));
             }
             result.extend(start..=end);
         } else {
-            let num: u32 = part.parse()
+            let num: u32 = part
+                .parse()
                 .map_err(|_| format!("Invalid object number: '{}'", part))?;
             result.push(num);
         }
@@ -383,11 +410,10 @@ pub(crate) fn parse_object_spec(s: &str) -> Result<Vec<u32>, String> {
     Ok(result)
 }
 
-
 #[cfg(test)]
 mod tests {
     use super::*;
-    
+
     use pretty_assertions::assert_eq;
 
     #[test]
@@ -590,7 +616,10 @@ mod tests {
         assert_eq!(DocMode::Tree.label(), "Tree");
         assert_eq!(DocMode::FindText.label(), "Find Text");
         assert_eq!(DocMode::Detail(DetailSub::Security).label(), "Security");
-        assert_eq!(DocMode::Detail(DetailSub::Embedded).label(), "Embedded Files");
+        assert_eq!(
+            DocMode::Detail(DetailSub::Embedded).label(),
+            "Embedded Files"
+        );
         assert_eq!(DocMode::Detail(DetailSub::Labels).label(), "Page Labels");
         assert_eq!(DocMode::Detail(DetailSub::Layers).label(), "Layers");
     }
@@ -610,7 +639,10 @@ mod tests {
         assert_eq!(DocMode::Tree.json_key(), "tree");
         assert_eq!(DocMode::FindText.json_key(), "find_text");
         assert_eq!(DocMode::Detail(DetailSub::Security).json_key(), "security");
-        assert_eq!(DocMode::Detail(DetailSub::Embedded).json_key(), "embedded_files");
+        assert_eq!(
+            DocMode::Detail(DetailSub::Embedded).json_key(),
+            "embedded_files"
+        );
         assert_eq!(DocMode::Detail(DetailSub::Labels).json_key(), "page_labels");
         assert_eq!(DocMode::Detail(DetailSub::Layers).json_key(), "layers");
     }
@@ -635,7 +667,10 @@ mod tests {
                 assert_eq!(modes.len(), 1);
                 assert_eq!(modes[0], DocMode::Fonts);
             }
-            other => panic!("Expected Combined, got {:?}", std::mem::discriminant(&other)),
+            other => panic!(
+                "Expected Combined, got {:?}",
+                std::mem::discriminant(&other)
+            ),
         }
     }
 
@@ -650,7 +685,10 @@ mod tests {
                 assert!(modes.contains(&DocMode::Fonts));
                 assert!(modes.contains(&DocMode::Images));
             }
-            other => panic!("Expected Combined, got {:?}", std::mem::discriminant(&other)),
+            other => panic!(
+                "Expected Combined, got {:?}",
+                std::mem::discriminant(&other)
+            ),
         }
     }
 
@@ -686,7 +724,10 @@ mod tests {
         let args = Args::parse_from(["pdf-dump", "test.pdf", "--search", "Type=Font"]);
         let mode = args.resolve_mode().unwrap();
         match mode {
-            ResolvedMode::Standalone(StandaloneMode::Search { expr, list_modifier }) => {
+            ResolvedMode::Standalone(StandaloneMode::Search {
+                expr,
+                list_modifier,
+            }) => {
                 assert_eq!(expr, "Type=Font");
                 assert!(!list_modifier);
             }
@@ -699,7 +740,11 @@ mod tests {
         use clap::Parser;
         let args = Args::parse_from(["pdf-dump", "test.pdf", "--object", "5", "--fonts"]);
         match args.resolve_mode() {
-            Err(err) => assert!(err.contains("Cannot combine standalone mode"), "got: {}", err),
+            Err(err) => assert!(
+                err.contains("Cannot combine standalone mode"),
+                "got: {}",
+                err
+            ),
             Ok(_) => panic!("Expected error for standalone + doc mode"),
         }
     }
@@ -721,7 +766,10 @@ mod tests {
         let args = Args::parse_from(["pdf-dump", "test.pdf", "--search", "Type=Font", "--list"]);
         let mode = args.resolve_mode().unwrap();
         match mode {
-            ResolvedMode::Standalone(StandaloneMode::Search { expr, list_modifier }) => {
+            ResolvedMode::Standalone(StandaloneMode::Search {
+                expr,
+                list_modifier,
+            }) => {
                 assert_eq!(expr, "Type=Font");
                 assert!(list_modifier);
             }
@@ -739,7 +787,10 @@ mod tests {
                 assert_eq!(modes.len(), 1);
                 assert_eq!(modes[0], DocMode::List);
             }
-            other => panic!("Expected Combined([List]), got {:?}", std::mem::discriminant(&other)),
+            other => panic!(
+                "Expected Combined([List]), got {:?}",
+                std::mem::discriminant(&other)
+            ),
         }
     }
 
@@ -753,7 +804,10 @@ mod tests {
                 assert_eq!(modes.len(), 1);
                 assert_eq!(modes[0], DocMode::Detail(DetailSub::Security));
             }
-            other => panic!("Expected Combined([Detail(Security)]), got {:?}", std::mem::discriminant(&other)),
+            other => panic!(
+                "Expected Combined([Detail(Security)]), got {:?}",
+                std::mem::discriminant(&other)
+            ),
         }
     }
 
@@ -761,10 +815,8 @@ mod tests {
     fn resolve_mode_multiple_details() {
         use clap::Parser;
         let args = Args::parse_from([
-            "pdf-dump", "test.pdf",
-            "--detail", "security",
-            "--detail", "embedded",
-            "--detail", "layers",
+            "pdf-dump", "test.pdf", "--detail", "security", "--detail", "embedded", "--detail",
+            "layers",
         ]);
         let mode = args.resolve_mode().unwrap();
         match mode {
@@ -774,17 +826,17 @@ mod tests {
                 assert!(modes.contains(&DocMode::Detail(DetailSub::Embedded)));
                 assert!(modes.contains(&DocMode::Detail(DetailSub::Layers)));
             }
-            other => panic!("Expected Combined with 3 details, got {:?}", std::mem::discriminant(&other)),
+            other => panic!(
+                "Expected Combined with 3 details, got {:?}",
+                std::mem::discriminant(&other)
+            ),
         }
     }
 
     #[test]
     fn resolve_mode_detail_mixed_with_doc_modes() {
         use clap::Parser;
-        let args = Args::parse_from([
-            "pdf-dump", "test.pdf",
-            "--fonts", "--detail", "labels",
-        ]);
+        let args = Args::parse_from(["pdf-dump", "test.pdf", "--fonts", "--detail", "labels"]);
         let mode = args.resolve_mode().unwrap();
         match mode {
             ResolvedMode::Combined(modes) => {
@@ -792,7 +844,10 @@ mod tests {
                 assert!(modes.contains(&DocMode::Fonts));
                 assert!(modes.contains(&DocMode::Detail(DetailSub::Labels)));
             }
-            other => panic!("Expected Combined with Fonts + Detail, got {:?}", std::mem::discriminant(&other)),
+            other => panic!(
+                "Expected Combined with Fonts + Detail, got {:?}",
+                std::mem::discriminant(&other)
+            ),
         }
     }
 
@@ -800,12 +855,29 @@ mod tests {
     fn resolve_mode_all_doc_modes_at_once() {
         use clap::Parser;
         let args = Args::parse_from([
-            "pdf-dump", "test.pdf",
-            "--list", "--validate", "--fonts", "--images", "--forms",
-            "--bookmarks", "--annotations", "--text", "--operators",
-            "--tags", "--tree", "--find-text", "hello",
-            "--detail", "security", "--detail", "embedded",
-            "--detail", "labels", "--detail", "layers",
+            "pdf-dump",
+            "test.pdf",
+            "--list",
+            "--validate",
+            "--fonts",
+            "--images",
+            "--forms",
+            "--bookmarks",
+            "--annotations",
+            "--text",
+            "--operators",
+            "--tags",
+            "--tree",
+            "--find-text",
+            "hello",
+            "--detail",
+            "security",
+            "--detail",
+            "embedded",
+            "--detail",
+            "labels",
+            "--detail",
+            "layers",
         ]);
         let mode = args.resolve_mode().unwrap();
         match mode {
@@ -813,7 +885,10 @@ mod tests {
                 // 12 base doc modes + 4 detail modes = 16
                 assert_eq!(modes.len(), 16);
             }
-            other => panic!("Expected Combined with 16 modes, got {:?}", std::mem::discriminant(&other)),
+            other => panic!(
+                "Expected Combined with 16 modes, got {:?}",
+                std::mem::discriminant(&other)
+            ),
         }
     }
 
@@ -821,9 +896,12 @@ mod tests {
     fn resolve_mode_standalone_extract_stream() {
         use clap::Parser;
         let args = Args::parse_from([
-            "pdf-dump", "test.pdf",
-            "--extract-stream", "12",
-            "--output", "out.bin",
+            "pdf-dump",
+            "test.pdf",
+            "--extract-stream",
+            "12",
+            "--output",
+            "out.bin",
         ]);
         let mode = args.resolve_mode().unwrap();
         match mode {
@@ -953,13 +1031,16 @@ mod tests {
             DocMode::Detail(DetailSub::Security),
         ];
         modes.sort();
-        assert_eq!(modes, vec![
-            DocMode::List,
-            DocMode::Fonts,
-            DocMode::Tree,
-            DocMode::Detail(DetailSub::Security),
-            DocMode::Detail(DetailSub::Layers),
-        ]);
+        assert_eq!(
+            modes,
+            vec![
+                DocMode::List,
+                DocMode::Fonts,
+                DocMode::Tree,
+                DocMode::Detail(DetailSub::Security),
+                DocMode::Detail(DetailSub::Layers),
+            ]
+        );
     }
 
     // ── DetailSub ordering ─────────────────────────────────────────
@@ -980,12 +1061,15 @@ mod tests {
             DetailSub::Embedded,
         ];
         subs.sort();
-        assert_eq!(subs, vec![
-            DetailSub::Security,
-            DetailSub::Embedded,
-            DetailSub::Labels,
-            DetailSub::Layers,
-        ]);
+        assert_eq!(
+            subs,
+            vec![
+                DetailSub::Security,
+                DetailSub::Embedded,
+                DetailSub::Labels,
+                DetailSub::Layers,
+            ]
+        );
     }
 
     #[test]
@@ -1101,9 +1185,11 @@ mod tests {
                 assert_eq!(modes.len(), 1);
                 assert_eq!(modes[0], DocMode::FindText);
             }
-            other => panic!("Expected Combined([FindText]), got {:?}", std::mem::discriminant(&other)),
+            other => panic!(
+                "Expected Combined([FindText]), got {:?}",
+                std::mem::discriminant(&other)
+            ),
         }
         assert_eq!(args.find_text, Some("hello".to_string()));
     }
-
 }

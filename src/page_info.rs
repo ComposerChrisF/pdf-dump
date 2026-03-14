@@ -1,12 +1,12 @@
 use lopdf::{Document, Object, ObjectId};
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 use std::io::Write;
 
-use crate::types::PageSpec;
-use crate::resources::{collect_page_resources, resource_entries_to_json, PageResources};
-use crate::annotations::{collect_annotations, AnnotationInfo};
-use crate::text::extract_text_from_page_with_warnings;
+use crate::annotations::{AnnotationInfo, collect_annotations};
 use crate::helpers::{self, format_dict_value};
+use crate::resources::{PageResources, collect_page_resources, resource_entries_to_json};
+use crate::text::extract_text_from_page_with_warnings;
+use crate::types::PageSpec;
 
 struct PageInfo {
     page_num: u32,
@@ -42,59 +42,89 @@ fn is_garbled_text(text: &str, warnings: &[String]) -> bool {
         }
     }
     let non_ws_count = text.chars().filter(|c| !c.is_whitespace()).count();
-    if non_ws_count == 0 { return false; }
-    let non_printable = text.chars()
+    if non_ws_count == 0 {
+        return false;
+    }
+    let non_printable = text
+        .chars()
         .filter(|c| !c.is_whitespace())
         .filter(|&c| !('\x20'..='\x7E').contains(&c))
         .count();
     non_printable * 2 > non_ws_count
 }
 
-fn collect_page_info(doc: &Document, page_num: u32, page_id: ObjectId, annots: &[&AnnotationInfo]) -> PageInfo {
+fn collect_page_info(
+    doc: &Document,
+    page_num: u32,
+    page_id: ObjectId,
+    annots: &[&AnnotationInfo],
+) -> PageInfo {
     let page_dict = match doc.get_object(page_id) {
         Ok(Object::Dictionary(d)) => d,
-        _ => return PageInfo {
-            page_num, object_id: page_id,
-            media_box: "-".to_string(), crop_box: None, rotate: None,
-            font_names: vec![], image_count: 0, ext_gstate_count: 0,
-            annotation_count: 0, annotation_subtypes: vec![],
-            content_stream_count: 0, content_stream_bytes: 0,
-            text_preview: String::new(),
-            text_extractable: true,
-            full_text: String::new(),
-            warnings: vec![],
-            resources: PageResources {
-                fonts: vec![], xobjects: vec![], ext_gstate: vec![], color_spaces: vec![],
-            },
-        },
+        _ => {
+            return PageInfo {
+                page_num,
+                object_id: page_id,
+                media_box: "-".to_string(),
+                crop_box: None,
+                rotate: None,
+                font_names: vec![],
+                image_count: 0,
+                ext_gstate_count: 0,
+                annotation_count: 0,
+                annotation_subtypes: vec![],
+                content_stream_count: 0,
+                content_stream_bytes: 0,
+                text_preview: String::new(),
+                text_extractable: true,
+                full_text: String::new(),
+                warnings: vec![],
+                resources: PageResources {
+                    fonts: vec![],
+                    xobjects: vec![],
+                    ext_gstate: vec![],
+                    color_spaces: vec![],
+                },
+            };
+        }
     };
 
-    let media_box = page_dict.get(b"MediaBox").ok()
+    let media_box = page_dict
+        .get(b"MediaBox")
+        .ok()
         .map(format_dict_value)
         .unwrap_or_else(|| "-".to_string());
 
-    let crop_box = page_dict.get(b"CropBox").ok()
-        .map(format_dict_value);
+    let crop_box = page_dict.get(b"CropBox").ok().map(format_dict_value);
 
-    let rotate = page_dict.get(b"Rotate").ok()
-        .and_then(|v| v.as_i64().ok());
+    let rotate = page_dict.get(b"Rotate").ok().and_then(|v| v.as_i64().ok());
 
     // Resources
     let res = collect_page_resources(doc, page_id);
-    let font_names: Vec<String> = res.fonts.iter().map(|f| {
-        // Extract base font name from detail (e.g. "Helvetica, Type1" -> "Helvetica")
-        f.detail.split(',').next().unwrap_or("?").trim().to_string()
-    }).collect();
-    let image_count = res.xobjects.iter().filter(|x| x.detail.starts_with("Image")).count();
+    let font_names: Vec<String> = res
+        .fonts
+        .iter()
+        .map(|f| {
+            // Extract base font name from detail (e.g. "Helvetica, Type1" -> "Helvetica")
+            f.detail.split(',').next().unwrap_or("?").trim().to_string()
+        })
+        .collect();
+    let image_count = res
+        .xobjects
+        .iter()
+        .filter(|x| x.detail.starts_with("Image"))
+        .count();
     let ext_gstate_count = res.ext_gstate.len();
 
     // Annotations (pre-filtered by caller)
     let annotation_count = annots.len();
-    let mut subtype_counts: std::collections::BTreeMap<&str, usize> = std::collections::BTreeMap::new();
+    let mut subtype_counts: std::collections::BTreeMap<&str, usize> =
+        std::collections::BTreeMap::new();
     for a in annots {
         *subtype_counts.entry(a.subtype.as_str()).or_insert(0usize) += 1;
     }
-    let annotation_subtypes: Vec<(String, usize)> = subtype_counts.into_iter()
+    let annotation_subtypes: Vec<(String, usize)> = subtype_counts
+        .into_iter()
         .map(|(k, v)| (k.to_string(), v))
         .collect();
 
@@ -116,7 +146,10 @@ fn collect_page_info(doc: &Document, page_num: u32, page_id: ObjectId, annots: &
     let text_result = extract_text_from_page_with_warnings(doc, page_id);
     let garbled = is_garbled_text(&text_result.text, &text_result.warnings);
     let (text_preview, text_extractable) = if garbled {
-        ("(text not extractable \u{2014} fonts lack Unicode mappings)".to_string(), false)
+        (
+            "(text not extractable \u{2014} fonts lack Unicode mappings)".to_string(),
+            false,
+        )
     } else if text_result.text.len() > 200 {
         let truncated: String = text_result.text.chars().take(200).collect();
         (format!("{}...", truncated.trim()), true)
@@ -125,11 +158,18 @@ fn collect_page_info(doc: &Document, page_num: u32, page_id: ObjectId, annots: &
     };
 
     PageInfo {
-        page_num, object_id: page_id,
-        media_box, crop_box, rotate,
-        font_names, image_count, ext_gstate_count,
-        annotation_count, annotation_subtypes,
-        content_stream_count, content_stream_bytes,
+        page_num,
+        object_id: page_id,
+        media_box,
+        crop_box,
+        rotate,
+        font_names,
+        image_count,
+        ext_gstate_count,
+        annotation_count,
+        annotation_subtypes,
+        content_stream_count,
+        content_stream_bytes,
         text_preview,
         text_extractable,
         full_text: text_result.text,
@@ -141,16 +181,26 @@ fn collect_page_info(doc: &Document, page_num: u32, page_id: ObjectId, annots: &
 pub(crate) fn print_page_info(writer: &mut impl Write, doc: &Document, spec: &PageSpec) {
     let page_list = match helpers::build_page_list(doc, Some(spec)) {
         Ok(list) => list,
-        Err(msg) => { eprintln!("Error: {}", msg); return; }
+        Err(msg) => {
+            eprintln!("Error: {}", msg);
+            return;
+        }
     };
     let all_annots = collect_annotations(doc, Some(spec));
     for (pn, page_id) in &page_list {
         let pn = *pn;
         let page_id = *page_id;
-        let page_annots: Vec<&AnnotationInfo> = all_annots.iter().filter(|a| a.page_num == pn).collect();
+        let page_annots: Vec<&AnnotationInfo> =
+            all_annots.iter().filter(|a| a.page_num == pn).collect();
         let info = collect_page_info(doc, pn, page_id, &page_annots);
 
-        wln!(writer, "Page {} (Object {} {})", info.page_num, info.object_id.0, info.object_id.1);
+        wln!(
+            writer,
+            "Page {} (Object {} {})",
+            info.page_num,
+            info.object_id.0,
+            info.object_id.1
+        );
         wln!(writer, "  MediaBox:     {}", info.media_box);
         if let Some(ref cb) = info.crop_box {
             wln!(writer, "  CropBox:      {}", cb);
@@ -171,14 +221,34 @@ pub(crate) fn print_page_info(writer: &mut impl Write, doc: &Document, spec: &Pa
             }
         }
         if !info.resources.xobjects.is_empty() {
-            let image_count = info.resources.xobjects.iter()
-                .filter(|x| x.detail.starts_with("Image")).count();
+            let image_count = info
+                .resources
+                .xobjects
+                .iter()
+                .filter(|x| x.detail.starts_with("Image"))
+                .count();
             let form_count = info.resources.xobjects.len() - image_count;
             let mut label_parts = Vec::new();
-            if image_count > 0 { label_parts.push(format!("{} image{}", image_count, if image_count == 1 { "" } else { "s" })); }
-            if form_count > 0 { label_parts.push(format!("{} form{}", form_count, if form_count == 1 { "" } else { "s" })); }
-            wln!(writer, "  XObjects:     {} ({})", info.resources.xobjects.len(),
-                label_parts.join(", "));
+            if image_count > 0 {
+                label_parts.push(format!(
+                    "{} image{}",
+                    image_count,
+                    if image_count == 1 { "" } else { "s" }
+                ));
+            }
+            if form_count > 0 {
+                label_parts.push(format!(
+                    "{} form{}",
+                    form_count,
+                    if form_count == 1 { "" } else { "s" }
+                ));
+            }
+            wln!(
+                writer,
+                "  XObjects:     {} ({})",
+                info.resources.xobjects.len(),
+                label_parts.join(", ")
+            );
             for e in &info.resources.xobjects {
                 let obj_str = match e.object_id {
                     Some(id) => format!("obj {}", id.0),
@@ -188,7 +258,11 @@ pub(crate) fn print_page_info(writer: &mut impl Write, doc: &Document, spec: &Pa
             }
         }
         if !info.resources.ext_gstate.is_empty() {
-            wln!(writer, "  ExtGState:    {}", info.resources.ext_gstate.len());
+            wln!(
+                writer,
+                "  ExtGState:    {}",
+                info.resources.ext_gstate.len()
+            );
             for e in &info.resources.ext_gstate {
                 let obj_str = match e.object_id {
                     Some(id) => format!("obj {}", id.0),
@@ -198,7 +272,11 @@ pub(crate) fn print_page_info(writer: &mut impl Write, doc: &Document, spec: &Pa
             }
         }
         if !info.resources.color_spaces.is_empty() {
-            wln!(writer, "  ColorSpaces:  {}", info.resources.color_spaces.len());
+            wln!(
+                writer,
+                "  ColorSpaces:  {}",
+                info.resources.color_spaces.len()
+            );
             for e in &info.resources.color_spaces {
                 if let Some(id) = e.object_id {
                     wln!(writer, "    {:<12} -> obj {} ({})", e.name, id.0, e.detail);
@@ -210,18 +288,32 @@ pub(crate) fn print_page_info(writer: &mut impl Write, doc: &Document, spec: &Pa
 
         // Annotations
         if info.annotation_count > 0 {
-            let breakdown: Vec<String> = info.annotation_subtypes.iter()
+            let breakdown: Vec<String> = info
+                .annotation_subtypes
+                .iter()
                 .map(|(s, c)| format!("{} {}", c, s))
                 .collect();
-            wln!(writer, "  Annotations:  {} ({})", info.annotation_count, breakdown.join(", "));
+            wln!(
+                writer,
+                "  Annotations:  {} ({})",
+                info.annotation_count,
+                breakdown.join(", ")
+            );
         }
 
         // Content streams
         if info.content_stream_count > 0 {
-            wln!(writer, "  Content:      {} stream{}, {} bytes",
+            wln!(
+                writer,
+                "  Content:      {} stream{}, {} bytes",
                 info.content_stream_count,
-                if info.content_stream_count == 1 { "" } else { "s" },
-                info.content_stream_bytes);
+                if info.content_stream_count == 1 {
+                    ""
+                } else {
+                    "s"
+                },
+                info.content_stream_bytes
+            );
         }
 
         // Text preview
@@ -248,10 +340,13 @@ pub(crate) fn page_info_json_value(doc: &Document, spec: &PageSpec) -> Value {
     let mut results = Vec::new();
 
     for &(pn, page_id) in &page_list {
-        let page_annots: Vec<&AnnotationInfo> = all_annots.iter().filter(|a| a.page_num == pn).collect();
+        let page_annots: Vec<&AnnotationInfo> =
+            all_annots.iter().filter(|a| a.page_num == pn).collect();
         let info = collect_page_info(doc, pn, page_id, &page_annots);
 
-        let subtypes: Value = info.annotation_subtypes.iter()
+        let subtypes: Value = info
+            .annotation_subtypes
+            .iter()
             .map(|(s, c)| json!({"subtype": s, "count": c}))
             .collect();
 
@@ -295,7 +390,6 @@ pub(crate) fn print_page_info_json(writer: &mut impl Write, doc: &Document, spec
     let output = page_info_json_value(doc, spec);
     wln!(writer, "{}", helpers::json_pretty(&output));
 }
-
 
 #[cfg(test)]
 mod tests {
@@ -422,10 +516,15 @@ mod tests {
         page.set("Parent", Object::Reference(pages_id));
         page.set("Contents", Object::Reference(content_id));
         page.set("Resources", Object::Dictionary(resources));
-        page.set("MediaBox", Object::Array(vec![
-            Object::Integer(0), Object::Integer(0),
-            Object::Integer(612), Object::Integer(792),
-        ]));
+        page.set(
+            "MediaBox",
+            Object::Array(vec![
+                Object::Integer(0),
+                Object::Integer(0),
+                Object::Integer(612),
+                Object::Integer(792),
+            ]),
+        );
         let page_id = doc.add_object(Object::Dictionary(page));
 
         if let Ok(Object::Dictionary(d)) = doc.get_object_mut(pages_id) {
@@ -463,10 +562,15 @@ mod tests {
         page.set("Type", Object::Name(b"Page".to_vec()));
         page.set("Parent", Object::Reference(pages_id));
         page.set("Contents", Object::Reference(content_id));
-        page.set("MediaBox", Object::Array(vec![
-            Object::Integer(0), Object::Integer(0),
-            Object::Integer(612), Object::Integer(792),
-        ]));
+        page.set(
+            "MediaBox",
+            Object::Array(vec![
+                Object::Integer(0),
+                Object::Integer(0),
+                Object::Integer(612),
+                Object::Integer(792),
+            ]),
+        );
         page.set("Rotate", Object::Integer(90));
         let page_id = doc.add_object(Object::Dictionary(page));
 
@@ -502,14 +606,24 @@ mod tests {
         page.set("Type", Object::Name(b"Page".to_vec()));
         page.set("Parent", Object::Reference(pages_id));
         page.set("Contents", Object::Reference(content_id));
-        page.set("MediaBox", Object::Array(vec![
-            Object::Integer(0), Object::Integer(0),
-            Object::Integer(612), Object::Integer(792),
-        ]));
-        page.set("CropBox", Object::Array(vec![
-            Object::Integer(50), Object::Integer(50),
-            Object::Integer(562), Object::Integer(742),
-        ]));
+        page.set(
+            "MediaBox",
+            Object::Array(vec![
+                Object::Integer(0),
+                Object::Integer(0),
+                Object::Integer(612),
+                Object::Integer(792),
+            ]),
+        );
+        page.set(
+            "CropBox",
+            Object::Array(vec![
+                Object::Integer(50),
+                Object::Integer(50),
+                Object::Integer(562),
+                Object::Integer(742),
+            ]),
+        );
         let page_id = doc.add_object(Object::Dictionary(page));
 
         if let Ok(Object::Dictionary(d)) = doc.get_object_mut(pages_id) {
@@ -540,10 +654,15 @@ mod tests {
         let mut page = Dictionary::new();
         page.set("Type", Object::Name(b"Page".to_vec()));
         page.set("Parent", Object::Reference(pages_id));
-        page.set("MediaBox", Object::Array(vec![
-            Object::Integer(0), Object::Integer(0),
-            Object::Integer(612), Object::Integer(792),
-        ]));
+        page.set(
+            "MediaBox",
+            Object::Array(vec![
+                Object::Integer(0),
+                Object::Integer(0),
+                Object::Integer(612),
+                Object::Integer(792),
+            ]),
+        );
         // No Contents
         let page_id = doc.add_object(Object::Dictionary(page));
 
@@ -572,9 +691,15 @@ mod tests {
 
         let mut annot = Dictionary::new();
         annot.set("Subtype", Object::Name(b"Text".to_vec()));
-        annot.set("Rect", Object::Array(vec![
-            Object::Integer(0), Object::Integer(0), Object::Integer(50), Object::Integer(50),
-        ]));
+        annot.set(
+            "Rect",
+            Object::Array(vec![
+                Object::Integer(0),
+                Object::Integer(0),
+                Object::Integer(50),
+                Object::Integer(50),
+            ]),
+        );
         let annot_id = doc.add_object(Object::Dictionary(annot));
 
         let mut pages_dict = Dictionary::new();
@@ -587,10 +712,15 @@ mod tests {
         page.set("Type", Object::Name(b"Page".to_vec()));
         page.set("Parent", Object::Reference(pages_id));
         page.set("Contents", Object::Reference(content_id));
-        page.set("MediaBox", Object::Array(vec![
-            Object::Integer(0), Object::Integer(0),
-            Object::Integer(612), Object::Integer(792),
-        ]));
+        page.set(
+            "MediaBox",
+            Object::Array(vec![
+                Object::Integer(0),
+                Object::Integer(0),
+                Object::Integer(612),
+                Object::Integer(792),
+            ]),
+        );
         page.set("Annots", Object::Array(vec![Object::Reference(annot_id)]));
         let page_id = doc.add_object(Object::Dictionary(page));
 
@@ -626,10 +756,15 @@ mod tests {
         page.set("Type", Object::Name(b"Page".to_vec()));
         page.set("Parent", Object::Reference(pages_id));
         page.set("Contents", Object::Reference(content_id));
-        page.set("MediaBox", Object::Array(vec![
-            Object::Integer(0), Object::Integer(0),
-            Object::Integer(612), Object::Integer(792),
-        ]));
+        page.set(
+            "MediaBox",
+            Object::Array(vec![
+                Object::Integer(0),
+                Object::Integer(0),
+                Object::Integer(612),
+                Object::Integer(792),
+            ]),
+        );
         page.set("Rotate", Object::Integer(180));
         let page_id = doc.add_object(Object::Dictionary(page));
 
@@ -734,14 +869,19 @@ mod tests {
         page.set("Type", Object::Name(b"Page".to_vec()));
         page.set("Parent", Object::Reference(pages_id));
         // Contents as an array of references
-        page.set("Contents", Object::Array(vec![
-            Object::Reference(c1_id),
-            Object::Reference(c2_id),
-        ]));
-        page.set("MediaBox", Object::Array(vec![
-            Object::Integer(0), Object::Integer(0),
-            Object::Integer(612), Object::Integer(792),
-        ]));
+        page.set(
+            "Contents",
+            Object::Array(vec![Object::Reference(c1_id), Object::Reference(c2_id)]),
+        );
+        page.set(
+            "MediaBox",
+            Object::Array(vec![
+                Object::Integer(0),
+                Object::Integer(0),
+                Object::Integer(612),
+                Object::Integer(792),
+            ]),
+        );
         let page_id = doc.add_object(Object::Dictionary(page));
 
         if let Ok(Object::Dictionary(d)) = doc.get_object_mut(pages_id) {
@@ -754,12 +894,20 @@ mod tests {
         doc.trailer.set("Root", Object::Reference(catalog_id));
 
         let out = output_of(|w| print_page_info(w, &doc, &PageSpec::Single(1)));
-        assert!(out.contains("2 streams"), "Expected '2 streams' in output:\n{}", out);
+        assert!(
+            out.contains("2 streams"),
+            "Expected '2 streams' in output:\n{}",
+            out
+        );
         // Byte total should be the sum of both streams
-        let expected_bytes = b"BT /F1 12 Tf (Hello) Tj ET".len()
-            + b"BT /F1 12 Tf (World) Tj ET".len();
-        assert!(out.contains(&format!("{} bytes", expected_bytes)),
-            "Expected '{} bytes' in output:\n{}", expected_bytes, out);
+        let expected_bytes =
+            b"BT /F1 12 Tf (Hello) Tj ET".len() + b"BT /F1 12 Tf (World) Tj ET".len();
+        assert!(
+            out.contains(&format!("{} bytes", expected_bytes)),
+            "Expected '{} bytes' in output:\n{}",
+            expected_bytes,
+            out
+        );
     }
 
     #[test]
@@ -767,8 +915,11 @@ mod tests {
         let doc = build_two_page_doc(); // has 2 pages
         let val = page_info_json_value(&doc, &PageSpec::Single(99));
         // Should return an error JSON value
-        assert!(val.get("error").is_some(),
-            "Expected 'error' key in JSON for out-of-range page:\n{}", val);
+        assert!(
+            val.get("error").is_some(),
+            "Expected 'error' key in JSON for out-of-range page:\n{}",
+            val
+        );
     }
 
     #[test]
@@ -782,17 +933,29 @@ mod tests {
         // Create a Link annotation
         let mut link_annot = Dictionary::new();
         link_annot.set("Subtype", Object::Name(b"Link".to_vec()));
-        link_annot.set("Rect", Object::Array(vec![
-            Object::Integer(0), Object::Integer(0), Object::Integer(50), Object::Integer(50),
-        ]));
+        link_annot.set(
+            "Rect",
+            Object::Array(vec![
+                Object::Integer(0),
+                Object::Integer(0),
+                Object::Integer(50),
+                Object::Integer(50),
+            ]),
+        );
         let link_id = doc.add_object(Object::Dictionary(link_annot));
 
         // Create a Text annotation
         let mut text_annot = Dictionary::new();
         text_annot.set("Subtype", Object::Name(b"Text".to_vec()));
-        text_annot.set("Rect", Object::Array(vec![
-            Object::Integer(60), Object::Integer(60), Object::Integer(100), Object::Integer(100),
-        ]));
+        text_annot.set(
+            "Rect",
+            Object::Array(vec![
+                Object::Integer(60),
+                Object::Integer(60),
+                Object::Integer(100),
+                Object::Integer(100),
+            ]),
+        );
         let text_id = doc.add_object(Object::Dictionary(text_annot));
 
         let mut pages_dict = Dictionary::new();
@@ -805,14 +968,19 @@ mod tests {
         page.set("Type", Object::Name(b"Page".to_vec()));
         page.set("Parent", Object::Reference(pages_id));
         page.set("Contents", Object::Reference(content_id));
-        page.set("MediaBox", Object::Array(vec![
-            Object::Integer(0), Object::Integer(0),
-            Object::Integer(612), Object::Integer(792),
-        ]));
-        page.set("Annots", Object::Array(vec![
-            Object::Reference(link_id),
-            Object::Reference(text_id),
-        ]));
+        page.set(
+            "MediaBox",
+            Object::Array(vec![
+                Object::Integer(0),
+                Object::Integer(0),
+                Object::Integer(612),
+                Object::Integer(792),
+            ]),
+        );
+        page.set(
+            "Annots",
+            Object::Array(vec![Object::Reference(link_id), Object::Reference(text_id)]),
+        );
         let page_id = doc.add_object(Object::Dictionary(page));
 
         if let Ok(Object::Dictionary(d)) = doc.get_object_mut(pages_id) {
@@ -825,10 +993,26 @@ mod tests {
         doc.trailer.set("Root", Object::Reference(catalog_id));
 
         let out = output_of(|w| print_page_info(w, &doc, &PageSpec::Single(1)));
-        assert!(out.contains("Annotations:"), "Expected annotations line in output:\n{}", out);
-        assert!(out.contains("2"), "Expected annotation count of 2:\n{}", out);
-        assert!(out.contains("Link"), "Expected 'Link' subtype in output:\n{}", out);
-        assert!(out.contains("Text"), "Expected 'Text' subtype in output:\n{}", out);
+        assert!(
+            out.contains("Annotations:"),
+            "Expected annotations line in output:\n{}",
+            out
+        );
+        assert!(
+            out.contains("2"),
+            "Expected annotation count of 2:\n{}",
+            out
+        );
+        assert!(
+            out.contains("Link"),
+            "Expected 'Link' subtype in output:\n{}",
+            out
+        );
+        assert!(
+            out.contains("Text"),
+            "Expected 'Text' subtype in output:\n{}",
+            out
+        );
     }
 
     #[test]
@@ -838,8 +1022,16 @@ mod tests {
         let doc = build_two_page_doc();
         let out = output_of(|w| print_page_info(w, &doc, &PageSpec::Single(1)));
         // Single content stream should say "1 stream" (no 's')
-        assert!(out.contains("1 stream,"), "Expected '1 stream,' in:\n{}", out);
-        assert!(!out.contains("1 streams"), "Should not say '1 streams' in:\n{}", out);
+        assert!(
+            out.contains("1 stream,"),
+            "Expected '1 stream,' in:\n{}",
+            out
+        );
+        assert!(
+            !out.contains("1 streams"),
+            "Should not say '1 streams' in:\n{}",
+            out
+        );
     }
 
     #[test]
@@ -863,10 +1055,15 @@ mod tests {
         page.set("Type", Object::Name(b"Page".to_vec()));
         page.set("Parent", Object::Reference(pages_id));
         page.set("Contents", Object::Reference(content_id));
-        page.set("MediaBox", Object::Array(vec![
-            Object::Integer(0), Object::Integer(0),
-            Object::Integer(612), Object::Integer(792),
-        ]));
+        page.set(
+            "MediaBox",
+            Object::Array(vec![
+                Object::Integer(0),
+                Object::Integer(0),
+                Object::Integer(612),
+                Object::Integer(792),
+            ]),
+        );
         let page_id = doc.add_object(Object::Dictionary(page));
 
         if let Ok(Object::Dictionary(d)) = doc.get_object_mut(pages_id) {
@@ -884,8 +1081,10 @@ mod tests {
         // If text happens to be clean (hex strings may decode differently),
         // text_extractable key won't be present (it's only set when false)
         if page_json.get("text_extractable").is_some() {
-            assert_eq!(page_json["text_extractable"], false,
-                "text_extractable should be false when set");
+            assert_eq!(
+                page_json["text_extractable"], false,
+                "text_extractable should be false when set"
+            );
         }
     }
 
@@ -917,10 +1116,15 @@ mod tests {
         page.set("Type", Object::Name(b"Page".to_vec()));
         page.set("Parent", Object::Reference(pages_id));
         page.set("Resources", Object::Dictionary(resources));
-        page.set("MediaBox", Object::Array(vec![
-            Object::Integer(0), Object::Integer(0),
-            Object::Integer(612), Object::Integer(792),
-        ]));
+        page.set(
+            "MediaBox",
+            Object::Array(vec![
+                Object::Integer(0),
+                Object::Integer(0),
+                Object::Integer(612),
+                Object::Integer(792),
+            ]),
+        );
         let page_id = doc.add_object(Object::Dictionary(page));
 
         if let Ok(Object::Dictionary(d)) = doc.get_object_mut(pages_id) {
@@ -933,9 +1137,17 @@ mod tests {
         doc.trailer.set("Root", Object::Reference(catalog_id));
 
         let out = output_of(|w| print_page_info(w, &doc, &PageSpec::Single(1)));
-        assert!(out.contains("ExtGState:"), "Expected ExtGState section in output:\n{}", out);
+        assert!(
+            out.contains("ExtGState:"),
+            "Expected ExtGState section in output:\n{}",
+            out
+        );
         assert!(out.contains("1"), "Expected ExtGState count of 1:\n{}", out);
-        assert!(out.contains("/GS1"), "Expected /GS1 entry in output:\n{}", out);
+        assert!(
+            out.contains("/GS1"),
+            "Expected /GS1 entry in output:\n{}",
+            out
+        );
 
         // Also verify JSON includes ext_gstate_count
         let val = page_info_json_value(&doc, &PageSpec::Single(1));

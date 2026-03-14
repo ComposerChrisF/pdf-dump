@@ -1,5 +1,5 @@
 use lopdf::{Document, Object, ObjectId};
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 use std::io::Write;
 
 use crate::helpers::{format_color_space, format_filter};
@@ -22,23 +22,37 @@ pub(crate) fn collect_images(doc: &Document) -> Vec<ImageInfo> {
             _ => continue,
         };
 
-        let is_image = dict.get(b"Subtype").ok()
+        let is_image = dict
+            .get(b"Subtype")
+            .ok()
             .is_some_and(|v| v.as_name().ok().is_some_and(|n| n == b"Image"));
-        if !is_image { continue; }
+        if !is_image {
+            continue;
+        }
 
-        let width = dict.get(b"Width").ok()
+        let width = dict
+            .get(b"Width")
+            .ok()
             .and_then(|v| v.as_i64().ok())
             .unwrap_or(0);
-        let height = dict.get(b"Height").ok()
+        let height = dict
+            .get(b"Height")
+            .ok()
             .and_then(|v| v.as_i64().ok())
             .unwrap_or(0);
-        let color_space = dict.get(b"ColorSpace").ok()
+        let color_space = dict
+            .get(b"ColorSpace")
+            .ok()
             .map(|v| format_color_space(v, doc))
             .unwrap_or_else(|| "-".to_string());
-        let bits_per_component = dict.get(b"BitsPerComponent").ok()
+        let bits_per_component = dict
+            .get(b"BitsPerComponent")
+            .ok()
             .and_then(|v| v.as_i64().ok())
             .unwrap_or(0);
-        let filter = dict.get(b"Filter").ok()
+        let filter = dict
+            .get(b"Filter")
+            .ok()
             .map(format_filter)
             .unwrap_or_else(|| "-".to_string());
 
@@ -60,26 +74,49 @@ pub(crate) fn collect_images(doc: &Document) -> Vec<ImageInfo> {
 pub(crate) fn print_images(writer: &mut impl Write, doc: &Document) {
     let images = collect_images(doc);
     wln!(writer, "{} images found\n", images.len());
-    wln!(writer, "  {:>4}  {:>5}  {:>6}  {:<18} {:>3}  {:<18} {:>8}", "Obj#", "Width", "Height", "ColorSpace", "BPC", "Filter", "Size");
+    wln!(
+        writer,
+        "  {:>4}  {:>5}  {:>6}  {:<18} {:>3}  {:<18} {:>8}",
+        "Obj#",
+        "Width",
+        "Height",
+        "ColorSpace",
+        "BPC",
+        "Filter",
+        "Size"
+    );
     for img in &images {
-        wln!(writer, "  {:>4}  {:>5}  {:>6}  {:<18} {:>3}  {:<18} {:>8}", img.object_id.0, img.width, img.height, img.color_space, img.bits_per_component, img.filter, img.size);
+        wln!(
+            writer,
+            "  {:>4}  {:>5}  {:>6}  {:<18} {:>3}  {:<18} {:>8}",
+            img.object_id.0,
+            img.width,
+            img.height,
+            img.color_space,
+            img.bits_per_component,
+            img.filter,
+            img.size
+        );
     }
 }
 
 pub(crate) fn images_json_value(doc: &Document) -> Value {
     let images = collect_images(doc);
-    let items: Vec<Value> = images.iter().map(|img| {
-        json!({
-            "object_number": img.object_id.0,
-            "generation": img.object_id.1,
-            "width": img.width,
-            "height": img.height,
-            "color_space": img.color_space,
-            "bits_per_component": img.bits_per_component,
-            "filter": img.filter,
-            "size": img.size,
+    let items: Vec<Value> = images
+        .iter()
+        .map(|img| {
+            json!({
+                "object_number": img.object_id.0,
+                "generation": img.object_id.1,
+                "width": img.width,
+                "height": img.height,
+                "color_space": img.color_space,
+                "bits_per_component": img.bits_per_component,
+                "filter": img.filter,
+                "size": img.size,
+            })
         })
-    }).collect();
+        .collect();
     json!({
         "image_count": items.len(),
         "images": items,
@@ -93,15 +130,14 @@ pub(crate) fn print_images_json(writer: &mut impl Write, doc: &Document) {
     writeln!(writer, "{}", json_pretty(&output)).unwrap();
 }
 
-
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::test_utils::*;
+    use lopdf::Object;
     use lopdf::{Dictionary, Stream};
     use pretty_assertions::assert_eq;
-    use serde_json::{Value};
-    use lopdf::Object;
+    use serde_json::Value;
 
     #[test]
     fn collect_images_finds_image_stream() {
@@ -145,10 +181,13 @@ mod tests {
         dict.set(b"Subtype", Object::Name(b"Image".to_vec()));
         dict.set(b"Width", Object::Integer(50));
         dict.set(b"Height", Object::Integer(50));
-        dict.set(b"ColorSpace", Object::Array(vec![
-            Object::Name(b"ICCBased".to_vec()),
-            Object::Reference((2, 0)),
-        ]));
+        dict.set(
+            b"ColorSpace",
+            Object::Array(vec![
+                Object::Name(b"ICCBased".to_vec()),
+                Object::Reference((2, 0)),
+            ]),
+        );
         dict.set(b"BitsPerComponent", Object::Integer(8));
         let stream = Stream::new(dict, vec![0; 100]);
         doc.objects.insert((1, 0), Object::Stream(stream));
@@ -165,10 +204,13 @@ mod tests {
         dict.set(b"Subtype", Object::Name(b"Image".to_vec()));
         dict.set(b"Width", Object::Integer(10));
         dict.set(b"Height", Object::Integer(10));
-        dict.set(b"Filter", Object::Array(vec![
-            Object::Name(b"FlateDecode".to_vec()),
-            Object::Name(b"DCTDecode".to_vec()),
-        ]));
+        dict.set(
+            b"Filter",
+            Object::Array(vec![
+                Object::Name(b"FlateDecode".to_vec()),
+                Object::Name(b"DCTDecode".to_vec()),
+            ]),
+        );
         let stream = Stream::new(dict, vec![0; 50]);
         doc.objects.insert((1, 0), Object::Stream(stream));
 
@@ -306,7 +348,8 @@ mod tests {
     fn collect_images_colorspace_as_reference_resolved() {
         let mut doc = Document::new();
         // Color space object that resolves to a name
-        doc.objects.insert((2, 0), Object::Name(b"DeviceGray".to_vec()));
+        doc.objects
+            .insert((2, 0), Object::Name(b"DeviceGray".to_vec()));
 
         let mut dict = Dictionary::new();
         dict.set(b"Subtype", Object::Name(b"Image".to_vec()));
@@ -403,5 +446,4 @@ mod tests {
         assert_eq!(img["object_number"], 1);
         assert_eq!(img["generation"], 0);
     }
-
 }

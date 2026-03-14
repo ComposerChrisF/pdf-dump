@@ -133,7 +133,11 @@ fn extract_stream_object_writes_file() {
         .output()
         .expect("failed to execute binary");
 
-    assert!(output.status.success(), "extract failed: {}", String::from_utf8_lossy(&output.stderr));
+    assert!(
+        output.status.success(),
+        "extract failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
     let extracted = fs::read(&output_path).unwrap();
     assert_eq!(
         extracted,
@@ -166,7 +170,11 @@ fn extract_non_stream_object_fails() {
 
     assert!(!output.status.success());
     let stderr = String::from_utf8_lossy(&output.stderr);
-    assert!(stderr.contains("not a stream"), "Should report non-stream error: {}", stderr);
+    assert!(
+        stderr.contains("not a stream"),
+        "Should report non-stream error: {}",
+        stderr
+    );
 }
 
 #[test]
@@ -185,7 +193,11 @@ fn extract_nonexistent_object_fails() {
 
     assert!(!output.status.success());
     let stderr = String::from_utf8_lossy(&output.stderr);
-    assert!(stderr.contains("not found"), "Should report object not found: {}", stderr);
+    assert!(
+        stderr.contains("not found"),
+        "Should report object not found: {}",
+        stderr
+    );
 }
 
 #[test]
@@ -197,7 +209,11 @@ fn nonexistent_pdf_file_fails_gracefully() {
 
     assert!(!output.status.success());
     let stderr = String::from_utf8_lossy(&output.stderr);
-    assert!(stderr.contains("Error") || stderr.contains("error"), "Should show error for missing file: {}", stderr);
+    assert!(
+        stderr.contains("Error") || stderr.contains("error"),
+        "Should show error for missing file: {}",
+        stderr
+    );
 }
 
 #[test]
@@ -252,7 +268,10 @@ fn help_flag_prints_usage() {
         stdout
     );
     assert!(stdout.contains("--decode"), "Should list --decode flag");
-    assert!(stdout.contains("--extract-stream"), "Should list --extract-stream flag");
+    assert!(
+        stdout.contains("--extract-stream"),
+        "Should list --extract-stream flag"
+    );
 }
 
 #[test]
@@ -322,9 +341,16 @@ fn extract_uncompressed_stream() {
         .output()
         .expect("failed to execute binary");
 
-    assert!(output.status.success(), "Extract failed: {}", String::from_utf8_lossy(&output.stderr));
+    assert!(
+        output.status.success(),
+        "Extract failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
     let extracted = fs::read(&output_path).unwrap();
-    assert_eq!(extracted, raw_bytes, "Uncompressed stream should be extracted as-is");
+    assert_eq!(
+        extracted, raw_bytes,
+        "Uncompressed stream should be extracted as-is"
+    );
 }
 
 #[test]
@@ -363,10 +389,20 @@ fn object_flag_prints_single_object() {
         .expect("failed to execute binary");
 
     let stdout = String::from_utf8_lossy(&output.stdout);
-    assert!(output.status.success(), "--object should succeed: {}", String::from_utf8_lossy(&output.stderr));
-    assert!(stdout.contains("Object 1 0 ("), "Should show object header with type label");
+    assert!(
+        output.status.success(),
+        "--object should succeed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(
+        stdout.contains("Object 1 0 ("),
+        "Should show object header with type label"
+    );
     // Should NOT show trailer or full dump
-    assert!(!stdout.contains("Trailer:"), "Should not show trailer in --object mode");
+    assert!(
+        !stdout.contains("Trailer:"),
+        "Should not show trailer in --object mode"
+    );
 }
 
 #[test]
@@ -379,7 +415,11 @@ fn object_flag_short_form() {
         .output()
         .expect("failed to execute binary");
 
-    assert!(output.status.success(), "-o should work as short form: {}", String::from_utf8_lossy(&output.stderr));
+    assert!(
+        output.status.success(),
+        "-o should work as short form: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
     let stdout = String::from_utf8_lossy(&output.stdout);
     assert!(stdout.contains("Object 1 0 ("));
 }
@@ -395,7 +435,11 @@ fn object_flag_nonexistent_object_fails() {
         .expect("failed to execute binary");
 
     let stderr = String::from_utf8_lossy(&output.stderr);
-    assert!(stderr.contains("not found"), "Should report object not found: {}", stderr);
+    assert!(
+        stderr.contains("not found"),
+        "Should report object not found: {}",
+        stderr
+    );
 }
 
 #[test]
@@ -408,11 +452,18 @@ fn list_flag_shows_object_table() {
         .expect("failed to execute binary");
 
     let stdout = String::from_utf8_lossy(&output.stdout);
-    assert!(output.status.success(), "--list should succeed: {}", String::from_utf8_lossy(&output.stderr));
+    assert!(
+        output.status.success(),
+        "--list should succeed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
     assert!(stdout.contains("PDF"), "Should show PDF version");
     assert!(stdout.contains("objects"), "Should show object count");
     assert!(stdout.contains("Obj#"), "Should show table header");
-    assert!(stdout.contains("Dictionary") || stdout.contains("Stream"), "Should show object kinds");
+    assert!(
+        stdout.contains("Dictionary") || stdout.contains("Stream"),
+        "Should show object kinds"
+    );
 }
 
 #[test]
@@ -429,7 +480,6 @@ fn list_flag_short_form() {
     assert!(stdout.contains("Obj#"));
 }
 
-
 #[test]
 fn page_flag_shows_page_content() {
     let pdf = create_minimal_pdf();
@@ -441,7 +491,11 @@ fn page_flag_shows_page_content() {
         .expect("failed to execute binary");
 
     let stdout = String::from_utf8_lossy(&output.stdout);
-    assert!(output.status.success(), "--page should succeed: {}", String::from_utf8_lossy(&output.stderr));
+    assert!(
+        output.status.success(),
+        "--page should succeed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
     assert!(stdout.contains("Page 1"), "Should show page header");
     assert!(stdout.contains("MediaBox"), "Should show page properties");
 }
@@ -458,8 +512,14 @@ fn page_flag_with_decode_streams_still_works() {
         .expect("failed to execute binary");
 
     let stdout = String::from_utf8_lossy(&output.stdout);
-    assert!(output.status.success(), "--page with --decode should still succeed");
-    assert!(stdout.contains("Page 1"), "Should show page info even with --decode");
+    assert!(
+        output.status.success(),
+        "--page with --decode should still succeed"
+    );
+    assert!(
+        stdout.contains("Page 1"),
+        "Should show page info even with --decode"
+    );
 }
 
 #[test]
@@ -473,7 +533,11 @@ fn page_flag_nonexistent_page_fails() {
         .expect("failed to execute binary");
 
     let stderr = String::from_utf8_lossy(&output.stderr);
-    assert!(stderr.contains("not found"), "Should report page not found: {}", stderr);
+    assert!(
+        stderr.contains("not found"),
+        "Should report page not found: {}",
+        stderr
+    );
 }
 
 #[test]
@@ -489,7 +553,10 @@ fn object_and_page_flags_fails() {
         .expect("failed to execute binary");
 
     // --page is now always a modifier, so --object --page succeeds
-    assert!(output.status.success(), "object + page should succeed (page is a modifier)");
+    assert!(
+        output.status.success(),
+        "object + page should succeed (page is a modifier)"
+    );
 }
 
 // ── JSON mode integration tests ──────────────────────────────────────
@@ -499,7 +566,8 @@ fn json_object_mode() {
     let pdf = create_minimal_pdf();
     let output = Command::new(binary_path())
         .arg(pdf.path())
-        .arg("--object").arg("1")
+        .arg("--object")
+        .arg("1")
         .arg("--json")
         .output()
         .expect("failed to execute binary");
@@ -532,7 +600,8 @@ fn json_page_mode() {
     let pdf = create_minimal_pdf();
     let output = Command::new(binary_path())
         .arg(pdf.path())
-        .arg("--page").arg("1")
+        .arg("--page")
+        .arg("1")
         .arg("--json")
         .output()
         .expect("failed to execute binary");
@@ -550,14 +619,22 @@ fn search_finds_fonts() {
     let pdf = create_minimal_pdf();
     let output = Command::new(binary_path())
         .arg(pdf.path())
-        .arg("--search").arg("Type=Font")
+        .arg("--search")
+        .arg("Type=Font")
         .output()
         .expect("failed to execute binary");
 
     let stdout = String::from_utf8_lossy(&output.stdout);
-    assert!(output.status.success(), "search should succeed: {}", String::from_utf8_lossy(&output.stderr));
+    assert!(
+        output.status.success(),
+        "search should succeed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
     assert!(stdout.contains("Found"), "Should show match count");
-    assert!(stdout.contains("matching objects"), "Should show match summary");
+    assert!(
+        stdout.contains("matching objects"),
+        "Should show match summary"
+    );
 }
 
 #[test]
@@ -565,7 +642,8 @@ fn search_no_matches() {
     let pdf = create_minimal_pdf();
     let output = Command::new(binary_path())
         .arg(pdf.path())
-        .arg("--search").arg("Type=Nonexistent")
+        .arg("--search")
+        .arg("Type=Nonexistent")
         .output()
         .expect("failed to execute binary");
 
@@ -579,7 +657,8 @@ fn search_with_json() {
     let pdf = create_minimal_pdf();
     let output = Command::new(binary_path())
         .arg(pdf.path())
-        .arg("--search").arg("Type=Font")
+        .arg("--search")
+        .arg("Type=Font")
         .arg("--json")
         .output()
         .expect("failed to execute binary");
@@ -597,7 +676,8 @@ fn search_with_list() {
     let pdf = create_minimal_pdf();
     let output = Command::new(binary_path())
         .arg(pdf.path())
-        .arg("--search").arg("Type=Font")
+        .arg("--search")
+        .arg("Type=Font")
         .arg("--list")
         .output()
         .expect("failed to execute binary");
@@ -612,13 +692,18 @@ fn search_bad_expression_fails() {
     let pdf = create_minimal_pdf();
     let output = Command::new(binary_path())
         .arg(pdf.path())
-        .arg("--search").arg("badexpr")
+        .arg("--search")
+        .arg("badexpr")
         .output()
         .expect("failed to execute binary");
 
     assert!(!output.status.success());
     let stderr = String::from_utf8_lossy(&output.stderr);
-    assert!(stderr.contains("Invalid") || stderr.contains("error"), "Should report bad expression: {}", stderr);
+    assert!(
+        stderr.contains("Invalid") || stderr.contains("error"),
+        "Should report bad expression: {}",
+        stderr
+    );
 }
 
 #[test]
@@ -626,13 +711,17 @@ fn search_has_key() {
     let pdf = create_minimal_pdf();
     let output = Command::new(binary_path())
         .arg(pdf.path())
-        .arg("--search").arg("key=MediaBox")
+        .arg("--search")
+        .arg("key=MediaBox")
         .output()
         .expect("failed to execute binary");
 
     let stdout = String::from_utf8_lossy(&output.stdout);
     assert!(output.status.success());
-    assert!(stdout.contains("Found"), "Should find objects with MediaBox");
+    assert!(
+        stdout.contains("Found"),
+        "Should find objects with MediaBox"
+    );
 }
 
 // ── Text mode integration tests ──────────────────────────────────────
@@ -647,7 +736,11 @@ fn text_extracts_hello() {
         .expect("failed to execute binary");
 
     let stdout = String::from_utf8_lossy(&output.stdout);
-    assert!(output.status.success(), "should succeed: {}", String::from_utf8_lossy(&output.stderr));
+    assert!(
+        output.status.success(),
+        "should succeed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
     assert!(stdout.contains("--- Page 1 ---"), "Should show page header");
     assert!(stdout.contains("Hello"), "Should extract Hello text");
 }
@@ -658,7 +751,8 @@ fn text_with_page_filter() {
     let output = Command::new(binary_path())
         .arg(pdf.path())
         .arg("--text")
-        .arg("--page").arg("1")
+        .arg("--page")
+        .arg("1")
         .output()
         .expect("failed to execute binary");
 
@@ -674,12 +768,17 @@ fn text_nonexistent_page_fails() {
     let output = Command::new(binary_path())
         .arg(pdf.path())
         .arg("--text")
-        .arg("--page").arg("999")
+        .arg("--page")
+        .arg("999")
         .output()
         .expect("failed to execute binary");
 
     let stderr = String::from_utf8_lossy(&output.stderr);
-    assert!(stderr.contains("not found"), "Should report page not found: {}", stderr);
+    assert!(
+        stderr.contains("not found"),
+        "Should report page not found: {}",
+        stderr
+    );
 }
 
 #[test]
@@ -712,7 +811,10 @@ fn text_mutually_exclusive_with_list() {
         .expect("failed to execute binary");
 
     // Document-level modes are now combinable
-    assert!(output.status.success(), "text + list should succeed (combinable modes)");
+    assert!(
+        output.status.success(),
+        "text + list should succeed (combinable modes)"
+    );
     let stdout = String::from_utf8_lossy(&output.stdout);
     assert!(stdout.contains("=== Text ==="), "should show Text header");
     assert!(stdout.contains("=== List ==="), "should show List header");
@@ -725,21 +827,31 @@ fn search_with_decode_streams() {
     let pdf = create_minimal_pdf();
     let output = Command::new(binary_path())
         .arg(pdf.path())
-        .arg("--search").arg("Type=Font")
+        .arg("--search")
+        .arg("Type=Font")
         .arg("--decode")
         .output()
         .expect("failed to execute binary");
 
-    assert!(output.status.success(), "--search with --decode should succeed");
+    assert!(
+        output.status.success(),
+        "--search with --decode should succeed"
+    );
 }
 
 /// Create a two-page PDF for multi-page tests.
 fn create_two_page_pdf() -> tempfile::NamedTempFile {
     let mut doc = Document::new();
 
-    let c1 = Stream::new(Dictionary::new(), b"BT\n/F1 12 Tf\n(Page1Text) Tj\nET".to_vec());
+    let c1 = Stream::new(
+        Dictionary::new(),
+        b"BT\n/F1 12 Tf\n(Page1Text) Tj\nET".to_vec(),
+    );
     let c1_id = doc.add_object(Object::Stream(c1));
-    let c2 = Stream::new(Dictionary::new(), b"BT\n/F1 12 Tf\n(Page2Text) Tj\nET".to_vec());
+    let c2 = Stream::new(
+        Dictionary::new(),
+        b"BT\n/F1 12 Tf\n(Page2Text) Tj\nET".to_vec(),
+    );
     let c2_id = doc.add_object(Object::Stream(c2));
 
     let mut font_dict = Dictionary::new();
@@ -764,10 +876,15 @@ fn create_two_page_pdf() -> tempfile::NamedTempFile {
     page1.set("Parent", Object::Reference(pages_id));
     page1.set("Contents", Object::Reference(c1_id));
     page1.set("Resources", Object::Dictionary(resources.clone()));
-    page1.set("MediaBox", Object::Array(vec![
-        Object::Integer(0), Object::Integer(0),
-        Object::Integer(612), Object::Integer(792),
-    ]));
+    page1.set(
+        "MediaBox",
+        Object::Array(vec![
+            Object::Integer(0),
+            Object::Integer(0),
+            Object::Integer(612),
+            Object::Integer(792),
+        ]),
+    );
     let p1_id = doc.add_object(Object::Dictionary(page1));
 
     let mut page2 = Dictionary::new();
@@ -775,17 +892,22 @@ fn create_two_page_pdf() -> tempfile::NamedTempFile {
     page2.set("Parent", Object::Reference(pages_id));
     page2.set("Contents", Object::Reference(c2_id));
     page2.set("Resources", Object::Dictionary(resources));
-    page2.set("MediaBox", Object::Array(vec![
-        Object::Integer(0), Object::Integer(0),
-        Object::Integer(612), Object::Integer(792),
-    ]));
+    page2.set(
+        "MediaBox",
+        Object::Array(vec![
+            Object::Integer(0),
+            Object::Integer(0),
+            Object::Integer(612),
+            Object::Integer(792),
+        ]),
+    );
     let p2_id = doc.add_object(Object::Dictionary(page2));
 
     if let Ok(Object::Dictionary(d)) = doc.get_object_mut(pages_id) {
-        d.set("Kids", Object::Array(vec![
-            Object::Reference(p1_id),
-            Object::Reference(p2_id),
-        ]));
+        d.set(
+            "Kids",
+            Object::Array(vec![Object::Reference(p1_id), Object::Reference(p2_id)]),
+        );
     }
 
     let mut catalog = Dictionary::new();
@@ -805,12 +927,17 @@ fn search_multiple_and_conditions() {
     let pdf = create_minimal_pdf();
     let output = Command::new(binary_path())
         .arg(pdf.path())
-        .arg("--search").arg("Type=Font,Subtype=Type1")
+        .arg("--search")
+        .arg("Type=Font,Subtype=Type1")
         .output()
         .expect("failed to execute binary");
 
     let stdout = String::from_utf8_lossy(&output.stdout);
-    assert!(output.status.success(), "search should succeed: {}", String::from_utf8_lossy(&output.stderr));
+    assert!(
+        output.status.success(),
+        "search should succeed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
     assert!(stdout.contains("Found"), "Should show match count");
     // Our minimal PDF has a Helvetica Type1 font, so it should match
     assert!(stdout.contains("matching objects"));
@@ -821,12 +948,17 @@ fn search_value_expression() {
     let pdf = create_minimal_pdf();
     let output = Command::new(binary_path())
         .arg(pdf.path())
-        .arg("--search").arg("value=Helvetica")
+        .arg("--search")
+        .arg("value=Helvetica")
         .output()
         .expect("failed to execute binary");
 
     let stdout = String::from_utf8_lossy(&output.stdout);
-    assert!(output.status.success(), "search should succeed: {}", String::from_utf8_lossy(&output.stderr));
+    assert!(
+        output.status.success(),
+        "search should succeed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
     assert!(stdout.contains("Found"), "Should show match count");
 }
 
@@ -835,11 +967,15 @@ fn page_zero_fails() {
     let pdf = create_minimal_pdf();
     let output = Command::new(binary_path())
         .arg(pdf.path())
-        .arg("--page").arg("0")
+        .arg("--page")
+        .arg("0")
         .output()
         .expect("failed to execute binary");
 
-    assert!(!output.status.success(), "Page 0 should fail (pages are 1-based)");
+    assert!(
+        !output.status.success(),
+        "Page 0 should fail (pages are 1-based)"
+    );
     let stderr = String::from_utf8_lossy(&output.stderr);
     assert!(
         stderr.contains("not found") || stderr.contains("Error"),
@@ -871,7 +1007,8 @@ fn text_page_2_only() {
     let output = Command::new(binary_path())
         .arg(pdf.path())
         .arg("--text")
-        .arg("--page").arg("2")
+        .arg("--page")
+        .arg("2")
         .output()
         .expect("failed to execute binary");
 
@@ -887,7 +1024,8 @@ fn page_2_dump_shows_page_2() {
     let pdf = create_two_page_pdf();
     let output = Command::new(binary_path())
         .arg(pdf.path())
-        .arg("--page").arg("2")
+        .arg("--page")
+        .arg("2")
         .output()
         .expect("failed to execute binary");
 
@@ -901,7 +1039,8 @@ fn search_multiple_conditions_json() {
     let pdf = create_minimal_pdf();
     let output = Command::new(binary_path())
         .arg(pdf.path())
-        .arg("--search").arg("Type=Font,key=BaseFont")
+        .arg("--search")
+        .arg("Type=Font,key=BaseFont")
         .arg("--json")
         .output()
         .expect("failed to execute binary");
@@ -909,7 +1048,10 @@ fn search_multiple_conditions_json() {
     assert!(output.status.success());
     let stdout = String::from_utf8_lossy(&output.stdout);
     let parsed: serde_json::Value = serde_json::from_str(&stdout).expect("Should be valid JSON");
-    assert!(parsed["match_count"].as_u64().unwrap() >= 1, "Should find font with both conditions");
+    assert!(
+        parsed["match_count"].as_u64().unwrap() >= 1,
+        "Should find font with both conditions"
+    );
 }
 
 #[test]
@@ -917,12 +1059,16 @@ fn object_mode_with_decode_streams() {
     let pdf = create_minimal_pdf();
     let output = Command::new(binary_path())
         .arg(pdf.path())
-        .arg("--object").arg("1")
+        .arg("--object")
+        .arg("1")
         .arg("--decode")
         .output()
         .expect("failed to execute binary");
 
-    assert!(output.status.success(), "--object with --decode should work");
+    assert!(
+        output.status.success(),
+        "--object with --decode should work"
+    );
 }
 
 #[test]
@@ -930,7 +1076,8 @@ fn search_with_list_json() {
     let pdf = create_minimal_pdf();
     let output = Command::new(binary_path())
         .arg(pdf.path())
-        .arg("--search").arg("Type=Font")
+        .arg("--search")
+        .arg("Type=Font")
         .arg("--list")
         .arg("--json")
         .output()
@@ -948,7 +1095,8 @@ fn json_text_with_page_filter() {
     let output = Command::new(binary_path())
         .arg(pdf.path())
         .arg("--text")
-        .arg("--page").arg("1")
+        .arg("--page")
+        .arg("1")
         .arg("--json")
         .output()
         .expect("failed to execute binary");
@@ -1004,7 +1152,8 @@ fn hex_flag_with_decode_streams() {
     let (pdf, obj_num) = create_pdf_with_binary_stream();
     let output = Command::new(binary_path())
         .arg(pdf.path())
-        .arg("--object").arg(obj_num.to_string())
+        .arg("--object")
+        .arg(obj_num.to_string())
         .arg("--decode")
         .arg("--hex")
         .output()
@@ -1021,7 +1170,8 @@ fn hex_flag_json_mode() {
     let (pdf, obj_num) = create_pdf_with_flatedecode_stream();
     let output = Command::new(binary_path())
         .arg(pdf.path())
-        .arg("--object").arg(obj_num.to_string())
+        .arg("--object")
+        .arg(obj_num.to_string())
         .arg("--decode")
         .arg("--hex")
         .arg("--json")
@@ -1080,7 +1230,10 @@ fn fonts_mutually_exclusive() {
         .expect("failed to execute binary");
 
     // Document-level modes are now combinable
-    assert!(output.status.success(), "fonts + list should succeed (combinable modes)");
+    assert!(
+        output.status.success(),
+        "fonts + list should succeed (combinable modes)"
+    );
     let stdout = String::from_utf8_lossy(&output.stdout);
     assert!(stdout.contains("=== Fonts ==="), "should show Fonts header");
     assert!(stdout.contains("=== List ==="), "should show List header");
@@ -1207,9 +1360,15 @@ fn validate_mutually_exclusive() {
         .expect("failed to execute binary");
 
     // Document-level modes are now combinable
-    assert!(output.status.success(), "validate + fonts should succeed (combinable modes)");
+    assert!(
+        output.status.success(),
+        "validate + fonts should succeed (combinable modes)"
+    );
     let stdout = String::from_utf8_lossy(&output.stdout);
-    assert!(stdout.contains("=== Validate ==="), "should show Validate header");
+    assert!(
+        stdout.contains("=== Validate ==="),
+        "should show Validate header"
+    );
     assert!(stdout.contains("=== Fonts ==="), "should show Fonts header");
 }
 
@@ -1225,10 +1384,26 @@ fn tree_shows_reference_tree() {
         .expect("failed to execute binary");
     let stdout = String::from_utf8_lossy(&output.stdout);
     assert!(output.status.success());
-    assert!(stdout.contains("Reference Tree:"), "Should have tree header: {}", stdout);
-    assert!(stdout.contains("Trailer"), "Should show Trailer root: {}", stdout);
-    assert!(stdout.contains("/Root ->"), "Should show /Root reference: {}", stdout);
-    assert!(stdout.contains("Catalog"), "Should identify Catalog: {}", stdout);
+    assert!(
+        stdout.contains("Reference Tree:"),
+        "Should have tree header: {}",
+        stdout
+    );
+    assert!(
+        stdout.contains("Trailer"),
+        "Should show Trailer root: {}",
+        stdout
+    );
+    assert!(
+        stdout.contains("/Root ->"),
+        "Should show /Root reference: {}",
+        stdout
+    );
+    assert!(
+        stdout.contains("Catalog"),
+        "Should identify Catalog: {}",
+        stdout
+    );
 }
 
 #[test]
@@ -1260,7 +1435,11 @@ fn tree_with_depth_limit() {
     let stdout = String::from_utf8_lossy(&output.stdout);
     assert!(output.status.success());
     assert!(stdout.contains("Reference Tree:"));
-    assert!(stdout.contains("depth limit reached"), "Should show depth limit: {}", stdout);
+    assert!(
+        stdout.contains("depth limit reached"),
+        "Should show depth limit: {}",
+        stdout
+    );
 }
 
 #[test]
@@ -1273,7 +1452,10 @@ fn tree_mutually_exclusive() {
         .output()
         .expect("failed to execute binary");
     // Document-level modes are now combinable
-    assert!(output.status.success(), "tree + list should succeed (combinable modes)");
+    assert!(
+        output.status.success(),
+        "tree + list should succeed (combinable modes)"
+    );
     let stdout = String::from_utf8_lossy(&output.stdout);
     assert!(stdout.contains("=== Tree ==="), "should show Tree header");
     assert!(stdout.contains("=== List ==="), "should show List header");
@@ -1282,8 +1464,8 @@ fn tree_mutually_exclusive() {
 // ── P2 gap: filter pipeline integration tests ───────────────────────
 
 fn create_pdf_with_asciihex_flate_pipeline() -> (tempfile::NamedTempFile, u32) {
-    use flate2::write::ZlibEncoder;
     use flate2::Compression;
+    use flate2::write::ZlibEncoder;
     use std::io::Write;
 
     let mut doc = Document::new();
@@ -1297,10 +1479,13 @@ fn create_pdf_with_asciihex_flate_pipeline() -> (tempfile::NamedTempFile, u32) {
     let hex_bytes = format!("{}>", hex_encoded).into_bytes();
 
     let mut stream_dict = Dictionary::new();
-    stream_dict.set("Filter", Object::Array(vec![
-        Object::Name(b"ASCIIHexDecode".to_vec()),
-        Object::Name(b"FlateDecode".to_vec()),
-    ]));
+    stream_dict.set(
+        "Filter",
+        Object::Array(vec![
+            Object::Name(b"ASCIIHexDecode".to_vec()),
+            Object::Name(b"FlateDecode".to_vec()),
+        ]),
+    );
     let stream = Stream::new(stream_dict, hex_bytes);
     let stream_id = doc.add_object(Object::Stream(stream));
 
@@ -1321,16 +1506,28 @@ fn pipeline_asciihex_flate_decode_integration() {
     let (pdf, obj_num) = create_pdf_with_asciihex_flate_pipeline();
     let output = Command::new(binary_path())
         .arg(pdf.path())
-        .arg("--object").arg(obj_num.to_string())
+        .arg("--object")
+        .arg(obj_num.to_string())
         .arg("--decode")
         .output()
         .expect("failed to execute binary");
 
     let stdout = String::from_utf8_lossy(&output.stdout);
     assert!(output.status.success());
-    assert!(stdout.contains("decoded"), "Should show decoded description: {}", stdout);
-    assert!(stdout.contains("Pipeline integration test content"), "Should decode pipeline: {}", stdout);
-    assert!(!stdout.contains("WARNING"), "Successful pipeline should have no warning");
+    assert!(
+        stdout.contains("decoded"),
+        "Should show decoded description: {}",
+        stdout
+    );
+    assert!(
+        stdout.contains("Pipeline integration test content"),
+        "Should decode pipeline: {}",
+        stdout
+    );
+    assert!(
+        !stdout.contains("WARNING"),
+        "Successful pipeline should have no warning"
+    );
 }
 
 #[test]
@@ -1338,7 +1535,8 @@ fn pipeline_asciihex_flate_json() {
     let (pdf, obj_num) = create_pdf_with_asciihex_flate_pipeline();
     let output = Command::new(binary_path())
         .arg(pdf.path())
-        .arg("--object").arg(obj_num.to_string())
+        .arg("--object")
+        .arg(obj_num.to_string())
         .arg("--decode")
         .arg("--json")
         .output()
@@ -1347,8 +1545,14 @@ fn pipeline_asciihex_flate_json() {
     let stdout = String::from_utf8_lossy(&output.stdout);
     assert!(output.status.success());
     let parsed: serde_json::Value = serde_json::from_str(&stdout).unwrap();
-    assert!(parsed["object"]["content"].is_string(), "JSON should have decoded content");
-    assert!(parsed["object"].get("decode_warning").is_none(), "No warning expected for valid pipeline");
+    assert!(
+        parsed["object"]["content"].is_string(),
+        "JSON should have decoded content"
+    );
+    assert!(
+        parsed["object"].get("decode_warning").is_none(),
+        "No warning expected for valid pipeline"
+    );
 }
 
 // ── P2 gap: truncate with --hex ─────────────────────────────────────
@@ -1358,19 +1562,29 @@ fn truncate_with_hex_flag() {
     let (pdf, obj_num) = create_pdf_with_binary_stream();
     let output = Command::new(binary_path())
         .arg(pdf.path())
-        .arg("--object").arg(obj_num.to_string())
+        .arg("--object")
+        .arg(obj_num.to_string())
         .arg("--decode")
         .arg("--hex")
-        .arg("--truncate").arg("16")
+        .arg("--truncate")
+        .arg("16")
         .output()
         .expect("failed to execute binary");
 
     let stdout = String::from_utf8_lossy(&output.stdout);
     assert!(output.status.success());
-    assert!(stdout.contains("truncated to 16"), "Should show truncation: {}", stdout);
+    assert!(
+        stdout.contains("truncated to 16"),
+        "Should show truncation: {}",
+        stdout
+    );
     assert!(stdout.contains("00000000"), "Should show hex dump");
     // With 16 bytes truncation, should have exactly 1 hex line (no second offset)
-    assert!(!stdout.contains("00000010"), "Should not have second hex line with 16-byte truncation: {}", stdout);
+    assert!(
+        !stdout.contains("00000010"),
+        "Should not have second hex line with 16-byte truncation: {}",
+        stdout
+    );
 }
 
 // ── P2 gap: tree with missing objects (integration) ─────────────────
@@ -1397,7 +1611,11 @@ fn tree_with_broken_reference() {
 
     let stdout = String::from_utf8_lossy(&output.stdout);
     assert!(output.status.success());
-    assert!(stdout.contains("(missing)"), "Missing object should show (missing) in tree: {}", stdout);
+    assert!(
+        stdout.contains("(missing)"),
+        "Missing object should show (missing) in tree: {}",
+        stdout
+    );
 }
 
 #[test]
@@ -1424,7 +1642,11 @@ fn tree_json_with_broken_reference() {
     assert!(output.status.success());
     let parsed: serde_json::Value = serde_json::from_str(&stdout).unwrap();
     let tree_str = serde_json::to_string(&parsed).unwrap();
-    assert!(tree_str.contains("\"missing\""), "JSON tree should contain missing status: {}", tree_str);
+    assert!(
+        tree_str.contains("\"missing\""),
+        "JSON tree should contain missing status: {}",
+        tree_str
+    );
 }
 
 // ── P2 gap: depth with --page mode ──────────────────────────────────
@@ -1434,14 +1656,23 @@ fn depth_with_page_still_works() {
     let tmp = create_minimal_pdf();
     let output = Command::new(binary_path())
         .arg(tmp.path())
-        .arg("--page").arg("1")
-        .arg("--depth").arg("0")
+        .arg("--page")
+        .arg("1")
+        .arg("--depth")
+        .arg("0")
         .output()
         .expect("failed to execute binary");
 
     let stdout = String::from_utf8_lossy(&output.stdout);
-    assert!(output.status.success(), "--page with --depth should still succeed");
-    assert!(stdout.contains("Page 1"), "Should show page info: {}", stdout);
+    assert!(
+        output.status.success(),
+        "--page with --depth should still succeed"
+    );
+    assert!(
+        stdout.contains("Page 1"),
+        "Should show page info: {}",
+        stdout
+    );
 }
 
 #[test]
@@ -1449,14 +1680,20 @@ fn depth_with_page_unlimited() {
     let tmp = create_minimal_pdf();
     let output = Command::new(binary_path())
         .arg(tmp.path())
-        .arg("--page").arg("1")
-        .arg("--depth").arg("100")
+        .arg("--page")
+        .arg("1")
+        .arg("--depth")
+        .arg("100")
         .output()
         .expect("failed to execute binary");
 
     assert!(output.status.success());
     let stdout = String::from_utf8_lossy(&output.stdout);
-    assert!(stdout.contains("Page 1"), "Should show page info: {}", stdout);
+    assert!(
+        stdout.contains("Page 1"),
+        "Should show page info: {}",
+        stdout
+    );
 }
 
 // ── P2 gap: depth=1 with --tree (verify children are limited) ───────
@@ -1467,7 +1704,8 @@ fn tree_depth_one_shows_root_children_only() {
     let output = Command::new(binary_path())
         .arg(tmp.path())
         .arg("--tree")
-        .arg("--depth").arg("2")
+        .arg("--depth")
+        .arg("2")
         .output()
         .expect("failed to execute binary");
 
@@ -1486,7 +1724,8 @@ fn tree_json_depth_zero() {
         .arg(tmp.path())
         .arg("--tree")
         .arg("--json")
-        .arg("--depth").arg("0")
+        .arg("--depth")
+        .arg("0")
         .output()
         .expect("failed to execute binary");
 
@@ -1495,7 +1734,11 @@ fn tree_json_depth_zero() {
     let parsed: serde_json::Value = serde_json::from_str(&stdout).unwrap();
     assert_eq!(parsed["tree"]["node"], "Trailer");
     let tree_str = serde_json::to_string(&parsed).unwrap();
-    assert!(tree_str.contains("depth_limit_reached"), "Depth 0 should limit all children: {}", tree_str);
+    assert!(
+        tree_str.contains("depth_limit_reached"),
+        "Depth 0 should limit all children: {}",
+        tree_str
+    );
 }
 
 // ── P2 gap: extract with decode warning ─────────────────────────────
@@ -1520,14 +1763,20 @@ fn extract_corrupt_stream_shows_warning_on_stderr() {
     let output_file = tempfile::NamedTempFile::new().unwrap();
     let output = Command::new(binary_path())
         .arg(tmp.path())
-        .arg("--extract-stream").arg(stream_id.0.to_string())
-        .arg("--output").arg(output_file.path())
+        .arg("--extract-stream")
+        .arg(stream_id.0.to_string())
+        .arg("--output")
+        .arg(output_file.path())
         .output()
         .expect("failed to execute binary");
 
     assert!(output.status.success());
     let stderr = String::from_utf8_lossy(&output.stderr);
-    assert!(stderr.contains("Warning"), "Extract should show warning on stderr: {}", stderr);
+    assert!(
+        stderr.contains("Warning"),
+        "Extract should show warning on stderr: {}",
+        stderr
+    );
 }
 
 // ── P2 gap: tree with stream objects ────────────────────────────────
@@ -1557,8 +1806,16 @@ fn tree_with_stream_object() {
 
     let stdout = String::from_utf8_lossy(&output.stdout);
     assert!(output.status.success());
-    assert!(stdout.contains("Stream"), "Tree should show Stream label: {}", stdout);
-    assert!(stdout.contains("bytes"), "Tree should show byte count for streams: {}", stdout);
+    assert!(
+        stdout.contains("Stream"),
+        "Tree should show Stream label: {}",
+        stdout
+    );
+    assert!(
+        stdout.contains("bytes"),
+        "Tree should show byte count for streams: {}",
+        stdout
+    );
 }
 
 // ── --bookmarks integration tests ───────────────────────────────────
@@ -1569,7 +1826,10 @@ fn bookmarks_on_pdf_with_outlines() {
 
     // Bookmark
     let mut bm = Dictionary::new();
-    bm.set("Title", Object::String(b"Introduction".to_vec(), lopdf::StringFormat::Literal));
+    bm.set(
+        "Title",
+        Object::String(b"Introduction".to_vec(), lopdf::StringFormat::Literal),
+    );
     let bm_id = doc.add_object(Object::Dictionary(bm));
 
     let mut outlines = Dictionary::new();
@@ -1580,10 +1840,15 @@ fn bookmarks_on_pdf_with_outlines() {
     // Page + Pages for catalog
     let mut page_dict = Dictionary::new();
     page_dict.set("Type", Object::Name(b"Page".to_vec()));
-    page_dict.set("MediaBox", Object::Array(vec![
-        Object::Integer(0), Object::Integer(0),
-        Object::Integer(612), Object::Integer(792),
-    ]));
+    page_dict.set(
+        "MediaBox",
+        Object::Array(vec![
+            Object::Integer(0),
+            Object::Integer(0),
+            Object::Integer(612),
+            Object::Integer(792),
+        ]),
+    );
     let page_id = doc.add_object(Object::Dictionary(page_dict));
     let mut pages_dict = Dictionary::new();
     pages_dict.set("Type", Object::Name(b"Pages".to_vec()));
@@ -1613,8 +1878,16 @@ fn bookmarks_on_pdf_with_outlines() {
 
     let stdout = String::from_utf8_lossy(&output.stdout);
     assert!(output.status.success());
-    assert!(stdout.contains("Introduction"), "Should show bookmark title: {}", stdout);
-    assert!(stdout.contains("1 bookmarks"), "Should show count: {}", stdout);
+    assert!(
+        stdout.contains("Introduction"),
+        "Should show bookmark title: {}",
+        stdout
+    );
+    assert!(
+        stdout.contains("1 bookmarks"),
+        "Should show count: {}",
+        stdout
+    );
 }
 
 #[test]
@@ -1628,7 +1901,11 @@ fn bookmarks_no_outlines_says_no_bookmarks() {
 
     let stdout = String::from_utf8_lossy(&output.stdout);
     assert!(output.status.success());
-    assert!(stdout.contains("No bookmarks"), "Should indicate no bookmarks: {}", stdout);
+    assert!(
+        stdout.contains("No bookmarks"),
+        "Should indicate no bookmarks: {}",
+        stdout
+    );
 }
 
 // ── --annotations integration tests ─────────────────────────────────
@@ -1640,11 +1917,19 @@ fn annotations_on_pdf_with_link() {
     let mut annot = Dictionary::new();
     annot.set("Type", Object::Name(b"Annot".to_vec()));
     annot.set("Subtype", Object::Name(b"Link".to_vec()));
-    annot.set("Rect", Object::Array(vec![
-        Object::Integer(0), Object::Integer(0),
-        Object::Integer(100), Object::Integer(50),
-    ]));
-    annot.set("Contents", Object::String(b"Test link".to_vec(), lopdf::StringFormat::Literal));
+    annot.set(
+        "Rect",
+        Object::Array(vec![
+            Object::Integer(0),
+            Object::Integer(0),
+            Object::Integer(100),
+            Object::Integer(50),
+        ]),
+    );
+    annot.set(
+        "Contents",
+        Object::String(b"Test link".to_vec(), lopdf::StringFormat::Literal),
+    );
     let annot_id = doc.add_object(Object::Dictionary(annot));
 
     let content_stream = Stream::new(Dictionary::new(), b"BT ET".to_vec());
@@ -1654,10 +1939,15 @@ fn annotations_on_pdf_with_link() {
     page_dict.set("Type", Object::Name(b"Page".to_vec()));
     page_dict.set("Contents", Object::Reference(content_id));
     page_dict.set("Annots", Object::Array(vec![Object::Reference(annot_id)]));
-    page_dict.set("MediaBox", Object::Array(vec![
-        Object::Integer(0), Object::Integer(0),
-        Object::Integer(612), Object::Integer(792),
-    ]));
+    page_dict.set(
+        "MediaBox",
+        Object::Array(vec![
+            Object::Integer(0),
+            Object::Integer(0),
+            Object::Integer(612),
+            Object::Integer(792),
+        ]),
+    );
     let page_id = doc.add_object(Object::Dictionary(page_dict));
 
     let mut pages_dict = Dictionary::new();
@@ -1688,9 +1978,17 @@ fn annotations_on_pdf_with_link() {
 
     let stdout = String::from_utf8_lossy(&output.stdout);
     assert!(output.status.success());
-    assert!(stdout.contains("1 annotations found"), "Should show count: {}", stdout);
+    assert!(
+        stdout.contains("1 annotations found"),
+        "Should show count: {}",
+        stdout
+    );
     assert!(stdout.contains("Link"), "Should show subtype: {}", stdout);
-    assert!(stdout.contains("Test link"), "Should show contents: {}", stdout);
+    assert!(
+        stdout.contains("Test link"),
+        "Should show contents: {}",
+        stdout
+    );
 }
 
 #[test]
@@ -1700,10 +1998,15 @@ fn annotations_with_page_filter() {
     let mut annot = Dictionary::new();
     annot.set("Type", Object::Name(b"Annot".to_vec()));
     annot.set("Subtype", Object::Name(b"Text".to_vec()));
-    annot.set("Rect", Object::Array(vec![
-        Object::Integer(0), Object::Integer(0),
-        Object::Integer(50), Object::Integer(50),
-    ]));
+    annot.set(
+        "Rect",
+        Object::Array(vec![
+            Object::Integer(0),
+            Object::Integer(0),
+            Object::Integer(50),
+            Object::Integer(50),
+        ]),
+    );
     let annot_id = doc.add_object(Object::Dictionary(annot));
 
     let content_stream = Stream::new(Dictionary::new(), b"BT ET".to_vec());
@@ -1713,10 +2016,15 @@ fn annotations_with_page_filter() {
     page_dict.set("Type", Object::Name(b"Page".to_vec()));
     page_dict.set("Contents", Object::Reference(content_id));
     page_dict.set("Annots", Object::Array(vec![Object::Reference(annot_id)]));
-    page_dict.set("MediaBox", Object::Array(vec![
-        Object::Integer(0), Object::Integer(0),
-        Object::Integer(612), Object::Integer(792),
-    ]));
+    page_dict.set(
+        "MediaBox",
+        Object::Array(vec![
+            Object::Integer(0),
+            Object::Integer(0),
+            Object::Integer(612),
+            Object::Integer(792),
+        ]),
+    );
     let page_id = doc.add_object(Object::Dictionary(page_dict));
 
     let mut pages_dict = Dictionary::new();
@@ -1743,13 +2051,18 @@ fn annotations_with_page_filter() {
     let output = Command::new(binary_path())
         .arg(tmp.path())
         .arg("--annotations")
-        .arg("--page").arg("1")
+        .arg("--page")
+        .arg("1")
         .output()
         .expect("failed to execute binary");
 
     let stdout = String::from_utf8_lossy(&output.stdout);
     assert!(output.status.success());
-    assert!(stdout.contains("1 annotations found"), "Should find annotation on page 1: {}", stdout);
+    assert!(
+        stdout.contains("1 annotations found"),
+        "Should find annotation on page 1: {}",
+        stdout
+    );
 }
 
 // ── --tree --dot integration tests ──────────────────────────────────
@@ -1766,9 +2079,17 @@ fn tree_dot_produces_valid_dot() {
 
     let stdout = String::from_utf8_lossy(&output.stdout);
     assert!(output.status.success());
-    assert!(stdout.contains("digraph pdf {"), "Should contain digraph: {}", stdout);
+    assert!(
+        stdout.contains("digraph pdf {"),
+        "Should contain digraph: {}",
+        stdout
+    );
     assert!(stdout.contains("->"), "Should contain edges: {}", stdout);
-    assert!(stdout.trim_end().ends_with("}"), "Should end with }}: {}", stdout);
+    assert!(
+        stdout.trim_end().ends_with("}"),
+        "Should end with }}: {}",
+        stdout
+    );
 }
 
 #[test]
@@ -1778,13 +2099,18 @@ fn tree_dot_with_depth_limit() {
         .arg(pdf.path())
         .arg("--tree")
         .arg("--dot")
-        .arg("--depth").arg("1")
+        .arg("--depth")
+        .arg("1")
         .output()
         .expect("failed to execute binary");
 
     let stdout = String::from_utf8_lossy(&output.stdout);
     assert!(output.status.success());
-    assert!(stdout.contains("digraph pdf {"), "Should contain digraph: {}", stdout);
+    assert!(
+        stdout.contains("digraph pdf {"),
+        "Should contain digraph: {}",
+        stdout
+    );
 }
 
 // ── Mode mutual exclusivity for new modes ───────────────────────────
@@ -1799,9 +2125,15 @@ fn bookmarks_and_fonts_mutual_exclusion() {
         .output()
         .expect("failed to execute binary");
     // Document-level modes are now combinable
-    assert!(output.status.success(), "bookmarks + fonts should succeed (combinable modes)");
+    assert!(
+        output.status.success(),
+        "bookmarks + fonts should succeed (combinable modes)"
+    );
     let stdout = String::from_utf8_lossy(&output.stdout);
-    assert!(stdout.contains("=== Bookmarks ==="), "should show Bookmarks header");
+    assert!(
+        stdout.contains("=== Bookmarks ==="),
+        "should show Bookmarks header"
+    );
     assert!(stdout.contains("=== Fonts ==="), "should show Fonts header");
 }
 
@@ -1817,9 +2149,15 @@ fn create_two_page_pdf_for_range() -> tempfile::NamedTempFile {
     let mut p1 = Dictionary::new();
     p1.set("Type", Object::Name(b"Page".to_vec()));
     p1.set("Contents", Object::Reference(c1_id));
-    p1.set("MediaBox", Object::Array(vec![
-        Object::Integer(0), Object::Integer(0), Object::Integer(612), Object::Integer(792),
-    ]));
+    p1.set(
+        "MediaBox",
+        Object::Array(vec![
+            Object::Integer(0),
+            Object::Integer(0),
+            Object::Integer(612),
+            Object::Integer(792),
+        ]),
+    );
     let p1_id = doc.add_object(Object::Dictionary(p1));
 
     // Page 2
@@ -1828,20 +2166,33 @@ fn create_two_page_pdf_for_range() -> tempfile::NamedTempFile {
     let mut p2 = Dictionary::new();
     p2.set("Type", Object::Name(b"Page".to_vec()));
     p2.set("Contents", Object::Reference(c2_id));
-    p2.set("MediaBox", Object::Array(vec![
-        Object::Integer(0), Object::Integer(0), Object::Integer(612), Object::Integer(792),
-    ]));
+    p2.set(
+        "MediaBox",
+        Object::Array(vec![
+            Object::Integer(0),
+            Object::Integer(0),
+            Object::Integer(612),
+            Object::Integer(792),
+        ]),
+    );
     let p2_id = doc.add_object(Object::Dictionary(p2));
 
     // Pages
     let mut pages_dict = Dictionary::new();
     pages_dict.set("Type", Object::Name(b"Pages".to_vec()));
-    pages_dict.set("Kids", Object::Array(vec![Object::Reference(p1_id), Object::Reference(p2_id)]));
+    pages_dict.set(
+        "Kids",
+        Object::Array(vec![Object::Reference(p1_id), Object::Reference(p2_id)]),
+    );
     pages_dict.set("Count", Object::Integer(2));
     let pages_id = doc.add_object(Object::Dictionary(pages_dict));
 
-    if let Ok(Object::Dictionary(d)) = doc.get_object_mut(p1_id) { d.set("Parent", Object::Reference(pages_id)); }
-    if let Ok(Object::Dictionary(d)) = doc.get_object_mut(p2_id) { d.set("Parent", Object::Reference(pages_id)); }
+    if let Ok(Object::Dictionary(d)) = doc.get_object_mut(p1_id) {
+        d.set("Parent", Object::Reference(pages_id));
+    }
+    if let Ok(Object::Dictionary(d)) = doc.get_object_mut(p2_id) {
+        d.set("Parent", Object::Reference(pages_id));
+    }
 
     let mut catalog = Dictionary::new();
     catalog.set("Type", Object::Name(b"Catalog".to_vec()));
@@ -1860,14 +2211,23 @@ fn page_range_dump() {
     let pdf = create_two_page_pdf_for_range();
     let output = Command::new(binary_path())
         .arg(pdf.path())
-        .arg("--page").arg("1-2")
+        .arg("--page")
+        .arg("1-2")
         .output()
         .expect("failed to execute binary");
 
     let stdout = String::from_utf8_lossy(&output.stdout);
     assert!(output.status.success());
-    assert!(stdout.contains("Page 1"), "Should contain Page 1: {}", stdout);
-    assert!(stdout.contains("Page 2"), "Should contain Page 2: {}", stdout);
+    assert!(
+        stdout.contains("Page 1"),
+        "Should contain Page 1: {}",
+        stdout
+    );
+    assert!(
+        stdout.contains("Page 2"),
+        "Should contain Page 2: {}",
+        stdout
+    );
 }
 
 #[test]
@@ -1876,14 +2236,23 @@ fn page_range_text() {
     let output = Command::new(binary_path())
         .arg(pdf.path())
         .arg("--text")
-        .arg("--page").arg("1-2")
+        .arg("--page")
+        .arg("1-2")
         .output()
         .expect("failed to execute binary");
 
     let stdout = String::from_utf8_lossy(&output.stdout);
     assert!(output.status.success());
-    assert!(stdout.contains("--- Page 1 ---"), "Should contain Page 1 header: {}", stdout);
-    assert!(stdout.contains("--- Page 2 ---"), "Should contain Page 2 header: {}", stdout);
+    assert!(
+        stdout.contains("--- Page 1 ---"),
+        "Should contain Page 1 header: {}",
+        stdout
+    );
+    assert!(
+        stdout.contains("--- Page 2 ---"),
+        "Should contain Page 2 header: {}",
+        stdout
+    );
 }
 
 #[test]
@@ -1891,13 +2260,18 @@ fn page_zero_rejected() {
     let pdf = create_minimal_pdf();
     let output = Command::new(binary_path())
         .arg(pdf.path())
-        .arg("--page").arg("0")
+        .arg("--page")
+        .arg("0")
         .output()
         .expect("failed to execute binary");
 
     assert!(!output.status.success(), "Page 0 should be rejected");
     let stderr = String::from_utf8_lossy(&output.stderr);
-    assert!(stderr.contains("must be >= 1") || stderr.contains("Error"), "Should show error: {}", stderr);
+    assert!(
+        stderr.contains("must be >= 1") || stderr.contains("Error"),
+        "Should show error: {}",
+        stderr
+    );
 }
 
 #[test]
@@ -1905,9 +2279,13 @@ fn page_invalid_range_rejected() {
     let pdf = create_minimal_pdf();
     let output = Command::new(binary_path())
         .arg(pdf.path())
-        .arg("--page").arg("5-3")
+        .arg("--page")
+        .arg("5-3")
         .output()
         .expect("failed to execute binary");
 
-    assert!(!output.status.success(), "Reversed range should be rejected");
+    assert!(
+        !output.status.success(),
+        "Reversed range should be rejected"
+    );
 }

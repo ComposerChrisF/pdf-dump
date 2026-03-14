@@ -6,11 +6,17 @@ use std::io::Read;
 const MAX_DECODED_SIZE: u64 = 256 * 1024 * 1024;
 
 pub(crate) fn is_binary_stream(content: &[u8]) -> bool {
-    content.iter().any(|&b| !b.is_ascii_alphanumeric() && !b.is_ascii_whitespace() && !b.is_ascii_punctuation())
+    content.iter().any(|&b| {
+        !b.is_ascii_alphanumeric() && !b.is_ascii_whitespace() && !b.is_ascii_punctuation()
+    })
 }
 
 pub(crate) fn decode_ascii85(data: &[u8]) -> Result<Vec<u8>, String> {
-    let cleaned: Vec<u8> = data.iter().copied().filter(|b| !b.is_ascii_whitespace()).collect();
+    let cleaned: Vec<u8> = data
+        .iter()
+        .copied()
+        .filter(|b| !b.is_ascii_whitespace())
+        .collect();
     let mut input = if cleaned.ends_with(b"~>") {
         &cleaned[..cleaned.len() - 2]
     } else {
@@ -55,7 +61,11 @@ pub(crate) fn decode_ascii85(data: &[u8]) -> Result<Vec<u8>, String> {
 }
 
 pub(crate) fn decode_asciihex(data: &[u8]) -> Result<Vec<u8>, String> {
-    let cleaned: Vec<u8> = data.iter().copied().filter(|b| !b.is_ascii_whitespace()).collect();
+    let cleaned: Vec<u8> = data
+        .iter()
+        .copied()
+        .filter(|b| !b.is_ascii_whitespace())
+        .collect();
     let input = if cleaned.ends_with(b">") {
         &cleaned[..cleaned.len() - 1]
     } else {
@@ -67,12 +77,22 @@ pub(crate) fn decode_asciihex(data: &[u8]) -> Result<Vec<u8>, String> {
     while i < input.len() {
         let hi = match hex_digit(input[i]) {
             Some(v) => v,
-            None => return Err(format!("ASCIIHexDecode: invalid hex character 0x{:02x}", input[i])),
+            None => {
+                return Err(format!(
+                    "ASCIIHexDecode: invalid hex character 0x{:02x}",
+                    input[i]
+                ));
+            }
         };
         let lo = if i + 1 < input.len() {
             match hex_digit(input[i + 1]) {
                 Some(v) => v,
-                None => return Err(format!("ASCIIHexDecode: invalid hex character 0x{:02x}", input[i + 1])),
+                None => {
+                    return Err(format!(
+                        "ASCIIHexDecode: invalid hex character 0x{:02x}",
+                        input[i + 1]
+                    ));
+                }
             }
         } else {
             0
@@ -94,9 +114,15 @@ pub(crate) fn hex_digit(b: u8) -> Option<u8> {
 
 pub(crate) fn decode_lzw(data: &[u8]) -> Result<Vec<u8>, String> {
     let mut decoder = weezl::decode::Decoder::with_tiff_size_switch(weezl::BitOrder::Msb, 8);
-    let result = decoder.decode(data).map_err(|e| format!("LZWDecode: {}", e))?;
+    let result = decoder
+        .decode(data)
+        .map_err(|e| format!("LZWDecode: {}", e))?;
     if result.len() as u64 > MAX_DECODED_SIZE {
-        return Err(format!("LZWDecode: decoded size {} exceeds {} byte limit", result.len(), MAX_DECODED_SIZE));
+        return Err(format!(
+            "LZWDecode: decoded size {} exceeds {} byte limit",
+            result.len(),
+            MAX_DECODED_SIZE
+        ));
     }
     Ok(result)
 }
@@ -156,11 +182,16 @@ pub(crate) fn decode_stream(stream: &lopdf::Stream) -> (Cow<'_, [u8]>, Option<St
             b"FlateDecode" => {
                 let decoder = ZlibDecoder::new(&data[..]);
                 let mut decompressed = Vec::new();
-                decoder.take(MAX_DECODED_SIZE).read_to_end(&mut decompressed)
+                decoder
+                    .take(MAX_DECODED_SIZE)
+                    .read_to_end(&mut decompressed)
                     .map_err(|_| "FlateDecode decompression failed".to_string())
                     .and_then(|_| {
                         if decompressed.len() as u64 >= MAX_DECODED_SIZE {
-                            Err(format!("FlateDecode: decoded size exceeds {} byte limit", MAX_DECODED_SIZE))
+                            Err(format!(
+                                "FlateDecode: decoded size exceeds {} byte limit",
+                                MAX_DECODED_SIZE
+                            ))
                         } else {
                             Ok(decompressed)
                         }
@@ -172,7 +203,10 @@ pub(crate) fn decode_stream(stream: &lopdf::Stream) -> (Cow<'_, [u8]>, Option<St
             b"RunLengthDecode" => decode_run_length(&data),
             other => {
                 let name = String::from_utf8_lossy(other);
-                return (Cow::Owned(data.into_owned()), Some(format!("unsupported filter: {}", name)));
+                return (
+                    Cow::Owned(data.into_owned()),
+                    Some(format!("unsupported filter: {}", name)),
+                );
             }
         };
         match result {
@@ -191,12 +225,16 @@ pub(crate) fn format_hex_dump(data: &[u8]) -> String {
         write!(result, "{:08x}  ", offset * 16).unwrap();
         for (i, &b) in chunk.iter().enumerate() {
             write!(result, "{:02x} ", b).unwrap();
-            if i == 7 { result.push(' '); }
+            if i == 7 {
+                result.push(' ');
+            }
         }
         if chunk.len() < 16 {
             for i in chunk.len()..16 {
                 result.push_str("   ");
-                if i == 7 { result.push(' '); }
+                if i == 7 {
+                    result.push(' ');
+                }
             }
         }
         result.push(' ');
@@ -214,18 +252,17 @@ pub(crate) fn format_hex_dump(data: &[u8]) -> String {
     result
 }
 
-
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::test_utils::*;
     use crate::object::print_single_object;
+    use crate::test_utils::*;
     use crate::types::DumpConfig;
+    use lopdf::Document;
+    use lopdf::Object;
     use lopdf::{Dictionary, Stream};
     use pretty_assertions::assert_eq;
     use std::borrow::Cow;
-    use lopdf::Object;
-    use lopdf::Document;
 
     #[test]
     fn is_binary_stream_empty() {
@@ -273,10 +310,7 @@ mod tests {
     #[test]
     fn decode_stream_flatedecode_name() {
         let compressed = zlib_compress(b"hello pdf");
-        let stream = make_stream(
-            Some(Object::Name(b"FlateDecode".to_vec())),
-            compressed,
-        );
+        let stream = make_stream(Some(Object::Name(b"FlateDecode".to_vec())), compressed);
         let (result, _warning) = decode_stream(&stream);
         assert!(matches!(result, Cow::Owned(_)));
         assert_eq!(&*result, b"hello pdf");
@@ -315,21 +349,28 @@ mod tests {
         let (result, warning) = decode_stream(&stream);
         // Falls back to original content with warning
         assert_eq!(&*result, b"not valid zlib");
-        assert!(warning.is_some(), "Corrupt FlateDecode should produce a warning");
-        assert!(warning.unwrap().contains("FlateDecode decompression failed"));
+        assert!(
+            warning.is_some(),
+            "Corrupt FlateDecode should produce a warning"
+        );
+        assert!(
+            warning
+                .unwrap()
+                .contains("FlateDecode decompression failed")
+        );
     }
 
     #[test]
     fn decode_stream_valid_flatedecode_no_warning() {
         let compressed = zlib_compress(b"hello pdf");
-        let stream = make_stream(
-            Some(Object::Name(b"FlateDecode".to_vec())),
-            compressed,
-        );
+        let stream = make_stream(Some(Object::Name(b"FlateDecode".to_vec())), compressed);
         let (result, warning) = decode_stream(&stream);
         assert!(matches!(result, Cow::Owned(_)));
         assert_eq!(&*result, b"hello pdf");
-        assert!(warning.is_none(), "Valid FlateDecode should produce no warning");
+        assert!(
+            warning.is_none(),
+            "Valid FlateDecode should produce no warning"
+        );
     }
 
     #[test]
@@ -451,10 +492,7 @@ mod tests {
         let original = b"Hello from LZW";
         let mut encoder = weezl::encode::Encoder::with_tiff_size_switch(weezl::BitOrder::Msb, 8);
         let compressed = encoder.encode(original).unwrap();
-        let stream = make_stream(
-            Some(Object::Name(b"LZWDecode".to_vec())),
-            compressed,
-        );
+        let stream = make_stream(Some(Object::Name(b"LZWDecode".to_vec())), compressed);
         let (result, warning) = decode_stream(&stream);
         assert_eq!(&*result, original.as_slice());
         assert!(warning.is_none());
@@ -519,10 +557,7 @@ mod tests {
     #[test]
     fn decode_run_length_stream_via_decode_stream() {
         let data = vec![4, b'H', b'e', b'l', b'l', b'o', 128];
-        let stream = make_stream(
-            Some(Object::Name(b"RunLengthDecode".to_vec())),
-            data,
-        );
+        let stream = make_stream(Some(Object::Name(b"RunLengthDecode".to_vec())), data);
         let (result, warning) = decode_stream(&stream);
         assert_eq!(&*result, b"Hello");
         assert!(warning.is_none());
@@ -652,16 +687,16 @@ mod tests {
         );
         let (result, warning) = decode_stream(&stream);
         assert_eq!(&*result, b"pass through");
-        assert!(warning.is_some(), "Unsupported filter should produce warning");
+        assert!(
+            warning.is_some(),
+            "Unsupported filter should produce warning"
+        );
         assert!(warning.unwrap().contains("unsupported filter: DCTDecode"));
     }
 
     #[test]
     fn decode_stream_empty_filter_array() {
-        let stream = make_stream(
-            Some(Object::Array(vec![])),
-            b"no filters".to_vec(),
-        );
+        let stream = make_stream(Some(Object::Array(vec![])), b"no filters".to_vec());
         let (result, _warning) = decode_stream(&stream);
         assert!(matches!(result, Cow::Borrowed(_)));
         assert_eq!(&*result, b"no filters");
@@ -671,10 +706,7 @@ mod tests {
     fn decode_stream_flatedecode_empty_payload() {
         // Compressed empty content
         let compressed = zlib_compress(b"");
-        let stream = make_stream(
-            Some(Object::Name(b"FlateDecode".to_vec())),
-            compressed,
-        );
+        let stream = make_stream(Some(Object::Name(b"FlateDecode".to_vec())), compressed);
         let (result, _warning) = decode_stream(&stream);
         assert!(matches!(result, Cow::Owned(_)));
         assert_eq!(&*result, b"");
@@ -686,7 +718,7 @@ mod tests {
         let compressed = zlib_compress(b"mixed types");
         let stream = make_stream(
             Some(Object::Array(vec![
-                Object::Integer(42),  // not a Name, should be skipped
+                Object::Integer(42), // not a Name, should be skipped
                 Object::Name(b"FlateDecode".to_vec()),
             ])),
             compressed,
@@ -716,10 +748,7 @@ mod tests {
         // Verify decompression works for larger payloads
         let large: Vec<u8> = (0..10000).map(|i| (i % 256) as u8).collect();
         let compressed = zlib_compress(&large);
-        let stream = make_stream(
-            Some(Object::Name(b"FlateDecode".to_vec())),
-            compressed,
-        );
+        let stream = make_stream(Some(Object::Name(b"FlateDecode".to_vec())), compressed);
         let (result, _warning) = decode_stream(&stream);
         assert!(matches!(result, Cow::Owned(_)));
         assert_eq!(&*result, &large[..]);
@@ -875,7 +904,11 @@ mod tests {
         let (result, warning) = decode_stream(&stream);
         assert_eq!(&*result, b"fax data");
         assert!(warning.is_some());
-        assert!(warning.unwrap().contains("unsupported filter: CCITTFaxDecode"));
+        assert!(
+            warning
+                .unwrap()
+                .contains("unsupported filter: CCITTFaxDecode")
+        );
     }
 
     #[test]
@@ -886,7 +919,10 @@ mod tests {
         // ASCII85 of "Hello" is "87cURDZ"
         let ascii85_encoded = b"87cURDZ~>";
         let flate_compressed = zlib_compress(ascii85_encoded);
-        let hex_encoded: String = flate_compressed.iter().map(|b| format!("{:02x}", b)).collect();
+        let hex_encoded: String = flate_compressed
+            .iter()
+            .map(|b| format!("{:02x}", b))
+            .collect();
         let hex_bytes = format!("{}>", hex_encoded);
 
         let stream = make_stream(
@@ -898,8 +934,15 @@ mod tests {
             hex_bytes.into_bytes(),
         );
         let (result, warning) = decode_stream(&stream);
-        assert_eq!(&*result, original.as_slice(), "3-stage pipeline should decode correctly");
-        assert!(warning.is_none(), "No warning expected for supported pipeline");
+        assert_eq!(
+            &*result,
+            original.as_slice(),
+            "3-stage pipeline should decode correctly"
+        );
+        assert!(
+            warning.is_none(),
+            "No warning expected for supported pipeline"
+        );
     }
 
     #[test]
@@ -917,7 +960,10 @@ mod tests {
         );
         let (result, warning) = decode_stream(&stream);
         // Should have decompressed the FlateDecode part successfully
-        assert_eq!(&*result, b"some data", "Should get FlateDecode result before stopping");
+        assert_eq!(
+            &*result, b"some data",
+            "Should get FlateDecode result before stopping"
+        );
         assert!(warning.is_some());
         assert!(warning.unwrap().contains("unsupported filter: DCTDecode"));
     }
@@ -936,7 +982,11 @@ mod tests {
         // ASCIIHexDecode produced "Hello", but FlateDecode on "Hello" fails
         assert_eq!(&*result, b"Hello", "Should return intermediate result");
         assert!(warning.is_some());
-        assert!(warning.unwrap().contains("FlateDecode decompression failed"));
+        assert!(
+            warning
+                .unwrap()
+                .contains("FlateDecode decompression failed")
+        );
     }
 
     #[test]
@@ -944,7 +994,8 @@ mod tests {
         // Encode: original -> LZW -> ASCII85
         // Decode pipeline: ASCII85Decode -> LZWDecode
         let original = b"Hello LZW";
-        let mut lzw_encoder = weezl::encode::Encoder::with_tiff_size_switch(weezl::BitOrder::Msb, 8);
+        let mut lzw_encoder =
+            weezl::encode::Encoder::with_tiff_size_switch(weezl::BitOrder::Msb, 8);
         let lzw_compressed = lzw_encoder.encode(original).unwrap();
 
         // ASCII85 encode the LZW data
@@ -958,7 +1009,11 @@ mod tests {
             ascii85_data,
         );
         let (result, warning) = decode_stream(&stream);
-        assert_eq!(&*result, original.as_slice(), "ASCII85+LZW pipeline should decode");
+        assert_eq!(
+            &*result,
+            original.as_slice(),
+            "ASCII85+LZW pipeline should decode"
+        );
         assert!(warning.is_none());
     }
 
@@ -970,7 +1025,8 @@ mod tests {
         let hex_encoded: String = original.iter().map(|b| format!("{:02x}", b)).collect();
         let hex_bytes = format!("{}>", hex_encoded);
 
-        let mut lzw_encoder = weezl::encode::Encoder::with_tiff_size_switch(weezl::BitOrder::Msb, 8);
+        let mut lzw_encoder =
+            weezl::encode::Encoder::with_tiff_size_switch(weezl::BitOrder::Msb, 8);
         let lzw_compressed = lzw_encoder.encode(hex_bytes.as_bytes()).unwrap();
 
         let stream = make_stream(
@@ -981,7 +1037,11 @@ mod tests {
             lzw_compressed,
         );
         let (result, warning) = decode_stream(&stream);
-        assert_eq!(&*result, original.as_slice(), "LZW+ASCIIHex pipeline should decode");
+        assert_eq!(
+            &*result,
+            original.as_slice(),
+            "LZW+ASCIIHex pipeline should decode"
+        );
         assert!(warning.is_none());
     }
 
@@ -1023,7 +1083,10 @@ mod tests {
     #[test]
     fn decode_ascii85_empty_input() {
         let result = decode_ascii85(b"~>").unwrap();
-        assert!(result.is_empty(), "Empty ASCII85 should produce empty output");
+        assert!(
+            result.is_empty(),
+            "Empty ASCII85 should produce empty output"
+        );
     }
 
     #[test]
@@ -1035,7 +1098,11 @@ mod tests {
     #[test]
     fn decode_ascii85_multiple_z() {
         let result = decode_ascii85(b"zzz~>").unwrap();
-        assert_eq!(result, vec![0u8; 12], "Three z's should produce 12 zero bytes");
+        assert_eq!(
+            result,
+            vec![0u8; 12],
+            "Three z's should produce 12 zero bytes"
+        );
     }
 
     #[test]
@@ -1117,7 +1184,11 @@ mod tests {
         let data: Vec<u8> = (0x80..0x84).collect();
         let result = format_hex_dump(&data);
         assert!(result.contains("80 81 82 83"));
-        assert!(result.contains("|....|"), "High bytes should be dots: {}", result);
+        assert!(
+            result.contains("|....|"),
+            "High bytes should be dots: {}",
+            result
+        );
     }
 
     #[test]
@@ -1125,7 +1196,11 @@ mod tests {
         // Mix of printable ASCII and control chars
         let data = b"Hi\x00\x01\x02";
         let result = format_hex_dump(data);
-        assert!(result.contains("|Hi...|"), "Mixed content ASCII representation: {}", result);
+        assert!(
+            result.contains("|Hi...|"),
+            "Mixed content ASCII representation: {}",
+            result
+        );
     }
 
     #[test]
@@ -1186,8 +1261,14 @@ mod tests {
         // Create a stream that decompresses to just over MAX_DECODED_SIZE
         // We can't practically create a 256MB test, so test the mechanism
         // by verifying the limit constant exists and the error message format
-        let msg = format!("FlateDecode: decoded size exceeds {} byte limit", super::MAX_DECODED_SIZE);
-        assert!(msg.contains("268435456"), "MAX_DECODED_SIZE should be 256 MB");
+        let msg = format!(
+            "FlateDecode: decoded size exceeds {} byte limit",
+            super::MAX_DECODED_SIZE
+        );
+        assert!(
+            msg.contains("268435456"),
+            "MAX_DECODED_SIZE should be 256 MB"
+        );
     }
 
     #[test]
@@ -1201,10 +1282,7 @@ mod tests {
         // Normal-sized data should decode without hitting the limit
         let original: Vec<u8> = vec![b'A'; 100_000];
         let compressed = zlib_compress(&original);
-        let stream = make_stream(
-            Some(Object::Name(b"FlateDecode".to_vec())),
-            compressed,
-        );
+        let stream = make_stream(Some(Object::Name(b"FlateDecode".to_vec())), compressed);
         let (result, warning) = decode_stream(&stream);
         assert_eq!(&*result, &original[..]);
         assert!(warning.is_none(), "Normal-sized decode should not warn");
@@ -1228,11 +1306,24 @@ mod tests {
         let stream = Stream::new(Dictionary::new(), content_bytes.to_vec());
         doc.objects.insert((1, 0), Object::Stream(stream));
 
-        let config = DumpConfig { decode: true, truncate: None, json: false, hex: false, depth: None, deref: false, raw: false };
+        let config = DumpConfig {
+            decode: true,
+            truncate: None,
+            json: false,
+            hex: false,
+            depth: None,
+            deref: false,
+            raw: false,
+        };
         let out = output_of(|w| print_single_object(w, &doc, 1, &config));
         // Should show clean format, not Debug format with "Operation { operator:"
-        assert!(!out.contains("Operation {"), "Should not contain Debug format");
-        assert!(out.contains("(Hello) Tj"), "Should contain formatted operation");
+        assert!(
+            !out.contains("Operation {"),
+            "Should not contain Debug format"
+        );
+        assert!(
+            out.contains("(Hello) Tj"),
+            "Should contain formatted operation"
+        );
     }
-
 }

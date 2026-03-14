@@ -1,8 +1,7 @@
 use lopdf::{Document, Object, ObjectId};
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 use std::collections::BTreeMap;
 use std::io::Write;
-
 
 pub(crate) struct FormFieldInfo {
     pub object_id: ObjectId,
@@ -15,7 +14,12 @@ pub(crate) struct FormFieldInfo {
 
 pub(crate) fn collect_form_fields(doc: &Document) -> (Option<ObjectId>, bool, Vec<FormFieldInfo>) {
     // Find AcroForm in catalog
-    let catalog_id = match doc.trailer.get(b"Root").ok().and_then(|o| o.as_reference().ok()) {
+    let catalog_id = match doc
+        .trailer
+        .get(b"Root")
+        .ok()
+        .and_then(|o| o.as_reference().ok())
+    {
         Some(id) => id,
         None => return (None, false, vec![]),
     };
@@ -38,20 +42,26 @@ pub(crate) fn collect_form_fields(doc: &Document) -> (Option<ObjectId>, bool, Ve
     collect_form_fields_from_dict(doc, acroform_dict, acroform_ref)
 }
 
-pub(crate) fn collect_form_fields_from_dict(doc: &Document, acroform_dict: &lopdf::Dictionary, acroform_id: ObjectId) -> (Option<ObjectId>, bool, Vec<FormFieldInfo>) {
-    let need_appearances = acroform_dict.get(b"NeedAppearances")
+pub(crate) fn collect_form_fields_from_dict(
+    doc: &Document,
+    acroform_dict: &lopdf::Dictionary,
+    acroform_id: ObjectId,
+) -> (Option<ObjectId>, bool, Vec<FormFieldInfo>) {
+    let need_appearances = acroform_dict
+        .get(b"NeedAppearances")
         .ok()
-        .and_then(|v| match v { Object::Boolean(b) => Some(*b), _ => None })
+        .and_then(|v| match v {
+            Object::Boolean(b) => Some(*b),
+            _ => None,
+        })
         .unwrap_or(false);
 
     let fields_array = match acroform_dict.get(b"Fields") {
         Ok(Object::Array(arr)) => arr,
-        Ok(Object::Reference(id)) => {
-            match doc.get_object(*id) {
-                Ok(Object::Array(arr)) => arr,
-                _ => return (Some(acroform_id), need_appearances, vec![]),
-            }
-        }
+        Ok(Object::Reference(id)) => match doc.get_object(*id) {
+            Ok(Object::Array(arr)) => arr,
+            _ => return (Some(acroform_id), need_appearances, vec![]),
+        },
         _ => return (Some(acroform_id), need_appearances, vec![]),
     };
 
@@ -60,7 +70,8 @@ pub(crate) fn collect_form_fields_from_dict(doc: &Document, acroform_dict: &lopd
     let mut widget_to_page: BTreeMap<ObjectId, u32> = BTreeMap::new();
     for (&page_num, &page_id) in &pages {
         if let Ok(Object::Dictionary(page_dict)) = doc.get_object(page_id)
-            && let Ok(Object::Array(annots)) = page_dict.get(b"Annots") {
+            && let Ok(Object::Array(annots)) = page_dict.get(b"Annots")
+        {
             for annot in annots {
                 if let Ok(id) = annot.as_reference() {
                     widget_to_page.insert(id, page_num);
@@ -93,7 +104,9 @@ pub(crate) fn collect_field_recursive(
     };
 
     // Get field name (T)
-    let partial_name = dict.get(b"T").ok()
+    let partial_name = dict
+        .get(b"T")
+        .ok()
         .and_then(|v| match v {
             Object::String(bytes, _) => Some(String::from_utf8_lossy(bytes).into_owned()),
             _ => None,
@@ -114,7 +127,11 @@ pub(crate) fn collect_field_recursive(
         let kid_ids: Vec<ObjectId> = kids.iter().filter_map(|k| k.as_reference().ok()).collect();
         let has_field_kids = kid_ids.iter().any(|kid_id| {
             doc.get_object(*kid_id).ok().is_some_and(|obj| {
-                let d = match obj { Object::Dictionary(d) => d, Object::Stream(s) => &s.dict, _ => return false };
+                let d = match obj {
+                    Object::Dictionary(d) => d,
+                    Object::Stream(s) => &s.dict,
+                    _ => return false,
+                };
                 d.get(b"T").is_ok()
             })
         });
@@ -128,12 +145,20 @@ pub(crate) fn collect_field_recursive(
     }
 
     // Determine field type (FT) — may be inherited
-    let field_type = dict.get(b"FT").ok()
-        .and_then(|v| v.as_name().ok().map(|n| String::from_utf8_lossy(n).into_owned()))
+    let field_type = dict
+        .get(b"FT")
+        .ok()
+        .and_then(|v| {
+            v.as_name()
+                .ok()
+                .map(|n| String::from_utf8_lossy(n).into_owned())
+        })
         .unwrap_or_else(|| "-".to_string());
 
     // Get value (V)
-    let value = dict.get(b"V").ok()
+    let value = dict
+        .get(b"V")
+        .ok()
         .map(|v| match v {
             Object::String(bytes, _) => format!("\"{}\"", String::from_utf8_lossy(bytes)),
             Object::Name(n) => format!("/{}", String::from_utf8_lossy(n)),
@@ -145,7 +170,9 @@ pub(crate) fn collect_field_recursive(
         .unwrap_or_else(|| "(empty)".to_string());
 
     // Get flags (Ff)
-    let flags = dict.get(b"Ff").ok()
+    let flags = dict
+        .get(b"Ff")
+        .ok()
         .and_then(|v| v.as_i64().ok())
         .unwrap_or(0) as u32;
 
@@ -178,17 +205,36 @@ pub(crate) fn print_forms(writer: &mut impl Write, doc: &Document) {
             return;
         }
         Some(id) => {
-            wln!(writer, "AcroForm found (obj {}), NeedAppearances: {}", id.0, need_appearances);
+            wln!(
+                writer,
+                "AcroForm found (obj {}), NeedAppearances: {}",
+                id.0,
+                need_appearances
+            );
         }
     }
 
     wln!(writer, "{} form fields\n", fields.len());
-    if fields.is_empty() { return; }
+    if fields.is_empty() {
+        return;
+    }
 
-    wln!(writer, "  {:>4}  {:<24} {:<6}  {:<20} Page", "Obj#", "FieldName", "Type", "Value");
+    wln!(
+        writer,
+        "  {:>4}  {:<24} {:<6}  {:<20} Page",
+        "Obj#",
+        "FieldName",
+        "Type",
+        "Value"
+    );
     for f in &fields {
-        let page_str = f.page_number.map(|p| p.to_string()).unwrap_or_else(|| "-".to_string());
-        wln!(writer, "  {:>4}  {:<24} {:<6}  {:<20} {}",
+        let page_str = f
+            .page_number
+            .map(|p| p.to_string())
+            .unwrap_or_else(|| "-".to_string());
+        wln!(
+            writer,
+            "  {:>4}  {:<24} {:<6}  {:<20} {}",
             f.object_id.0,
             truncate_str(&f.qualified_name, 24),
             &f.field_type,
@@ -201,17 +247,20 @@ pub(crate) fn print_forms(writer: &mut impl Write, doc: &Document) {
 pub(crate) fn forms_json_value(doc: &Document) -> Value {
     let (acroform_id, need_appearances, fields) = collect_form_fields(doc);
 
-    let items: Vec<Value> = fields.iter().map(|f| {
-        json!({
-            "object_number": f.object_id.0,
-            "generation": f.object_id.1,
-            "field_name": f.qualified_name,
-            "field_type": f.field_type,
-            "value": f.value,
-            "flags": f.flags,
-            "page_number": f.page_number,
+    let items: Vec<Value> = fields
+        .iter()
+        .map(|f| {
+            json!({
+                "object_number": f.object_id.0,
+                "generation": f.object_id.1,
+                "field_name": f.qualified_name,
+                "field_type": f.field_type,
+                "value": f.value,
+                "flags": f.flags,
+                "page_number": f.page_number,
+            })
         })
-    }).collect();
+        .collect();
 
     json!({
         "acroform_object": acroform_id.map(|id| id.0),
@@ -228,37 +277,42 @@ pub(crate) fn print_forms_json(writer: &mut impl Write, doc: &Document) {
     writeln!(writer, "{}", json_pretty(&output)).unwrap();
 }
 
-
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::test_utils::*;
+    use lopdf::Object;
     use lopdf::{Dictionary, StringFormat};
     use pretty_assertions::assert_eq;
-    use serde_json::{Value};
-    use lopdf::Object;
+    use serde_json::Value;
 
     fn build_form_doc() -> Document {
         let mut doc = Document::new();
         // Form field 1 - text field
         let mut field1 = Dictionary::new();
-        field1.set("T", Object::String(b"FirstName".to_vec(), StringFormat::Literal));
+        field1.set(
+            "T",
+            Object::String(b"FirstName".to_vec(), StringFormat::Literal),
+        );
         field1.set("FT", Object::Name(b"Tx".to_vec()));
         field1.set("V", Object::String(b"John".to_vec(), StringFormat::Literal));
         doc.objects.insert((20, 0), Object::Dictionary(field1));
         // Form field 2 - button
         let mut field2 = Dictionary::new();
-        field2.set("T", Object::String(b"Subscribe".to_vec(), StringFormat::Literal));
+        field2.set(
+            "T",
+            Object::String(b"Subscribe".to_vec(), StringFormat::Literal),
+        );
         field2.set("FT", Object::Name(b"Btn".to_vec()));
         field2.set("V", Object::Name(b"Yes".to_vec()));
         doc.objects.insert((22, 0), Object::Dictionary(field2));
         // AcroForm
         let mut acroform = Dictionary::new();
         acroform.set("NeedAppearances", Object::Boolean(true));
-        acroform.set("Fields", Object::Array(vec![
-            Object::Reference((20, 0)),
-            Object::Reference((22, 0)),
-        ]));
+        acroform.set(
+            "Fields",
+            Object::Array(vec![Object::Reference((20, 0)), Object::Reference((22, 0))]),
+        );
         doc.objects.insert((15, 0), Object::Dictionary(acroform));
         // Catalog
         let mut catalog = Dictionary::new();
@@ -276,10 +330,10 @@ mod tests {
         let mut page = Dictionary::new();
         page.set("Type", Object::Name(b"Page".to_vec()));
         page.set("Parent", Object::Reference((5, 0)));
-        page.set("Annots", Object::Array(vec![
-            Object::Reference((20, 0)),
-            Object::Reference((22, 0)),
-        ]));
+        page.set(
+            "Annots",
+            Object::Array(vec![Object::Reference((20, 0)), Object::Reference((22, 0))]),
+        );
         doc.objects.insert((30, 0), Object::Dictionary(page));
         doc.trailer.set("Root", Object::Reference((4, 0)));
         doc
@@ -361,13 +415,22 @@ mod tests {
         let mut doc = Document::new();
         // Child field
         let mut child = Dictionary::new();
-        child.set("T", Object::String(b"FirstName".to_vec(), StringFormat::Literal));
+        child.set(
+            "T",
+            Object::String(b"FirstName".to_vec(), StringFormat::Literal),
+        );
         child.set("FT", Object::Name(b"Tx".to_vec()));
-        child.set("V", Object::String(b"Alice".to_vec(), StringFormat::Literal));
+        child.set(
+            "V",
+            Object::String(b"Alice".to_vec(), StringFormat::Literal),
+        );
         doc.objects.insert((21, 0), Object::Dictionary(child));
         // Parent field with Kids
         let mut parent = Dictionary::new();
-        parent.set("T", Object::String(b"Person".to_vec(), StringFormat::Literal));
+        parent.set(
+            "T",
+            Object::String(b"Person".to_vec(), StringFormat::Literal),
+        );
         parent.set("Kids", Object::Array(vec![Object::Reference((21, 0))]));
         doc.objects.insert((20, 0), Object::Dictionary(parent));
         // AcroForm
@@ -438,7 +501,10 @@ mod tests {
         // Field without /FT should show "-"
         let mut doc = Document::new();
         let mut field = Dictionary::new();
-        field.set("T", Object::String(b"NoType".to_vec(), StringFormat::Literal));
+        field.set(
+            "T",
+            Object::String(b"NoType".to_vec(), StringFormat::Literal),
+        );
         // No FT key
         doc.objects.insert((20, 0), Object::Dictionary(field));
 
@@ -468,7 +534,10 @@ mod tests {
         // Field without /V should show "(empty)"
         let mut doc = Document::new();
         let mut field = Dictionary::new();
-        field.set("T", Object::String(b"Empty".to_vec(), StringFormat::Literal));
+        field.set(
+            "T",
+            Object::String(b"Empty".to_vec(), StringFormat::Literal),
+        );
         field.set("FT", Object::Name(b"Tx".to_vec()));
         // No V key
         doc.objects.insert((20, 0), Object::Dictionary(field));
@@ -528,31 +597,43 @@ mod tests {
 
         // Integer value
         let mut f1 = Dictionary::new();
-        f1.set("T", Object::String(b"IntField".to_vec(), StringFormat::Literal));
+        f1.set(
+            "T",
+            Object::String(b"IntField".to_vec(), StringFormat::Literal),
+        );
         f1.set("FT", Object::Name(b"Tx".to_vec()));
         f1.set("V", Object::Integer(42));
         doc.objects.insert((20, 0), Object::Dictionary(f1));
 
         // Boolean value
         let mut f2 = Dictionary::new();
-        f2.set("T", Object::String(b"BoolField".to_vec(), StringFormat::Literal));
+        f2.set(
+            "T",
+            Object::String(b"BoolField".to_vec(), StringFormat::Literal),
+        );
         f2.set("FT", Object::Name(b"Btn".to_vec()));
         f2.set("V", Object::Boolean(true));
         doc.objects.insert((21, 0), Object::Dictionary(f2));
 
         // Array value
         let mut f3 = Dictionary::new();
-        f3.set("T", Object::String(b"ArrayField".to_vec(), StringFormat::Literal));
+        f3.set(
+            "T",
+            Object::String(b"ArrayField".to_vec(), StringFormat::Literal),
+        );
         f3.set("FT", Object::Name(b"Ch".to_vec()));
         f3.set("V", Object::Array(vec![Object::Integer(1)]));
         doc.objects.insert((22, 0), Object::Dictionary(f3));
 
         let mut acroform = Dictionary::new();
-        acroform.set("Fields", Object::Array(vec![
-            Object::Reference((20, 0)),
-            Object::Reference((21, 0)),
-            Object::Reference((22, 0)),
-        ]));
+        acroform.set(
+            "Fields",
+            Object::Array(vec![
+                Object::Reference((20, 0)),
+                Object::Reference((21, 0)),
+                Object::Reference((22, 0)),
+            ]),
+        );
         doc.objects.insert((15, 0), Object::Dictionary(acroform));
         let mut catalog = Dictionary::new();
         catalog.set("Type", Object::Name(b"Catalog".to_vec()));
@@ -608,12 +689,18 @@ mod tests {
         doc.objects.insert((30, 0), Object::Dictionary(child));
 
         let mut parent = Dictionary::new();
-        parent.set("T", Object::String(b"Address".to_vec(), StringFormat::Literal));
+        parent.set(
+            "T",
+            Object::String(b"Address".to_vec(), StringFormat::Literal),
+        );
         parent.set("Kids", Object::Array(vec![Object::Reference((30, 0))]));
         doc.objects.insert((20, 0), Object::Dictionary(parent));
 
         let mut grandparent = Dictionary::new();
-        grandparent.set("T", Object::String(b"Person".to_vec(), StringFormat::Literal));
+        grandparent.set(
+            "T",
+            Object::String(b"Person".to_vec(), StringFormat::Literal),
+        );
         grandparent.set("Kids", Object::Array(vec![Object::Reference((20, 0))]));
         doc.objects.insert((10, 0), Object::Dictionary(grandparent));
 
@@ -641,7 +728,10 @@ mod tests {
     fn forms_flags_preserved() {
         let mut doc = Document::new();
         let mut field = Dictionary::new();
-        field.set("T", Object::String(b"ReadOnly".to_vec(), StringFormat::Literal));
+        field.set(
+            "T",
+            Object::String(b"ReadOnly".to_vec(), StringFormat::Literal),
+        );
         field.set("FT", Object::Name(b"Tx".to_vec()));
         field.set("Ff", Object::Integer(1)); // ReadOnly flag
         doc.objects.insert((20, 0), Object::Dictionary(field));
@@ -682,5 +772,4 @@ mod tests {
         assert!(f.get("flags").is_some());
         assert!(f.get("page_number").is_some());
     }
-
 }

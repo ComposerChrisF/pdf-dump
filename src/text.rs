@@ -1,9 +1,9 @@
-use lopdf::{content::Content, Document, Object, ObjectId};
-use serde_json::{json, Value};
+use lopdf::{Document, Object, ObjectId, content::Content};
+use serde_json::{Value, json};
 use std::io::Write;
 
-use crate::types::PageSpec;
 use crate::helpers;
+use crate::types::PageSpec;
 
 pub(crate) struct TextResult {
     pub text: String,
@@ -15,7 +15,10 @@ fn extract_text_from_page(doc: &Document, page_id: ObjectId) -> String {
     extract_text_from_page_with_warnings(doc, page_id).text
 }
 
-pub(crate) fn extract_text_from_page_with_warnings(doc: &Document, page_id: ObjectId) -> TextResult {
+pub(crate) fn extract_text_from_page_with_warnings(
+    doc: &Document,
+    page_id: ObjectId,
+) -> TextResult {
     let mut text = String::new();
     let mut warnings = Vec::new();
 
@@ -56,13 +59,19 @@ pub(crate) fn extract_text_from_page_with_warnings(doc: &Document, page_id: Obje
                 // Check ty (second operand) for line break — negative y means downward movement
                 if op.operands.len() >= 2 {
                     if let Object::Integer(ty) = &op.operands[1] {
-                        if *ty < 0 { text.push('\n'); }
+                        if *ty < 0 {
+                            text.push('\n');
+                        }
                     } else if let Object::Real(ty) = &op.operands[1]
-                        && *ty < 0.0 { text.push('\n');
+                        && *ty < 0.0
+                    {
+                        text.push('\n');
                     }
                 }
             }
-            "T*" => { text.push('\n'); }
+            "T*" => {
+                text.push('\n');
+            }
             "Tj" => {
                 if let Some(Object::String(bytes, _)) = op.operands.first() {
                     text.push_str(&String::from_utf8_lossy(bytes));
@@ -75,8 +84,12 @@ pub(crate) fn extract_text_from_page_with_warnings(doc: &Document, page_id: Obje
                             Object::String(bytes, _) => {
                                 text.push_str(&String::from_utf8_lossy(bytes));
                             }
-                            Object::Integer(n) if *n < -100 => { text.push(' '); }
-                            Object::Real(n) if *n < -100.0 => { text.push(' '); }
+                            Object::Integer(n) if *n < -100 => {
+                                text.push(' ');
+                            }
+                            Object::Real(n) if *n < -100.0 => {
+                                text.push(' ');
+                            }
                             _ => {}
                         }
                     }
@@ -104,42 +117,39 @@ pub(crate) fn extract_text_from_page_with_warnings(doc: &Document, page_id: Obje
 
 /// Check whether fonts on a page have known encodings.
 /// Returns warnings for fonts that lack ToUnicode maps or recognized encodings.
-pub(crate) fn check_page_font_encodings(doc: &Document, page_dict: &lopdf::Dictionary) -> Vec<String> {
+pub(crate) fn check_page_font_encodings(
+    doc: &Document,
+    page_dict: &lopdf::Dictionary,
+) -> Vec<String> {
     let mut warnings = Vec::new();
 
     // Resolve /Resources (may be a reference)
     let resources = match page_dict.get(b"Resources") {
         Ok(Object::Dictionary(d)) => d,
-        Ok(Object::Reference(r)) => {
-            match doc.get_object(*r) {
-                Ok(Object::Dictionary(d)) => d,
-                _ => return warnings,
-            }
-        }
+        Ok(Object::Reference(r)) => match doc.get_object(*r) {
+            Ok(Object::Dictionary(d)) => d,
+            _ => return warnings,
+        },
         _ => return warnings,
     };
 
     // Get /Font sub-dictionary
     let font_dict = match resources.get(b"Font") {
         Ok(Object::Dictionary(d)) => d,
-        Ok(Object::Reference(r)) => {
-            match doc.get_object(*r) {
-                Ok(Object::Dictionary(d)) => d,
-                _ => return warnings,
-            }
-        }
+        Ok(Object::Reference(r)) => match doc.get_object(*r) {
+            Ok(Object::Dictionary(d)) => d,
+            _ => return warnings,
+        },
         _ => return warnings,
     };
 
     for (name, value) in font_dict.iter() {
         let font_name = String::from_utf8_lossy(name);
         let font_obj = match value {
-            Object::Reference(r) => {
-                match doc.get_object(*r) {
-                    Ok(obj) => obj,
-                    _ => continue,
-                }
-            }
+            Object::Reference(r) => match doc.get_object(*r) {
+                Ok(obj) => obj,
+                _ => continue,
+            },
             obj => obj,
         };
 
@@ -158,11 +168,20 @@ pub(crate) fn check_page_font_encodings(doc: &Document, page_dict: &lopdf::Dicti
         let has_known_encoding = match dict.get(b"Encoding") {
             Ok(Object::Name(enc)) => {
                 let enc_str = String::from_utf8_lossy(enc);
-                matches!(enc_str.as_ref(), "WinAnsiEncoding" | "MacRomanEncoding" | "MacExpertEncoding" | "StandardEncoding")
+                matches!(
+                    enc_str.as_ref(),
+                    "WinAnsiEncoding"
+                        | "MacRomanEncoding"
+                        | "MacExpertEncoding"
+                        | "StandardEncoding"
+                )
             }
             Ok(Object::Dictionary(_)) => true, // Encoding dict with /Differences
             Ok(Object::Reference(r)) => {
-                matches!(doc.get_object(*r), Ok(Object::Dictionary(_)) | Ok(Object::Name(_)))
+                matches!(
+                    doc.get_object(*r),
+                    Ok(Object::Dictionary(_)) | Ok(Object::Name(_))
+                )
             }
             _ => false,
         };
@@ -172,12 +191,16 @@ pub(crate) fn check_page_font_encodings(doc: &Document, page_dict: &lopdf::Dicti
         }
 
         // Check /Subtype — CID fonts without ToUnicode are problematic
-        let subtype = dict.get(b"Subtype").ok()
+        let subtype = dict
+            .get(b"Subtype")
+            .ok()
             .and_then(|v| v.as_name().ok())
             .map(|n| String::from_utf8_lossy(n).into_owned())
             .unwrap_or_default();
 
-        let base_font = dict.get(b"BaseFont").ok()
+        let base_font = dict
+            .get(b"BaseFont")
+            .ok()
             .and_then(|v| v.as_name().ok())
             .map(|n| String::from_utf8_lossy(n).into_owned())
             .unwrap_or_else(|| font_name.to_string());
@@ -191,10 +214,20 @@ pub(crate) fn check_page_font_encodings(doc: &Document, page_dict: &lopdf::Dicti
             // Simple fonts without encoding — may use built-in encoding
             // Only warn if it looks custom (not a standard 14 font)
             let standard_14 = [
-                "Courier", "Courier-Bold", "Courier-BoldOblique", "Courier-Oblique",
-                "Helvetica", "Helvetica-Bold", "Helvetica-BoldOblique", "Helvetica-Oblique",
-                "Times-Roman", "Times-Bold", "Times-BoldItalic", "Times-Italic",
-                "Symbol", "ZapfDingbats",
+                "Courier",
+                "Courier-Bold",
+                "Courier-BoldOblique",
+                "Courier-Oblique",
+                "Helvetica",
+                "Helvetica-Bold",
+                "Helvetica-BoldOblique",
+                "Helvetica-Oblique",
+                "Times-Roman",
+                "Times-Bold",
+                "Times-BoldItalic",
+                "Times-Italic",
+                "Symbol",
+                "ZapfDingbats",
             ];
             if !standard_14.iter().any(|s| base_font == *s) {
                 warnings.push(format!(
@@ -211,7 +244,10 @@ pub(crate) fn check_page_font_encodings(doc: &Document, page_dict: &lopdf::Dicti
 pub(crate) fn print_text(writer: &mut impl Write, doc: &Document, page_filter: Option<&PageSpec>) {
     let page_list = match helpers::build_page_list(doc, page_filter) {
         Ok(list) => list,
-        Err(msg) => { eprintln!("Error: {}", msg); return; }
+        Err(msg) => {
+            eprintln!("Error: {}", msg);
+            return;
+        }
     };
 
     for (pn, page_id) in &page_list {
@@ -227,7 +263,9 @@ pub(crate) fn print_text(writer: &mut impl Write, doc: &Document, page_filter: O
 pub(crate) fn text_json_value(doc: &Document, page_filter: Option<&PageSpec>) -> Value {
     let page_list = match helpers::build_page_list(doc, page_filter) {
         Ok(list) => list,
-        Err(msg) => { return json!({"error": msg}); }
+        Err(msg) => {
+            return json!({"error": msg});
+        }
     };
 
     let mut page_results = Vec::new();
@@ -249,23 +287,26 @@ pub(crate) fn text_json_value(doc: &Document, page_filter: Option<&PageSpec>) ->
 }
 
 #[cfg(test)]
-pub(crate) fn print_text_json(writer: &mut impl Write, doc: &Document, page_filter: Option<&PageSpec>) {
+pub(crate) fn print_text_json(
+    writer: &mut impl Write,
+    doc: &Document,
+    page_filter: Option<&PageSpec>,
+) {
     use crate::helpers::json_pretty;
     let output = text_json_value(doc, page_filter);
     writeln!(writer, "{}", json_pretty(&output)).unwrap();
 }
-
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::test_utils::*;
     use crate::types::PageSpec;
+    use lopdf::Document;
+    use lopdf::Object;
     use lopdf::{Dictionary, Stream};
     use pretty_assertions::assert_eq;
-    use serde_json::{Value};
-    use lopdf::Object;
-    use lopdf::Document;
+    use serde_json::Value;
 
     #[test]
     fn extract_text_tj() {
@@ -398,7 +439,11 @@ mod tests {
         page.set("Contents", Object::Reference(c_id));
         let p_id = doc.add_object(Object::Dictionary(page));
         let text = extract_text_from_page(&doc, p_id);
-        assert!(text.contains("Quoted"), "Double-quote operator should extract text, got: {:?}", text);
+        assert!(
+            text.contains("Quoted"),
+            "Double-quote operator should extract text, got: {:?}",
+            text
+        );
     }
 
     #[test]
@@ -412,7 +457,10 @@ mod tests {
         page.set("Contents", Object::Reference(c_id));
         let p_id = doc.add_object(Object::Dictionary(page));
         let text = extract_text_from_page(&doc, p_id);
-        assert!(text.contains('\n'), "TD with negative ty should produce newline");
+        assert!(
+            text.contains('\n'),
+            "TD with negative ty should produce newline"
+        );
         assert!(text.contains("Line1"));
     }
 
@@ -446,7 +494,11 @@ mod tests {
         assert!(text.contains("Base"));
         assert!(text.contains("Super"));
         // Positive ty should not insert a newline between Base and Super
-        assert!(!text.contains("Base\nSuper"), "Positive ty should not produce newline, got: {:?}", text);
+        assert!(
+            !text.contains("Base\nSuper"),
+            "Positive ty should not produce newline, got: {:?}",
+            text
+        );
     }
 
     #[test]
@@ -462,7 +514,11 @@ mod tests {
         let text = extract_text_from_page(&doc, p_id);
         assert!(text.contains("Base"));
         assert!(text.contains("Super"));
-        assert!(!text.contains("Base\nSuper"), "Positive Real ty should not produce newline, got: {:?}", text);
+        assert!(
+            !text.contains("Base\nSuper"),
+            "Positive Real ty should not produce newline, got: {:?}",
+            text
+        );
     }
 
     #[test]
@@ -476,7 +532,10 @@ mod tests {
         page.set("Contents", Object::Reference(c_id));
         let p_id = doc.add_object(Object::Dictionary(page));
         let text = extract_text_from_page(&doc, p_id);
-        assert!(text.contains('\n'), "Td with negative Real ty should produce newline");
+        assert!(
+            text.contains('\n'),
+            "Td with negative Real ty should produce newline"
+        );
         assert!(text.contains("RealTd"));
     }
 
@@ -491,7 +550,11 @@ mod tests {
         page.set("Contents", Object::Reference(c_id));
         let p_id = doc.add_object(Object::Dictionary(page));
         let text = extract_text_from_page(&doc, p_id);
-        assert!(text.contains("Hello"), "Small negative should not insert space, got: {:?}", text);
+        assert!(
+            text.contains("Hello"),
+            "Small negative should not insert space, got: {:?}",
+            text
+        );
         assert!(!text.contains("He llo"), "Should not have space");
     }
 
@@ -512,7 +575,11 @@ mod tests {
         let block1_pos = text.find("Block1").unwrap();
         let block2_pos = text.find("Block2").unwrap();
         let between = &text[block1_pos + 6..block2_pos];
-        assert!(between.contains('\n'), "Should have newline between BT blocks, between: {:?}", between);
+        assert!(
+            between.contains('\n'),
+            "Should have newline between BT blocks, between: {:?}",
+            between
+        );
     }
 
     #[test]
@@ -524,14 +591,20 @@ mod tests {
         let s2 = Stream::new(Dictionary::new(), b"BT\n(Part2) Tj\nET".to_vec());
         let s2_id = doc.add_object(Object::Stream(s2));
         let mut page = Dictionary::new();
-        page.set("Contents", Object::Array(vec![
-            Object::Reference(s1_id),
-            Object::Reference(s2_id),
-        ]));
+        page.set(
+            "Contents",
+            Object::Array(vec![Object::Reference(s1_id), Object::Reference(s2_id)]),
+        );
         let p_id = doc.add_object(Object::Dictionary(page));
         let text = extract_text_from_page(&doc, p_id);
-        assert!(text.contains("Part1"), "Should extract text from first stream");
-        assert!(text.contains("Part2"), "Should extract text from second stream");
+        assert!(
+            text.contains("Part1"),
+            "Should extract text from first stream"
+        );
+        assert!(
+            text.contains("Part2"),
+            "Should extract text from second stream"
+        );
     }
 
     #[test]
@@ -540,7 +613,10 @@ mod tests {
         let mut doc = Document::new();
         let p_id = doc.add_object(Object::Integer(42));
         let text = extract_text_from_page(&doc, p_id);
-        assert!(text.is_empty(), "Non-dictionary page should return empty text");
+        assert!(
+            text.is_empty(),
+            "Non-dictionary page should return empty text"
+        );
     }
 
     #[test]
@@ -552,7 +628,10 @@ mod tests {
         page.set("Contents", Object::Reference(non_stream_id));
         let p_id = doc.add_object(Object::Dictionary(page));
         let text = extract_text_from_page(&doc, p_id);
-        assert!(text.is_empty(), "Non-stream contents should return empty text");
+        assert!(
+            text.is_empty(),
+            "Non-stream contents should return empty text"
+        );
     }
 
     #[test]
@@ -569,7 +648,11 @@ mod tests {
         page.set("Contents", Object::Reference(c_id));
         let p_id = doc.add_object(Object::Dictionary(page));
         let text = extract_text_from_page(&doc, p_id);
-        assert!(text.contains("Compressed"), "Should decode FlateDecode stream before extracting text, got: {:?}", text);
+        assert!(
+            text.contains("Compressed"),
+            "Should decode FlateDecode stream before extracting text, got: {:?}",
+            text
+        );
     }
 
     #[test]
@@ -591,5 +674,4 @@ mod tests {
         assert!(out.contains("--- Page 1 ---"));
         assert!(out.contains("--- Page 2 ---"));
     }
-
 }

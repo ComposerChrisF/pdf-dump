@@ -1,8 +1,10 @@
 use lopdf::{Document, Object, ObjectId};
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 use std::io::Write;
 
-use crate::helpers::{resolve_dict, obj_to_string_lossy, name_to_string, walk_name_tree, get_catalog};
+use crate::helpers::{
+    get_catalog, name_to_string, obj_to_string_lossy, resolve_dict, walk_name_tree,
+};
 
 pub(crate) struct EmbeddedFileInfo {
     pub name: String,
@@ -20,11 +22,19 @@ pub(crate) fn collect_embedded_files(doc: &Document) -> Vec<EmbeddedFileInfo> {
         Some(c) => c,
         None => return files,
     };
-    let names_dict = match catalog.get(b"Names").ok().and_then(|o| resolve_dict(doc, o)) {
+    let names_dict = match catalog
+        .get(b"Names")
+        .ok()
+        .and_then(|o| resolve_dict(doc, o))
+    {
         Some(d) => d,
         None => return files,
     };
-    let ef_dict = match names_dict.get(b"EmbeddedFiles").ok().and_then(|o| resolve_dict(doc, o)) {
+    let ef_dict = match names_dict
+        .get(b"EmbeddedFiles")
+        .ok()
+        .and_then(|o| resolve_dict(doc, o))
+    {
         Some(d) => d,
         None => return files,
     };
@@ -40,25 +50,23 @@ pub(crate) fn collect_embedded_files(doc: &Document) -> Vec<EmbeddedFileInfo> {
             _ => continue,
         };
 
-        let filename = filespec.get(b"UF").ok()
+        let filename = filespec
+            .get(b"UF")
+            .ok()
             .or_else(|| filespec.get(b"F").ok())
             .and_then(obj_to_string_lossy)
             .unwrap_or_else(|| name.clone());
 
         // Get the embedded file stream from /EF dict
-        let ef_ref = filespec.get(b"EF").ok()
-            .and_then(|v| resolve_dict(doc, v));
+        let ef_ref = filespec.get(b"EF").ok().and_then(|v| resolve_dict(doc, v));
         let (stream_id, stream_dict) = match ef_ref {
             Some(ef) => {
-                let stream_ref = ef.get(b"F").ok()
-                    .or_else(|| ef.get(b"UF").ok());
+                let stream_ref = ef.get(b"F").ok().or_else(|| ef.get(b"UF").ok());
                 match stream_ref {
-                    Some(Object::Reference(id)) => {
-                        match doc.get_object(*id) {
-                            Ok(Object::Stream(s)) => (*id, Some(s)),
-                            _ => (*id, None),
-                        }
-                    }
+                    Some(Object::Reference(id)) => match doc.get_object(*id) {
+                        Ok(Object::Stream(s)) => (*id, Some(s)),
+                        _ => (*id, None),
+                    },
                     _ => continue,
                 }
             }
@@ -75,7 +83,13 @@ pub(crate) fn collect_embedded_files(doc: &Document) -> Vec<EmbeddedFileInfo> {
             .and_then(|s| s.dict.get(b"Params").ok())
             .and_then(|v| resolve_dict(doc, v))
             .and_then(|d| d.get(b"Size").ok())
-            .and_then(|v| if let Object::Integer(i) = v { Some(*i) } else { None });
+            .and_then(|v| {
+                if let Object::Integer(i) = v {
+                    Some(*i)
+                } else {
+                    None
+                }
+            });
 
         files.push(EmbeddedFileInfo {
             name,
@@ -93,27 +107,49 @@ pub(crate) fn collect_embedded_files(doc: &Document) -> Vec<EmbeddedFileInfo> {
 pub(crate) fn print_embedded_files(writer: &mut impl Write, doc: &Document) {
     let files = collect_embedded_files(doc);
     wln!(writer, "{} embedded files\n", files.len());
-    if files.is_empty() { return; }
-    wln!(writer, "  {:>4}  {:<30} {:<24} {:>8}", "Obj#", "Filename", "MIME Type", "Size");
+    if files.is_empty() {
+        return;
+    }
+    wln!(
+        writer,
+        "  {:>4}  {:<30} {:<24} {:>8}",
+        "Obj#",
+        "Filename",
+        "MIME Type",
+        "Size"
+    );
     for f in &files {
-        let size_str = f.size.map(|s| s.to_string()).unwrap_or_else(|| "-".to_string());
-        wln!(writer, "  {:>4}  {:<30} {:<24} {:>8}", f.object_number, f.filename, f.mime_type, size_str);
+        let size_str = f
+            .size
+            .map(|s| s.to_string())
+            .unwrap_or_else(|| "-".to_string());
+        wln!(
+            writer,
+            "  {:>4}  {:<30} {:<24} {:>8}",
+            f.object_number,
+            f.filename,
+            f.mime_type,
+            size_str
+        );
     }
 }
 
 pub(crate) fn embedded_json_value(doc: &Document) -> Value {
     let files = collect_embedded_files(doc);
-    let items: Vec<Value> = files.iter().map(|f| {
-        json!({
-            "name": f.name,
-            "filename": f.filename,
-            "mime_type": f.mime_type,
-            "size": f.size,
-            "object_number": f.object_number,
-            "filespec_object": f.filespec_object.0,
-            "filespec_generation": f.filespec_object.1,
+    let items: Vec<Value> = files
+        .iter()
+        .map(|f| {
+            json!({
+                "name": f.name,
+                "filename": f.filename,
+                "mime_type": f.mime_type,
+                "size": f.size,
+                "object_number": f.object_number,
+                "filespec_object": f.filespec_object.0,
+                "filespec_generation": f.filespec_object.1,
+            })
         })
-    }).collect();
+        .collect();
     json!({
         "embedded_file_count": items.len(),
         "embedded_files": items,
@@ -127,15 +163,14 @@ pub(crate) fn print_embedded_files_json(writer: &mut impl Write, doc: &Document)
     writeln!(writer, "{}", json_pretty(&output)).unwrap();
 }
 
-
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::test_utils::*;
+    use lopdf::Object;
     use lopdf::{Dictionary, Stream, StringFormat};
     use pretty_assertions::assert_eq;
-    use serde_json::{Value};
-    use lopdf::Object;
+    use serde_json::Value;
 
     #[test]
     fn embedded_files_none() {
@@ -174,16 +209,22 @@ mod tests {
         // Filespec
         let mut filespec = Dictionary::new();
         filespec.set("Type", Object::Name(b"Filespec".to_vec()));
-        filespec.set("F", Object::String(b"invoice.pdf".to_vec(), StringFormat::Literal));
+        filespec.set(
+            "F",
+            Object::String(b"invoice.pdf".to_vec(), StringFormat::Literal),
+        );
         filespec.set("EF", Object::Dictionary(ef));
         doc.objects.insert((11, 0), Object::Dictionary(filespec));
 
         // Names tree (leaf)
         let mut ef_tree = Dictionary::new();
-        ef_tree.set("Names", Object::Array(vec![
-            Object::String(b"invoice.pdf".to_vec(), StringFormat::Literal),
-            Object::Reference((11, 0)),
-        ]));
+        ef_tree.set(
+            "Names",
+            Object::Array(vec![
+                Object::String(b"invoice.pdf".to_vec(), StringFormat::Literal),
+                Object::Reference((11, 0)),
+            ]),
+        );
         doc.objects.insert((12, 0), Object::Dictionary(ef_tree));
 
         // /Names dict in catalog
@@ -211,14 +252,20 @@ mod tests {
         // Filespec without /EF
         let mut filespec = Dictionary::new();
         filespec.set("Type", Object::Name(b"Filespec".to_vec()));
-        filespec.set("F", Object::String(b"missing.pdf".to_vec(), StringFormat::Literal));
+        filespec.set(
+            "F",
+            Object::String(b"missing.pdf".to_vec(), StringFormat::Literal),
+        );
         doc.objects.insert((11, 0), Object::Dictionary(filespec));
 
         let mut ef_tree = Dictionary::new();
-        ef_tree.set("Names", Object::Array(vec![
-            Object::String(b"missing.pdf".to_vec(), StringFormat::Literal),
-            Object::Reference((11, 0)),
-        ]));
+        ef_tree.set(
+            "Names",
+            Object::Array(vec![
+                Object::String(b"missing.pdf".to_vec(), StringFormat::Literal),
+                Object::Reference((11, 0)),
+            ]),
+        );
         doc.objects.insert((12, 0), Object::Dictionary(ef_tree));
 
         let mut names_dict = Dictionary::new();
@@ -264,16 +311,22 @@ mod tests {
         ef.set("F", Object::Reference((10, 0)));
         let mut filespec = Dictionary::new();
         filespec.set("Type", Object::Name(b"Filespec".to_vec()));
-        filespec.set("F", Object::String(b"readme.txt".to_vec(), StringFormat::Literal));
+        filespec.set(
+            "F",
+            Object::String(b"readme.txt".to_vec(), StringFormat::Literal),
+        );
         // No /UF key
         filespec.set("EF", Object::Dictionary(ef));
         doc.objects.insert((11, 0), Object::Dictionary(filespec));
 
         let mut ef_tree = Dictionary::new();
-        ef_tree.set("Names", Object::Array(vec![
-            Object::String(b"readme.txt".to_vec(), StringFormat::Literal),
-            Object::Reference((11, 0)),
-        ]));
+        ef_tree.set(
+            "Names",
+            Object::Array(vec![
+                Object::String(b"readme.txt".to_vec(), StringFormat::Literal),
+                Object::Reference((11, 0)),
+            ]),
+        );
         doc.objects.insert((12, 0), Object::Dictionary(ef_tree));
 
         let mut names_dict = Dictionary::new();
@@ -306,15 +359,21 @@ mod tests {
         ef.set("F", Object::Reference((10, 0)));
         let mut filespec = Dictionary::new();
         filespec.set("Type", Object::Name(b"Filespec".to_vec()));
-        filespec.set("F", Object::String(b"test.bin".to_vec(), StringFormat::Literal));
+        filespec.set(
+            "F",
+            Object::String(b"test.bin".to_vec(), StringFormat::Literal),
+        );
         filespec.set("EF", Object::Dictionary(ef));
         doc.objects.insert((11, 0), Object::Dictionary(filespec));
 
         let mut ef_tree = Dictionary::new();
-        ef_tree.set("Names", Object::Array(vec![
-            Object::String(b"test.bin".to_vec(), StringFormat::Literal),
-            Object::Reference((11, 0)),
-        ]));
+        ef_tree.set(
+            "Names",
+            Object::Array(vec![
+                Object::String(b"test.bin".to_vec(), StringFormat::Literal),
+                Object::Reference((11, 0)),
+            ]),
+        );
         doc.objects.insert((12, 0), Object::Dictionary(ef_tree));
 
         let mut names_dict = Dictionary::new();
@@ -347,15 +406,21 @@ mod tests {
         ef.set("F", Object::Reference((10, 0)));
         let mut filespec = Dictionary::new();
         filespec.set("Type", Object::Name(b"Filespec".to_vec()));
-        filespec.set("F", Object::String(b"test.bin".to_vec(), StringFormat::Literal));
+        filespec.set(
+            "F",
+            Object::String(b"test.bin".to_vec(), StringFormat::Literal),
+        );
         filespec.set("EF", Object::Dictionary(ef));
         doc.objects.insert((11, 0), Object::Dictionary(filespec));
 
         let mut ef_tree = Dictionary::new();
-        ef_tree.set("Names", Object::Array(vec![
-            Object::String(b"test.bin".to_vec(), StringFormat::Literal),
-            Object::Reference((11, 0)),
-        ]));
+        ef_tree.set(
+            "Names",
+            Object::Array(vec![
+                Object::String(b"test.bin".to_vec(), StringFormat::Literal),
+                Object::Reference((11, 0)),
+            ]),
+        );
         doc.objects.insert((12, 0), Object::Dictionary(ef_tree));
 
         let mut names_dict = Dictionary::new();
@@ -391,15 +456,21 @@ mod tests {
         ef.set("F", Object::Reference((10, 0)));
         let mut filespec = Dictionary::new();
         filespec.set("Type", Object::Name(b"Filespec".to_vec()));
-        filespec.set("UF", Object::String(b"notes.txt".to_vec(), StringFormat::Literal));
+        filespec.set(
+            "UF",
+            Object::String(b"notes.txt".to_vec(), StringFormat::Literal),
+        );
         filespec.set("EF", Object::Dictionary(ef));
         doc.objects.insert((11, 0), Object::Dictionary(filespec));
 
         let mut ef_tree = Dictionary::new();
-        ef_tree.set("Names", Object::Array(vec![
-            Object::String(b"notes.txt".to_vec(), StringFormat::Literal),
-            Object::Reference((11, 0)),
-        ]));
+        ef_tree.set(
+            "Names",
+            Object::Array(vec![
+                Object::String(b"notes.txt".to_vec(), StringFormat::Literal),
+                Object::Reference((11, 0)),
+            ]),
+        );
         doc.objects.insert((12, 0), Object::Dictionary(ef_tree));
 
         let mut names_dict = Dictionary::new();
@@ -427,10 +498,13 @@ mod tests {
         // Arrange: name tree entry value is not a Reference (should be skipped)
         let mut doc = Document::new();
         let mut ef_tree = Dictionary::new();
-        ef_tree.set("Names", Object::Array(vec![
-            Object::String(b"bad.pdf".to_vec(), StringFormat::Literal),
-            Object::Integer(42), // not a reference — should be skipped
-        ]));
+        ef_tree.set(
+            "Names",
+            Object::Array(vec![
+                Object::String(b"bad.pdf".to_vec(), StringFormat::Literal),
+                Object::Integer(42), // not a reference — should be skipped
+            ]),
+        );
         doc.objects.insert((12, 0), Object::Dictionary(ef_tree));
 
         let mut names_dict = Dictionary::new();
@@ -463,15 +537,21 @@ mod tests {
         ef.set("F", Object::Reference((10, 0)));
         let mut filespec = Dictionary::new();
         filespec.set("Type", Object::Name(b"Filespec".to_vec()));
-        filespec.set("F", Object::String(b"report.pdf".to_vec(), StringFormat::Literal));
+        filespec.set(
+            "F",
+            Object::String(b"report.pdf".to_vec(), StringFormat::Literal),
+        );
         filespec.set("EF", Object::Dictionary(ef));
         doc.objects.insert((11, 0), Object::Dictionary(filespec));
 
         let mut ef_tree = Dictionary::new();
-        ef_tree.set("Names", Object::Array(vec![
-            Object::String(b"report.pdf".to_vec(), StringFormat::Literal),
-            Object::Reference((11, 0)),
-        ]));
+        ef_tree.set(
+            "Names",
+            Object::Array(vec![
+                Object::String(b"report.pdf".to_vec(), StringFormat::Literal),
+                Object::Reference((11, 0)),
+            ]),
+        );
         doc.objects.insert((12, 0), Object::Dictionary(ef_tree));
         let mut names_dict = Dictionary::new();
         names_dict.set("EmbeddedFiles", Object::Reference((12, 0)));
@@ -487,5 +567,4 @@ mod tests {
         assert!(out.contains("report.pdf"));
         assert!(out.contains("5000"));
     }
-
 }

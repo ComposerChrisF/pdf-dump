@@ -29,31 +29,31 @@ macro_rules! w {
     };
 }
 
-pub(crate) mod types;
-pub(crate) mod stream;
-pub(crate) mod helpers;
-pub(crate) mod object;
-pub(crate) mod refs;
-pub(crate) mod summary;
-pub(crate) mod search;
-pub(crate) mod text;
-pub(crate) mod operators;
-pub(crate) mod resources;
-pub(crate) mod forms;
-pub(crate) mod fonts;
-pub(crate) mod images;
-pub(crate) mod validate;
-pub(crate) mod bookmarks;
 pub(crate) mod annotations;
-pub(crate) mod security;
+pub(crate) mod bookmarks;
 pub(crate) mod embedded;
-pub(crate) mod page_labels;
-pub(crate) mod tree;
-pub(crate) mod layers;
-pub(crate) mod structure;
-pub(crate) mod inspect;
-pub(crate) mod page_info;
 pub(crate) mod find_text;
+pub(crate) mod fonts;
+pub(crate) mod forms;
+pub(crate) mod helpers;
+pub(crate) mod images;
+pub(crate) mod inspect;
+pub(crate) mod layers;
+pub(crate) mod object;
+pub(crate) mod operators;
+pub(crate) mod page_info;
+pub(crate) mod page_labels;
+pub(crate) mod refs;
+pub(crate) mod resources;
+pub(crate) mod search;
+pub(crate) mod security;
+pub(crate) mod stream;
+pub(crate) mod structure;
+pub(crate) mod summary;
+pub(crate) mod text;
+pub(crate) mod tree;
+pub(crate) mod types;
+pub(crate) mod validate;
 
 use clap::Parser;
 use lopdf::{Document, Object};
@@ -73,7 +73,10 @@ pub fn run() {
 
     // Modifier validation
     if args.raw {
-        if !matches!(resolved, ResolvedMode::Standalone(StandaloneMode::Object { .. })) {
+        if !matches!(
+            resolved,
+            ResolvedMode::Standalone(StandaloneMode::Object { .. })
+        ) {
             eprintln!("Error: --raw requires --object.");
             std::process::exit(1);
         }
@@ -150,7 +153,10 @@ fn dispatch_standalone(
     mode: StandaloneMode,
 ) {
     match mode {
-        StandaloneMode::ExtractStream { obj_num, ref output } => {
+        StandaloneMode::ExtractStream {
+            obj_num,
+            ref output,
+        } => {
             let object_id = (obj_num, 0);
             match doc.get_object(object_id) {
                 Ok(Object::Stream(s)) => {
@@ -162,10 +168,18 @@ fn dispatch_standalone(
                         eprintln!("Error writing to output file: {}", e);
                         std::process::exit(1);
                     }
-                    wln!(out, "Successfully extracted object {} to '{}'.", obj_num, output.display());
+                    wln!(
+                        out,
+                        "Successfully extracted object {} to '{}'.",
+                        obj_num,
+                        output.display()
+                    );
                 }
                 Ok(_) => {
-                    eprintln!("Error: Object {} is not a stream and cannot be extracted to a file.", obj_num);
+                    eprintln!(
+                        "Error: Object {} is not a stream and cannot be extracted to a file.",
+                        obj_num
+                    );
                     std::process::exit(1);
                 }
                 Err(_) => {
@@ -188,7 +202,10 @@ fn dispatch_standalone(
                 inspect::print_info(out, doc, obj_num);
             }
         }
-        StandaloneMode::Search { ref expr, list_modifier } => {
+        StandaloneMode::Search {
+            ref expr,
+            list_modifier,
+        } => {
             let conditions = match search::parse_search_expr(expr) {
                 Ok(c) => c,
                 Err(e) => {
@@ -262,7 +279,9 @@ fn build_mode_json_value(
         DocMode::Operators => operators::operators_json_value(doc, page_spec),
         DocMode::Tags => structure::structure_json_value(doc, config),
         DocMode::Tree => tree::tree_json_value(doc, config),
-        DocMode::FindText => find_text::find_text_json_value(doc, args.find_text.as_deref().unwrap_or(""), page_spec),
+        DocMode::FindText => {
+            find_text::find_text_json_value(doc, args.find_text.as_deref().unwrap_or(""), page_spec)
+        }
         DocMode::Detail(sub) => match sub {
             types::DetailSub::Security => security::security_json_value(doc, &args.file),
             types::DetailSub::Embedded => embedded::embedded_json_value(doc),
@@ -291,7 +310,9 @@ fn dispatch_mode_text(
         DocMode::Text => text::print_text(out, doc, page_spec),
         DocMode::Operators => operators::print_operators(out, doc, page_spec),
         DocMode::Tags => structure::print_structure(out, doc, config),
-        DocMode::FindText => find_text::print_find_text(out, doc, args.find_text.as_deref().unwrap_or(""), page_spec),
+        DocMode::FindText => {
+            find_text::print_find_text(out, doc, args.find_text.as_deref().unwrap_or(""), page_spec)
+        }
         DocMode::Tree => {
             if args.dot {
                 tree::print_tree_dot(out, doc, config);
@@ -310,11 +331,11 @@ fn dispatch_mode_text(
 
 #[cfg(test)]
 pub(crate) mod test_utils {
-    use lopdf::{Document, Object, Stream};
-    use flate2::write::ZlibEncoder;
-    use flate2::Compression;
-    use std::io::Write;
     use crate::types::DumpConfig;
+    use flate2::Compression;
+    use flate2::write::ZlibEncoder;
+    use lopdf::{Document, Object, Stream};
+    use std::io::Write;
 
     pub fn output_of(f: impl FnOnce(&mut Vec<u8>)) -> String {
         let mut buf = Vec::new();
@@ -355,7 +376,15 @@ pub(crate) mod test_utils {
     }
 
     pub fn json_config() -> DumpConfig {
-        DumpConfig { decode: false, truncate: None, json: true, hex: false, depth: None, deref: false, raw: false }
+        DumpConfig {
+            decode: false,
+            truncate: None,
+            json: true,
+            hex: false,
+            depth: None,
+            deref: false,
+            raw: false,
+        }
     }
 
     pub fn build_two_page_doc() -> Document {
@@ -390,10 +419,15 @@ pub(crate) mod test_utils {
         p1.set("Parent", Object::Reference(pages_id));
         p1.set("Contents", Object::Reference(c1_id));
         p1.set("Resources", Object::Reference(resources_id));
-        p1.set("MediaBox", Object::Array(vec![
-            Object::Integer(0), Object::Integer(0),
-            Object::Integer(612), Object::Integer(792),
-        ]));
+        p1.set(
+            "MediaBox",
+            Object::Array(vec![
+                Object::Integer(0),
+                Object::Integer(0),
+                Object::Integer(612),
+                Object::Integer(792),
+            ]),
+        );
         let p1_id = doc.add_object(Object::Dictionary(p1));
 
         let mut p2 = Dictionary::new();
@@ -401,17 +435,22 @@ pub(crate) mod test_utils {
         p2.set("Parent", Object::Reference(pages_id));
         p2.set("Contents", Object::Reference(c2_id));
         p2.set("Resources", Object::Reference(resources_id));
-        p2.set("MediaBox", Object::Array(vec![
-            Object::Integer(0), Object::Integer(0),
-            Object::Integer(612), Object::Integer(792),
-        ]));
+        p2.set(
+            "MediaBox",
+            Object::Array(vec![
+                Object::Integer(0),
+                Object::Integer(0),
+                Object::Integer(612),
+                Object::Integer(792),
+            ]),
+        );
         let p2_id = doc.add_object(Object::Dictionary(p2));
 
         if let Ok(Object::Dictionary(d)) = doc.get_object_mut(pages_id) {
-            d.set("Kids", Object::Array(vec![
-                Object::Reference(p1_id),
-                Object::Reference(p2_id),
-            ]));
+            d.set(
+                "Kids",
+                Object::Array(vec![Object::Reference(p1_id), Object::Reference(p2_id)]),
+            );
         }
 
         let mut catalog = Dictionary::new();
@@ -447,15 +486,26 @@ pub(crate) mod test_utils {
         doc
     }
 
-    pub fn make_page_with_annots(doc: &mut Document, page_id: lopdf::ObjectId, parent_id: lopdf::ObjectId, annot_ids: Vec<lopdf::ObjectId>) {
+    pub fn make_page_with_annots(
+        doc: &mut Document,
+        page_id: lopdf::ObjectId,
+        parent_id: lopdf::ObjectId,
+        annot_ids: Vec<lopdf::ObjectId>,
+    ) {
         use lopdf::Dictionary;
 
         let mut page = Dictionary::new();
         page.set("Type", Object::Name(b"Page".to_vec()));
         page.set("Parent", Object::Reference(parent_id));
-        page.set("MediaBox", Object::Array(vec![
-            Object::Integer(0), Object::Integer(0), Object::Integer(612), Object::Integer(792),
-        ]));
+        page.set(
+            "MediaBox",
+            Object::Array(vec![
+                Object::Integer(0),
+                Object::Integer(0),
+                Object::Integer(612),
+                Object::Integer(792),
+            ]),
+        );
         let refs: Vec<Object> = annot_ids.iter().map(|id| Object::Reference(*id)).collect();
         page.set("Annots", Object::Array(refs));
         doc.objects.insert(page_id, Object::Dictionary(page));

@@ -1,10 +1,10 @@
-use lopdf::{content::Content, Document, Object, ObjectId};
-use serde_json::{json, Value};
+use lopdf::{Document, Object, ObjectId, content::Content};
+use serde_json::{Value, json};
 use std::collections::{BTreeMap, BTreeSet};
 use std::io::Write;
 
+use crate::helpers::{get_catalog, resolve_dict};
 use crate::stream::decode_stream;
-use crate::helpers::{resolve_dict, get_catalog};
 
 #[derive(PartialEq)]
 pub(crate) enum ValidationLevel {
@@ -43,13 +43,19 @@ pub(crate) struct ValidationReport {
     pub info_count: usize,
 }
 
-pub(crate) fn validate_pdf(doc: &Document, cached_pages: Option<&BTreeMap<u32, ObjectId>>) -> ValidationReport {
+pub(crate) fn validate_pdf(
+    doc: &Document,
+    cached_pages: Option<&BTreeMap<u32, ObjectId>>,
+) -> ValidationReport {
     let mut issues = Vec::new();
     let xref_ids = collect_xref_stream_ids(doc);
     let owned_pages;
     let pages = match cached_pages {
         Some(p) => p,
-        None => { owned_pages = doc.get_pages(); &owned_pages }
+        None => {
+            owned_pages = doc.get_pages();
+            &owned_pages
+        }
     };
 
     check_broken_references(doc, &xref_ids, &mut issues);
@@ -72,14 +78,22 @@ pub(crate) fn validate_pdf(doc: &Document, cached_pages: Option<&BTreeMap<u32, O
         }
     }
 
-    ValidationReport { issues, error_count, warn_count, info_count }
+    ValidationReport {
+        issues,
+        error_count,
+        warn_count,
+        info_count,
+    }
 }
 
 fn collect_xref_stream_ids(doc: &Document) -> BTreeSet<ObjectId> {
     let mut ids = BTreeSet::new();
     for (&id, object) in &doc.objects {
         if let Object::Stream(s) = object {
-            let is_xref = s.dict.get(b"Type").ok()
+            let is_xref = s
+                .dict
+                .get(b"Type")
+                .ok()
                 .and_then(|v| v.as_name().ok())
                 .is_some_and(|n| n == b"XRef");
             if is_xref {
@@ -90,16 +104,25 @@ fn collect_xref_stream_ids(doc: &Document) -> BTreeSet<ObjectId> {
     ids
 }
 
-fn check_broken_references(doc: &Document, xref_ids: &BTreeSet<ObjectId>, issues: &mut Vec<ValidationIssue>) {
+fn check_broken_references(
+    doc: &Document,
+    xref_ids: &BTreeSet<ObjectId>,
+    issues: &mut Vec<ValidationIssue>,
+) {
     let mut broken = Vec::new();
     for (&(obj_num, generation), object) in &doc.objects {
-        if xref_ids.contains(&(obj_num, generation)) { continue; }
+        if xref_ids.contains(&(obj_num, generation)) {
+            continue;
+        }
         broken.clear();
         collect_broken_refs(object, doc, &mut broken);
         for &(ref_num, ref_generation) in &broken {
             issues.push(ValidationIssue {
                 level: ValidationLevel::Error,
-                message: format!("Object {} {}: references non-existent object {} {}", obj_num, generation, ref_num, ref_generation),
+                message: format!(
+                    "Object {} {}: references non-existent object {} {}",
+                    obj_num, generation, ref_num, ref_generation
+                ),
             });
         }
     }
@@ -137,20 +160,28 @@ pub(crate) fn collect_reachable_ids(doc: &Document) -> BTreeSet<ObjectId> {
     fn walk_refs(obj: &Object, doc: &Document, visited: &mut BTreeSet<ObjectId>) {
         match obj {
             Object::Reference(id) => {
-                if visited.contains(id) { return; }
+                if visited.contains(id) {
+                    return;
+                }
                 visited.insert(*id);
                 if let Ok(resolved) = doc.get_object(*id) {
                     walk_refs(resolved, doc, visited);
                 }
             }
             Object::Array(arr) => {
-                for item in arr { walk_refs(item, doc, visited); }
+                for item in arr {
+                    walk_refs(item, doc, visited);
+                }
             }
             Object::Dictionary(dict) => {
-                for (_, v) in dict.iter() { walk_refs(v, doc, visited); }
+                for (_, v) in dict.iter() {
+                    walk_refs(v, doc, visited);
+                }
             }
             Object::Stream(stream) => {
-                for (_, v) in stream.dict.iter() { walk_refs(v, doc, visited); }
+                for (_, v) in stream.dict.iter() {
+                    walk_refs(v, doc, visited);
+                }
             }
             _ => {}
         }
@@ -164,28 +195,47 @@ pub(crate) fn collect_reachable_ids(doc: &Document) -> BTreeSet<ObjectId> {
     visited
 }
 
-fn check_unreachable_objects(doc: &Document, xref_ids: &BTreeSet<ObjectId>, issues: &mut Vec<ValidationIssue>) {
+fn check_unreachable_objects(
+    doc: &Document,
+    xref_ids: &BTreeSet<ObjectId>,
+    issues: &mut Vec<ValidationIssue>,
+) {
     let reachable = collect_reachable_ids(doc);
     for &(obj_num, generation) in doc.objects.keys() {
-        if xref_ids.contains(&(obj_num, generation)) { continue; }
+        if xref_ids.contains(&(obj_num, generation)) {
+            continue;
+        }
         if !reachable.contains(&(obj_num, generation)) {
             issues.push(ValidationIssue {
                 level: ValidationLevel::Warn,
-                message: format!("Object {} {} is unreachable from trailer", obj_num, generation),
+                message: format!(
+                    "Object {} {} is unreachable from trailer",
+                    obj_num, generation
+                ),
             });
         }
     }
 }
 
-fn check_required_keys(doc: &Document, pages: &BTreeMap<u32, ObjectId>, issues: &mut Vec<ValidationIssue>) {
+fn check_required_keys(
+    doc: &Document,
+    pages: &BTreeMap<u32, ObjectId>,
+    issues: &mut Vec<ValidationIssue>,
+) {
     // Catalog must have /Pages
-    if let Some(root_ref) = doc.trailer.get(b"Root").ok().and_then(|o| o.as_reference().ok()) {
+    if let Some(root_ref) = doc
+        .trailer
+        .get(b"Root")
+        .ok()
+        .and_then(|o| o.as_reference().ok())
+    {
         if let Ok(Object::Dictionary(catalog)) = doc.get_object(root_ref)
-            && catalog.get(b"Pages").is_err() {
-                issues.push(ValidationIssue {
-                    level: ValidationLevel::Error,
-                    message: "Catalog missing required /Pages key".to_string(),
-                });
+            && catalog.get(b"Pages").is_err()
+        {
+            issues.push(ValidationIssue {
+                level: ValidationLevel::Error,
+                message: "Catalog missing required /Pages key".to_string(),
+            });
         }
     } else {
         issues.push(ValidationIssue {
@@ -199,7 +249,10 @@ fn check_required_keys(doc: &Document, pages: &BTreeMap<u32, ObjectId>, issues: 
         if !page_has_media_box(doc, page_id) {
             issues.push(ValidationIssue {
                 level: ValidationLevel::Error,
-                message: format!("Page {} (object {}): missing /MediaBox (not found in page or parent chain)", page_num, page_id.0),
+                message: format!(
+                    "Page {} (object {}): missing /MediaBox (not found in page or parent chain)",
+                    page_num, page_id.0
+                ),
             });
         }
     }
@@ -209,7 +262,9 @@ fn page_has_media_box(doc: &Document, page_id: ObjectId) -> bool {
     let mut current_id = Some(page_id);
     let mut visited = BTreeSet::new();
     while let Some(id) = current_id {
-        if visited.contains(&id) { break; }
+        if visited.contains(&id) {
+            break;
+        }
         visited.insert(id);
         if let Ok(obj) = doc.get_object(id) {
             let dict = match obj {
@@ -221,8 +276,7 @@ fn page_has_media_box(doc: &Document, page_id: ObjectId) -> bool {
                 return true;
             }
             // Walk up the /Parent chain
-            current_id = dict.get(b"Parent").ok()
-                .and_then(|v| v.as_reference().ok());
+            current_id = dict.get(b"Parent").ok().and_then(|v| v.as_reference().ok());
         } else {
             break;
         }
@@ -233,19 +287,27 @@ fn page_has_media_box(doc: &Document, page_id: ObjectId) -> bool {
 fn check_stream_lengths(doc: &Document, issues: &mut Vec<ValidationIssue>) {
     for (&(obj_num, generation), object) in &doc.objects {
         if let Object::Stream(stream) = object
-            && let Ok(Object::Integer(declared)) = stream.dict.get(b"Length") {
-                let actual = stream.content.len() as i64;
-                if *declared != actual {
-                    issues.push(ValidationIssue {
-                        level: ValidationLevel::Warn,
-                        message: format!("Object {} {}: /Length is {} but stream content is {} bytes", obj_num, generation, declared, actual),
-                    });
-                }
+            && let Ok(Object::Integer(declared)) = stream.dict.get(b"Length")
+        {
+            let actual = stream.content.len() as i64;
+            if *declared != actual {
+                issues.push(ValidationIssue {
+                    level: ValidationLevel::Warn,
+                    message: format!(
+                        "Object {} {}: /Length is {} but stream content is {} bytes",
+                        obj_num, generation, declared, actual
+                    ),
+                });
+            }
         }
     }
 }
 
-fn check_page_tree(doc: &Document, pages: &BTreeMap<u32, ObjectId>, issues: &mut Vec<ValidationIssue>) {
+fn check_page_tree(
+    doc: &Document,
+    pages: &BTreeMap<u32, ObjectId>,
+    issues: &mut Vec<ValidationIssue>,
+) {
     let actual_count = pages.len();
 
     // Check /Pages /Count
@@ -257,12 +319,19 @@ fn check_page_tree(doc: &Document, pages: &BTreeMap<u32, ObjectId>, issues: &mut
     {
         issues.push(ValidationIssue {
             level: ValidationLevel::Error,
-            message: format!("/Pages /Count is {} but document has {} pages", count, actual_count),
+            message: format!(
+                "/Pages /Count is {} but document has {} pages",
+                count, actual_count
+            ),
         });
     }
 }
 
-fn check_content_stream_syntax(doc: &Document, pages: &BTreeMap<u32, ObjectId>, issues: &mut Vec<ValidationIssue>) {
+fn check_content_stream_syntax(
+    doc: &Document,
+    pages: &BTreeMap<u32, ObjectId>,
+    issues: &mut Vec<ValidationIssue>,
+) {
     for (&page_num, &page_id) in pages {
         let page_dict = match doc.get_object(page_id) {
             Ok(Object::Dictionary(d)) => d,
@@ -279,7 +348,10 @@ fn check_content_stream_syntax(doc: &Document, pages: &BTreeMap<u32, ObjectId>, 
                 if Content::decode(&decoded).is_err() {
                     issues.push(ValidationIssue {
                         level: ValidationLevel::Warn,
-                        message: format!("Page {}: content stream {} {} has invalid syntax", page_num, content_id.0, content_id.1),
+                        message: format!(
+                            "Page {}: content stream {} {} has invalid syntax",
+                            page_num, content_id.0, content_id.1
+                        ),
                     });
                 }
             }
@@ -294,15 +366,25 @@ fn check_font_requirements(doc: &Document, issues: &mut Vec<ValidationIssue>) {
             Object::Stream(s) => &s.dict,
             _ => continue,
         };
-        let is_font = dict.get(b"Type").ok()
+        let is_font = dict
+            .get(b"Type")
+            .ok()
             .and_then(|v| v.as_name().ok().map(|n| n == b"Font"))
             .unwrap_or(false);
-        if !is_font { continue; }
+        if !is_font {
+            continue;
+        }
 
-        let subtype = dict.get(b"Subtype").ok()
-            .and_then(|v| v.as_name().ok());
+        let subtype = dict.get(b"Subtype").ok().and_then(|v| v.as_name().ok());
 
-        let needs_basefont = matches!(subtype, Some(b"Type1") | Some(b"TrueType") | Some(b"Type0") | Some(b"CIDFontType0") | Some(b"CIDFontType2"));
+        let needs_basefont = matches!(
+            subtype,
+            Some(b"Type1")
+                | Some(b"TrueType")
+                | Some(b"Type0")
+                | Some(b"CIDFontType0")
+                | Some(b"CIDFontType2")
+        );
         if needs_basefont && dict.get(b"BaseFont").is_err() {
             issues.push(ValidationIssue {
                 level: ValidationLevel::Warn,
@@ -315,17 +397,23 @@ fn check_font_requirements(doc: &Document, issues: &mut Vec<ValidationIssue>) {
         if has_first != has_last {
             issues.push(ValidationIssue {
                 level: ValidationLevel::Warn,
-                message: format!("Font object {} {}: has {} but not {}", obj_num, generation,
+                message: format!(
+                    "Font object {} {}: has {} but not {}",
+                    obj_num,
+                    generation,
                     if has_first { "/FirstChar" } else { "/LastChar" },
-                    if has_first { "/LastChar" } else { "/FirstChar" }),
+                    if has_first { "/LastChar" } else { "/FirstChar" }
+                ),
             });
         }
 
-        if has_first && has_last
+        if has_first
+            && has_last
             && let (Ok(Object::Integer(first)), Ok(Object::Integer(last))) =
                 (dict.get(b"FirstChar"), dict.get(b"LastChar"))
         {
-            let expected_width_count = last.saturating_sub(*first).saturating_add(1).max(0) as usize;
+            let expected_width_count =
+                last.saturating_sub(*first).saturating_add(1).max(0) as usize;
             if let Ok(Object::Array(widths)) = dict.get(b"Widths")
                 && widths.len() != expected_width_count
             {
@@ -338,29 +426,34 @@ fn check_font_requirements(doc: &Document, issues: &mut Vec<ValidationIssue>) {
     }
 }
 
-fn check_page_tree_cycles(doc: &Document, pages: &BTreeMap<u32, ObjectId>, issues: &mut Vec<ValidationIssue>) {
+fn check_page_tree_cycles(
+    doc: &Document,
+    pages: &BTreeMap<u32, ObjectId>,
+    issues: &mut Vec<ValidationIssue>,
+) {
     for (&page_num, &page_id) in pages {
         let mut visited = BTreeSet::new();
         visited.insert(page_id);
-        let mut current = doc.get_object(page_id).ok()
-            .and_then(|o| match o {
-                Object::Dictionary(d) => d.get(b"Parent").ok().and_then(|v| v.as_reference().ok()),
-                _ => None,
-            });
+        let mut current = doc.get_object(page_id).ok().and_then(|o| match o {
+            Object::Dictionary(d) => d.get(b"Parent").ok().and_then(|v| v.as_reference().ok()),
+            _ => None,
+        });
         while let Some(parent_id) = current {
             if visited.contains(&parent_id) {
                 issues.push(ValidationIssue {
                     level: ValidationLevel::Error,
-                    message: format!("Page {}: cycle detected in /Parent chain (object {} {} seen twice)", page_num, parent_id.0, parent_id.1),
+                    message: format!(
+                        "Page {}: cycle detected in /Parent chain (object {} {} seen twice)",
+                        page_num, parent_id.0, parent_id.1
+                    ),
                 });
                 break;
             }
             visited.insert(parent_id);
-            current = doc.get_object(parent_id).ok()
-                .and_then(|o| match o {
-                    Object::Dictionary(d) => d.get(b"Parent").ok().and_then(|v| v.as_reference().ok()),
-                    _ => None,
-                });
+            current = doc.get_object(parent_id).ok().and_then(|o| match o {
+                Object::Dictionary(d) => d.get(b"Parent").ok().and_then(|v| v.as_reference().ok()),
+                _ => None,
+            });
         }
     }
 }
@@ -370,7 +463,11 @@ fn check_names_tree_structure(doc: &Document, issues: &mut Vec<ValidationIssue>)
         Some(c) => c,
         None => return,
     };
-    let names_dict = match catalog.get(b"Names").ok().and_then(|o| resolve_dict(doc, o)) {
+    let names_dict = match catalog
+        .get(b"Names")
+        .ok()
+        .and_then(|o| resolve_dict(doc, o))
+    {
         Some(d) => d,
         None => return,
     };
@@ -408,7 +505,10 @@ fn validate_name_tree_node(
     if !has_names && !has_kids {
         issues.push(ValidationIssue {
             level: ValidationLevel::Warn,
-            message: format!("Name tree '{}': node has neither /Names nor /Kids", tree_name),
+            message: format!(
+                "Name tree '{}': node has neither /Names nor /Kids",
+                tree_name
+            ),
         });
         return;
     }
@@ -418,7 +518,11 @@ fn validate_name_tree_node(
     {
         issues.push(ValidationIssue {
             level: ValidationLevel::Warn,
-            message: format!("Name tree '{}': /Names array has odd length ({})", tree_name, names.len()),
+            message: format!(
+                "Name tree '{}': /Names array has odd length ({})",
+                tree_name,
+                names.len()
+            ),
         });
     }
 
@@ -431,7 +535,10 @@ fn validate_name_tree_node(
             if visited.contains(&kid_id) {
                 issues.push(ValidationIssue {
                     level: ValidationLevel::Error,
-                    message: format!("Name tree '{}': cycle detected at object {} {}", tree_name, kid_id.0, kid_id.1),
+                    message: format!(
+                        "Name tree '{}': cycle detected at object {} {}",
+                        tree_name, kid_id.0, kid_id.1
+                    ),
                 });
                 continue;
             }
@@ -452,7 +559,10 @@ fn check_duplicate_objects(doc: &Document, issues: &mut Vec<ValidationIssue>) {
         if generations.len() > 1 {
             issues.push(ValidationIssue {
                 level: ValidationLevel::Info,
-                message: format!("Object {}: multiple generations present ({:?})", obj_num, generations),
+                message: format!(
+                    "Object {}: multiple generations present ({:?})",
+                    obj_num, generations
+                ),
             });
         }
     }
@@ -469,19 +579,28 @@ pub(crate) fn print_validation(writer: &mut impl Write, doc: &Document) {
     for issue in &report.issues {
         wln!(writer, "{} {}", issue.level.bracket_label(), issue.message);
     }
-    wln!(writer, "\nSummary: {} errors, {} warnings, {} info",
-        report.error_count, report.warn_count, report.info_count);
+    wln!(
+        writer,
+        "\nSummary: {} errors, {} warnings, {} info",
+        report.error_count,
+        report.warn_count,
+        report.info_count
+    );
 }
 
 pub(crate) fn validation_json_value(doc: &Document) -> Value {
     let report = validate_pdf(doc, None);
 
-    let issues: Vec<Value> = report.issues.iter().map(|i| {
-        json!({
-            "level": i.level.label(),
-            "message": i.message,
+    let issues: Vec<Value> = report
+        .issues
+        .iter()
+        .map(|i| {
+            json!({
+                "level": i.level.label(),
+                "message": i.message,
+            })
         })
-    }).collect();
+        .collect();
 
     json!({
         "error_count": report.error_count,
@@ -498,24 +617,28 @@ pub(crate) fn print_validation_json(writer: &mut impl Write, doc: &Document) {
     writeln!(writer, "{}", json_pretty(&output)).unwrap();
 }
 
-
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::test_utils::*;
+    use lopdf::Document;
+    use lopdf::Object;
     use lopdf::{Dictionary, Stream, StringFormat};
     use pretty_assertions::assert_eq;
-    use serde_json::{Value};
-    use lopdf::Object;
-    use lopdf::Document;
+    use serde_json::Value;
     use std::collections::BTreeSet;
 
     #[test]
     fn validate_empty_doc_reports_missing_root() {
         let doc = Document::new();
         let report = validate_pdf(&doc, None);
-        assert!(report.issues.iter().any(|i|
-            i.level == ValidationLevel::Error && i.message.contains("Trailer missing /Root")));
+        assert!(
+            report
+                .issues
+                .iter()
+                .any(|i| i.level == ValidationLevel::Error
+                    && i.message.contains("Trailer missing /Root"))
+        );
     }
 
     #[test]
@@ -614,10 +737,15 @@ mod tests {
     fn page_has_media_box_direct() {
         let mut doc = Document::new();
         let mut page_dict = Dictionary::new();
-        page_dict.set(b"MediaBox", Object::Array(vec![
-            Object::Integer(0), Object::Integer(0),
-            Object::Integer(612), Object::Integer(792),
-        ]));
+        page_dict.set(
+            b"MediaBox",
+            Object::Array(vec![
+                Object::Integer(0),
+                Object::Integer(0),
+                Object::Integer(612),
+                Object::Integer(792),
+            ]),
+        );
         doc.objects.insert((1, 0), Object::Dictionary(page_dict));
 
         assert!(page_has_media_box(&doc, (1, 0)));
@@ -629,10 +757,15 @@ mod tests {
         // Parent has MediaBox
         let mut parent = Dictionary::new();
         parent.set(b"Type", Object::Name(b"Pages".to_vec()));
-        parent.set(b"MediaBox", Object::Array(vec![
-            Object::Integer(0), Object::Integer(0),
-            Object::Integer(612), Object::Integer(792),
-        ]));
+        parent.set(
+            b"MediaBox",
+            Object::Array(vec![
+                Object::Integer(0),
+                Object::Integer(0),
+                Object::Integer(612),
+                Object::Integer(792),
+            ]),
+        );
         doc.objects.insert((2, 0), Object::Dictionary(parent));
 
         // Page without MediaBox, has Parent
@@ -731,9 +864,7 @@ mod tests {
     #[test]
     fn collect_broken_refs_nested_array() {
         let doc = Document::new();
-        let obj = Object::Array(vec![
-            Object::Array(vec![Object::Reference((88, 0))]),
-        ]);
+        let obj = Object::Array(vec![Object::Array(vec![Object::Reference((88, 0))])]);
 
         let mut broken = Vec::new();
         collect_broken_refs(&obj, &doc, &mut broken);
@@ -797,8 +928,8 @@ mod tests {
 
         let mut issues = Vec::new();
         check_required_keys(&doc, &doc.get_pages(), &mut issues);
-        assert!(issues.iter().any(|i|
-            i.level == ValidationLevel::Error && i.message.contains("Catalog missing required /Pages")));
+        assert!(issues.iter().any(|i| i.level == ValidationLevel::Error
+            && i.message.contains("Catalog missing required /Pages")));
     }
 
     #[test]
@@ -828,10 +959,15 @@ mod tests {
         // Grandparent has MediaBox
         let mut grandparent = Dictionary::new();
         grandparent.set(b"Type", Object::Name(b"Pages".to_vec()));
-        grandparent.set(b"MediaBox", Object::Array(vec![
-            Object::Integer(0), Object::Integer(0),
-            Object::Integer(612), Object::Integer(792),
-        ]));
+        grandparent.set(
+            b"MediaBox",
+            Object::Array(vec![
+                Object::Integer(0),
+                Object::Integer(0),
+                Object::Integer(612),
+                Object::Integer(792),
+            ]),
+        );
         doc.objects.insert((3, 0), Object::Dictionary(grandparent));
 
         // Parent without MediaBox, points up
@@ -920,10 +1056,15 @@ mod tests {
         let mut page = Dictionary::new();
         page.set(b"Type", Object::Name(b"Page".to_vec()));
         page.set(b"Parent", Object::Reference((2, 0)));
-        page.set(b"MediaBox", Object::Array(vec![
-            Object::Integer(0), Object::Integer(0),
-            Object::Integer(612), Object::Integer(792),
-        ]));
+        page.set(
+            b"MediaBox",
+            Object::Array(vec![
+                Object::Integer(0),
+                Object::Integer(0),
+                Object::Integer(612),
+                Object::Integer(792),
+            ]),
+        );
         doc.objects.insert((3, 0), Object::Dictionary(page));
 
         let mut pages_dict = Dictionary::new();
@@ -955,9 +1096,11 @@ mod tests {
 
         let report = validate_pdf(&doc, None);
         assert!(report.error_count > 0); // missing root + broken ref
-        assert!(report.warn_count > 0);  // unreachable
-        assert_eq!(report.error_count + report.warn_count + report.info_count,
-                   report.issues.len());
+        assert!(report.warn_count > 0); // unreachable
+        assert_eq!(
+            report.error_count + report.warn_count + report.info_count,
+            report.issues.len()
+        );
     }
 
     #[test]
@@ -1019,9 +1162,15 @@ mod tests {
         let mut page = Dictionary::new();
         page.set("Type", Object::Name(b"Page".to_vec()));
         page.set("Contents", Object::Reference(c_id));
-        page.set("MediaBox", Object::Array(vec![
-            Object::Integer(0), Object::Integer(0), Object::Integer(612), Object::Integer(792),
-        ]));
+        page.set(
+            "MediaBox",
+            Object::Array(vec![
+                Object::Integer(0),
+                Object::Integer(0),
+                Object::Integer(612),
+                Object::Integer(792),
+            ]),
+        );
         let p_id = doc.add_object(Object::Dictionary(page));
         let mut pages = Dictionary::new();
         pages.set("Type", Object::Name(b"Pages".to_vec()));
@@ -1036,7 +1185,10 @@ mod tests {
 
         let mut issues = Vec::new();
         check_content_stream_syntax(&doc, &doc.get_pages(), &mut issues);
-        assert!(issues.is_empty(), "Valid content stream should produce no issues");
+        assert!(
+            issues.is_empty(),
+            "Valid content stream should produce no issues"
+        );
     }
 
     #[test]
@@ -1048,9 +1200,15 @@ mod tests {
         let mut page = Dictionary::new();
         page.set("Type", Object::Name(b"Page".to_vec()));
         page.set("Contents", Object::Reference(c_id));
-        page.set("MediaBox", Object::Array(vec![
-            Object::Integer(0), Object::Integer(0), Object::Integer(612), Object::Integer(792),
-        ]));
+        page.set(
+            "MediaBox",
+            Object::Array(vec![
+                Object::Integer(0),
+                Object::Integer(0),
+                Object::Integer(612),
+                Object::Integer(792),
+            ]),
+        );
         let p_id = doc.add_object(Object::Dictionary(page));
         let mut pages = Dictionary::new();
         pages.set("Type", Object::Name(b"Pages".to_vec()));
@@ -1081,7 +1239,11 @@ mod tests {
 
         let mut issues = Vec::new();
         check_font_requirements(&doc, &mut issues);
-        assert!(issues.iter().any(|i| i.message.contains("missing /BaseFont")));
+        assert!(
+            issues
+                .iter()
+                .any(|i| i.message.contains("missing /BaseFont"))
+        );
     }
 
     #[test]
@@ -1130,7 +1292,11 @@ mod tests {
 
         let mut issues = Vec::new();
         check_font_requirements(&doc, &mut issues);
-        assert!(issues.iter().any(|i| i.message.contains("/FirstChar") && i.message.contains("/LastChar")));
+        assert!(
+            issues
+                .iter()
+                .any(|i| i.message.contains("/FirstChar") && i.message.contains("/LastChar"))
+        );
     }
 
     #[test]
@@ -1140,9 +1306,15 @@ mod tests {
         let mut page = Dictionary::new();
         page.set("Type", Object::Name(b"Page".to_vec()));
         page.set("Parent", Object::Reference((2, 0)));
-        page.set("MediaBox", Object::Array(vec![
-            Object::Integer(0), Object::Integer(0), Object::Integer(612), Object::Integer(792),
-        ]));
+        page.set(
+            "MediaBox",
+            Object::Array(vec![
+                Object::Integer(0),
+                Object::Integer(0),
+                Object::Integer(612),
+                Object::Integer(792),
+            ]),
+        );
         doc.objects.insert((10, 0), Object::Dictionary(page));
 
         let mut parent1 = Dictionary::new();
@@ -1173,13 +1345,17 @@ mod tests {
         let mut doc = Document::new();
         let mut names_subtree = Dictionary::new();
         // Odd-length Names array
-        names_subtree.set("Names", Object::Array(vec![
-            Object::String(b"key1".to_vec(), StringFormat::Literal),
-            Object::Integer(1),
-            Object::String(b"key2".to_vec(), StringFormat::Literal),
-            // Missing value for key2 → odd length = 3
-        ]));
-        doc.objects.insert((5, 0), Object::Dictionary(names_subtree));
+        names_subtree.set(
+            "Names",
+            Object::Array(vec![
+                Object::String(b"key1".to_vec(), StringFormat::Literal),
+                Object::Integer(1),
+                Object::String(b"key2".to_vec(), StringFormat::Literal),
+                // Missing value for key2 → odd length = 3
+            ]),
+        );
+        doc.objects
+            .insert((5, 0), Object::Dictionary(names_subtree));
 
         let mut ef_dict = Dictionary::new();
         ef_dict.set("Kids", Object::Array(vec![Object::Reference((5, 0))]));
@@ -1223,7 +1399,11 @@ mod tests {
 
         let mut issues = Vec::new();
         check_names_tree_structure(&doc, &mut issues);
-        assert!(issues.iter().any(|i| i.message.contains("neither /Names nor /Kids")));
+        assert!(
+            issues
+                .iter()
+                .any(|i| i.message.contains("neither /Names nor /Kids"))
+        );
     }
 
     #[test]
@@ -1235,7 +1415,12 @@ mod tests {
 
         let mut issues = Vec::new();
         check_duplicate_objects(&doc, &mut issues);
-        assert!(issues.iter().any(|i| i.message.contains("Object 1") && i.message.contains("multiple generations")));
+        assert!(
+            issues
+                .iter()
+                .any(|i| i.message.contains("Object 1")
+                    && i.message.contains("multiple generations"))
+        );
     }
 
     #[test]
@@ -1280,14 +1465,22 @@ mod tests {
         let report = validate_pdf(&doc, None);
 
         // Should NOT report broken ref from XRef stream
-        assert!(!report.issues.iter().any(|i|
-            i.level == ValidationLevel::Error && i.message.contains("201")),
-            "XRef stream's dangling /Encrypt ref should be skipped");
+        assert!(
+            !report
+                .issues
+                .iter()
+                .any(|i| i.level == ValidationLevel::Error && i.message.contains("201")),
+            "XRef stream's dangling /Encrypt ref should be skipped"
+        );
 
         // Should NOT report XRef stream as unreachable
-        assert!(!report.issues.iter().any(|i|
-            i.level == ValidationLevel::Warn && i.message.contains("202")),
-            "XRef stream should not be flagged as unreachable");
+        assert!(
+            !report
+                .issues
+                .iter()
+                .any(|i| i.level == ValidationLevel::Warn && i.message.contains("202")),
+            "XRef stream should not be flagged as unreachable"
+        );
     }
 
     #[test]
@@ -1314,5 +1507,4 @@ mod tests {
         let ids = collect_xref_stream_ids(&doc);
         assert!(ids.is_empty());
     }
-
 }

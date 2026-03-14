@@ -1,16 +1,25 @@
 use lopdf::{Document, Object, ObjectId};
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 
 use crate::helpers::object_type_label;
 use crate::object::deref_summary;
 
-pub(crate) fn collect_references_in_object(obj: &Object, target_id: ObjectId, path: &str) -> Vec<String> {
+pub(crate) fn collect_references_in_object(
+    obj: &Object,
+    target_id: ObjectId,
+    path: &str,
+) -> Vec<String> {
     let mut found = Vec::new();
     collect_references_in_object_into(obj, target_id, path, &mut found);
     found
 }
 
-pub(crate) fn collect_references_in_object_into(obj: &Object, target_id: ObjectId, path: &str, found: &mut Vec<String>) {
+pub(crate) fn collect_references_in_object_into(
+    obj: &Object,
+    target_id: ObjectId,
+    path: &str,
+    found: &mut Vec<String>,
+) {
     match obj {
         Object::Reference(id) if *id == target_id => {
             found.push(path.to_string());
@@ -65,27 +74,34 @@ pub(crate) fn collect_reverse_refs(doc: &Document, target_id: ObjectId) -> Vec<R
 }
 
 pub(crate) fn reverse_refs_to_json(refs: &[ReverseRef]) -> Vec<Value> {
-    refs.iter().map(|r| json!({
-        "object_number": r.obj_num,
-        "generation": r.generation,
-        "kind": r.kind,
-        "type": r.type_label,
-        "via_keys": r.paths,
-    })).collect()
+    refs.iter()
+        .map(|r| {
+            json!({
+                "object_number": r.obj_num,
+                "generation": r.generation,
+                "kind": r.kind,
+                "type": r.type_label,
+                "via_keys": r.paths,
+            })
+        })
+        .collect()
 }
 
 pub(crate) fn collect_forward_refs_json(doc: &Document, object: &Object) -> Vec<Value> {
-    collect_refs_with_paths(object).iter().map(|(path, ref_id)| {
-        let mut entry = json!({
-            "path": path,
-            "object_number": ref_id.0,
-            "generation": ref_id.1,
-        });
-        if let Ok(resolved) = doc.get_object(*ref_id) {
-            entry["summary"] = json!(deref_summary(resolved));
-        }
-        entry
-    }).collect()
+    collect_refs_with_paths(object)
+        .iter()
+        .map(|(path, ref_id)| {
+            let mut entry = json!({
+                "path": path,
+                "object_number": ref_id.0,
+                "generation": ref_id.1,
+            });
+            if let Ok(resolved) = doc.get_object(*ref_id) {
+                entry["summary"] = json!(deref_summary(resolved));
+            }
+            entry
+        })
+        .collect()
 }
 
 pub(crate) fn collect_refs_from_dict(dict: &lopdf::Dictionary) -> Vec<(String, ObjectId)> {
@@ -140,14 +156,13 @@ fn collect_refs_recursive(obj: &Object, path: &str, refs: &mut Vec<(String, Obje
     }
 }
 
-
 #[cfg(test)]
 mod tests {
     use super::*;
 
+    use lopdf::Object;
     use lopdf::{Dictionary, Stream, StringFormat};
     use pretty_assertions::assert_eq;
-    use lopdf::Object;
 
     #[test]
     fn collect_refs_direct_reference() {
@@ -172,10 +187,7 @@ mod tests {
     #[test]
     fn collect_refs_in_array() {
         let target = (5, 0);
-        let obj = Object::Array(vec![
-            Object::Integer(1),
-            Object::Reference(target),
-        ]);
+        let obj = Object::Array(vec![Object::Integer(1), Object::Reference(target)]);
         let paths = collect_references_in_object(&obj, target, "");
         assert_eq!(paths.len(), 1);
         assert_eq!(paths[0], "[1]");
@@ -233,10 +245,7 @@ mod tests {
     fn collect_refs_mixed_containers_dict_array_ref() {
         // Dict → Array → Reference
         let target = (7, 0);
-        let inner_array = Object::Array(vec![
-            Object::Integer(42),
-            Object::Reference(target),
-        ]);
+        let inner_array = Object::Array(vec![Object::Integer(42), Object::Reference(target)]);
         let mut dict = Dictionary::new();
         dict.set(b"Kids", inner_array);
         let obj = Object::Dictionary(dict);
@@ -283,10 +292,17 @@ mod tests {
         assert!(collect_references_in_object(&Object::Boolean(true), target, "").is_empty());
         assert!(collect_references_in_object(&Object::Integer(42), target, "").is_empty());
         assert!(collect_references_in_object(&Object::Real(2.72), target, "").is_empty());
-        assert!(collect_references_in_object(&Object::Name(b"Test".to_vec()), target, "").is_empty());
-        assert!(collect_references_in_object(
-            &Object::String(b"test".to_vec(), StringFormat::Literal), target, ""
-        ).is_empty());
+        assert!(
+            collect_references_in_object(&Object::Name(b"Test".to_vec()), target, "").is_empty()
+        );
+        assert!(
+            collect_references_in_object(
+                &Object::String(b"test".to_vec(), StringFormat::Literal),
+                target,
+                ""
+            )
+            .is_empty()
+        );
     }
 
     #[test]
@@ -306,12 +322,10 @@ mod tests {
 
     #[test]
     fn collect_refs_with_paths_array_in_dict() {
-        let dict = Dictionary::from_iter(vec![
-            ("Kids", Object::Array(vec![
-                Object::Reference((1, 0)),
-                Object::Reference((2, 0)),
-            ])),
-        ]);
+        let dict = Dictionary::from_iter(vec![(
+            "Kids",
+            Object::Array(vec![Object::Reference((1, 0)), Object::Reference((2, 0))]),
+        )]);
         let refs = collect_refs_with_paths(&Object::Dictionary(dict));
         assert_eq!(refs.len(), 2);
         assert_eq!(refs[0].0, "/Kids[0]");
@@ -369,16 +383,13 @@ mod tests {
     #[test]
     fn collect_refs_with_paths_nested_array_in_array() {
         // Array containing a nested array with references
-        let arr = Object::Array(vec![
-            Object::Array(vec![
-                Object::Reference((1, 0)),
-                Object::Reference((2, 0)),
-            ]),
-        ]);
+        let arr = Object::Array(vec![Object::Array(vec![
+            Object::Reference((1, 0)),
+            Object::Reference((2, 0)),
+        ])]);
         let refs = collect_refs_with_paths(&arr);
         assert_eq!(refs.len(), 2);
         assert_eq!(refs[0].0, "[0][0]");
         assert_eq!(refs[1].0, "[0][1]");
     }
-
 }

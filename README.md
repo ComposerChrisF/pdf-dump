@@ -110,6 +110,15 @@ pdf-dump file.pdf --validate --json         # Validation results as JSON
 
 FlateDecode, ASCII85Decode, ASCIIHexDecode, LZWDecode, RunLengthDecode — applied sequentially for multi-filter pipelines.
 
+## Acknowledgments
+
+Built on [lopdf](https://github.com/nickel-org/lopdf), a pure-Rust PDF parsing library.
+
+## Related Projects
+
+- [medpdf](https://github.com/ComposerChrisF/medpdf) — Medium-level PDF API over lopdf (includes medpdf-image for image embedding)
+- [pdf-maker](https://github.com/ComposerChrisF/pdf-maker) — CLI tool for merging, watermarking, and manipulating PDF files
+
 ## License
 
 Licensed under either of

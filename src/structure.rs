@@ -1,10 +1,10 @@
 use lopdf::{Document, Object, ObjectId};
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 use std::collections::{BTreeMap, BTreeSet};
 use std::io::Write;
 
+use crate::helpers::{get_catalog, obj_to_string_lossy, resolve_dict};
 use crate::types::DumpConfig;
-use crate::helpers::{resolve_dict, obj_to_string_lossy, get_catalog};
 
 pub(crate) struct StructElemInfo {
     pub object_id: Option<ObjectId>,
@@ -23,20 +23,33 @@ pub(crate) fn collect_structure_tree(doc: &Document) -> (bool, Vec<StructElemInf
     };
 
     // Check MarkInfo
-    let is_marked = catalog.get(b"MarkInfo").ok()
+    let is_marked = catalog
+        .get(b"MarkInfo")
+        .ok()
         .and_then(|v| resolve_dict(doc, v))
         .and_then(|d| d.get(b"Marked").ok())
-        .and_then(|m| if let Object::Boolean(b) = m { Some(*b) } else { None })
+        .and_then(|m| {
+            if let Object::Boolean(b) = m {
+                Some(*b)
+            } else {
+                None
+            }
+        })
         .unwrap_or(false);
 
-    let struct_tree_root = match catalog.get(b"StructTreeRoot").ok().and_then(|o| resolve_dict(doc, o)) {
+    let struct_tree_root = match catalog
+        .get(b"StructTreeRoot")
+        .ok()
+        .and_then(|o| resolve_dict(doc, o))
+    {
         Some(d) => d,
         None => return (is_marked, Vec::new()),
     };
 
     // Build page_id -> page_num lookup
     let pages = doc.get_pages();
-    let page_lookup: BTreeMap<ObjectId, u32> = pages.into_iter().map(|(num, id)| (id, num)).collect();
+    let page_lookup: BTreeMap<ObjectId, u32> =
+        pages.into_iter().map(|(num, id)| (id, num)).collect();
 
     let mut visited = BTreeSet::new();
     let children = collect_struct_children(doc, struct_tree_root, &page_lookup, &mut visited);
@@ -44,7 +57,12 @@ pub(crate) fn collect_structure_tree(doc: &Document) -> (bool, Vec<StructElemInf
     (is_marked, children)
 }
 
-fn collect_struct_children(doc: &Document, dict: &lopdf::Dictionary, page_lookup: &BTreeMap<ObjectId, u32>, visited: &mut BTreeSet<ObjectId>) -> Vec<StructElemInfo> {
+fn collect_struct_children(
+    doc: &Document,
+    dict: &lopdf::Dictionary,
+    page_lookup: &BTreeMap<ObjectId, u32>,
+    visited: &mut BTreeSet<ObjectId>,
+) -> Vec<StructElemInfo> {
     let k = match dict.get(b"K").ok() {
         Some(v) => v,
         None => return Vec::new(),
@@ -59,27 +77,30 @@ fn collect_struct_children(doc: &Document, dict: &lopdf::Dictionary, page_lookup
     for item in items {
         match item {
             Object::Reference(id) => {
-                if visited.contains(id) { continue; }
+                if visited.contains(id) {
+                    continue;
+                }
                 visited.insert(*id);
                 if let Ok(Object::Dictionary(child_dict)) = doc.get_object(*id)
-                    && let Ok(role_obj) = child_dict.get(b"S") {
+                    && let Ok(role_obj) = child_dict.get(b"S")
+                {
                     let role = if let Object::Name(n) = role_obj {
                         String::from_utf8_lossy(n).into_owned()
                     } else {
                         "-".to_string()
                     };
 
-                    let page = child_dict.get(b"Pg").ok()
+                    let page = child_dict
+                        .get(b"Pg")
+                        .ok()
                         .and_then(|v| v.as_reference().ok())
                         .and_then(|pg_id| page_lookup.get(&pg_id).copied());
 
                     let mcid = extract_mcid(child_dict);
 
-                    let title = child_dict.get(b"T").ok()
-                        .and_then(obj_to_string_lossy);
+                    let title = child_dict.get(b"T").ok().and_then(obj_to_string_lossy);
 
-                    let alt = child_dict.get(b"Alt").ok()
-                        .and_then(obj_to_string_lossy);
+                    let alt = child_dict.get(b"Alt").ok().and_then(obj_to_string_lossy);
 
                     let children = collect_struct_children(doc, child_dict, page_lookup, visited);
 
@@ -134,7 +155,8 @@ fn extract_mcid(dict: &lopdf::Dictionary) -> Option<i64> {
                     Object::Integer(n) => return Some(*n),
                     Object::Dictionary(d) => {
                         if let Ok(mcid) = d.get(b"MCID")
-                            && let Ok(n) = mcid.as_i64() {
+                            && let Ok(n) = mcid.as_i64()
+                        {
                             return Some(n);
                         }
                     }
@@ -148,23 +170,38 @@ fn extract_mcid(dict: &lopdf::Dictionary) -> Option<i64> {
 }
 
 fn count_struct_elems(items: &[StructElemInfo]) -> usize {
-    items.iter().map(|e| 1 + count_struct_elems(&e.children)).sum()
+    items
+        .iter()
+        .map(|e| 1 + count_struct_elems(&e.children))
+        .sum()
 }
 
 pub(crate) fn print_structure(writer: &mut impl Write, doc: &Document, config: &DumpConfig) {
     let (is_marked, tree) = collect_structure_tree(doc);
-    wln!(writer, "Tagged PDF: {}", if is_marked { "yes" } else { "no" });
+    wln!(
+        writer,
+        "Tagged PDF: {}",
+        if is_marked { "yes" } else { "no" }
+    );
     let count = count_struct_elems(&tree);
     wln!(writer, "Structure elements: {}\n", count);
-    if tree.is_empty() { return; }
+    if tree.is_empty() {
+        return;
+    }
     for elem in &tree {
         print_struct_elem(writer, elem, 0, config);
     }
 }
 
-fn print_struct_elem(writer: &mut impl Write, elem: &StructElemInfo, depth: usize, config: &DumpConfig) {
+fn print_struct_elem(
+    writer: &mut impl Write,
+    elem: &StructElemInfo,
+    depth: usize,
+    config: &DumpConfig,
+) {
     if let Some(max_depth) = config.depth
-        && depth > max_depth {
+        && depth > max_depth
+    {
         return;
     }
 
@@ -190,8 +227,13 @@ fn print_struct_elem(writer: &mut impl Write, elem: &StructElemInfo, depth: usiz
 
     // At depth limit, show children count instead of recursing
     if let Some(max_depth) = config.depth
-        && depth == max_depth && !elem.children.is_empty() {
-        line.push_str(&format!(" ({} children)", count_struct_elems(&elem.children)));
+        && depth == max_depth
+        && !elem.children.is_empty()
+    {
+        line.push_str(&format!(
+            " ({} children)",
+            count_struct_elems(&elem.children)
+        ));
     }
 
     wln!(writer, "{}", line);
@@ -204,7 +246,10 @@ fn print_struct_elem(writer: &mut impl Write, elem: &StructElemInfo, depth: usiz
 pub(crate) fn structure_json_value(doc: &Document, config: &DumpConfig) -> Value {
     let (is_marked, tree) = collect_structure_tree(doc);
     let count = count_struct_elems(&tree);
-    let items: Vec<Value> = tree.iter().map(|e| struct_elem_to_json(e, 0, config)).collect();
+    let items: Vec<Value> = tree
+        .iter()
+        .map(|e| struct_elem_to_json(e, 0, config))
+        .collect();
     json!({
         "tagged": is_marked,
         "element_count": count,
@@ -241,7 +286,8 @@ fn struct_elem_to_json(elem: &StructElemInfo, depth: usize, config: &DumpConfig)
     }
 
     if let Some(max_depth) = config.depth
-        && depth > max_depth {
+        && depth > max_depth
+    {
         if !elem.children.is_empty() {
             obj["children_count"] = json!(count_struct_elems(&elem.children));
         }
@@ -249,7 +295,9 @@ fn struct_elem_to_json(elem: &StructElemInfo, depth: usize, config: &DumpConfig)
     }
 
     if !elem.children.is_empty() {
-        let children: Vec<Value> = elem.children.iter()
+        let children: Vec<Value> = elem
+            .children
+            .iter()
             .map(|c| struct_elem_to_json(c, depth + 1, config))
             .collect();
         obj["children"] = json!(children);
@@ -257,16 +305,15 @@ fn struct_elem_to_json(elem: &StructElemInfo, depth: usize, config: &DumpConfig)
     obj
 }
 
-
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::test_utils::*;
     use crate::types::DumpConfig;
+    use lopdf::Object;
     use lopdf::{Dictionary, StringFormat};
     use pretty_assertions::assert_eq;
-    use serde_json::{Value};
-    use lopdf::Object;
+    use serde_json::Value;
 
     fn make_struct_doc() -> Document {
         let mut doc = Document::new();
@@ -295,7 +342,10 @@ mod tests {
         p_elem.set("Type", Object::Name(b"StructElem".to_vec()));
         p_elem.set("S", Object::Name(b"P".to_vec()));
         p_elem.set("K", Object::Array(vec![Object::Reference((12, 0))]));
-        p_elem.set("T", Object::String(b"My Paragraph".to_vec(), StringFormat::Literal));
+        p_elem.set(
+            "T",
+            Object::String(b"My Paragraph".to_vec(), StringFormat::Literal),
+        );
         doc.objects.insert((11, 0), Object::Dictionary(p_elem));
 
         let mut doc_elem = Dictionary::new();
@@ -406,7 +456,15 @@ mod tests {
     #[test]
     fn structure_depth_limit_0() {
         let doc = make_struct_doc();
-        let config = DumpConfig { decode: false, truncate: None, json: false, hex: false, depth: Some(0), deref: false, raw: false };
+        let config = DumpConfig {
+            decode: false,
+            truncate: None,
+            json: false,
+            hex: false,
+            depth: Some(0),
+            deref: false,
+            raw: false,
+        };
         let out = output_of(|w| print_structure(w, &doc, &config));
         assert!(out.contains("/Document"));
         assert!(out.contains("children"));
@@ -417,7 +475,15 @@ mod tests {
     #[test]
     fn structure_depth_limit_1() {
         let doc = make_struct_doc();
-        let config = DumpConfig { decode: false, truncate: None, json: false, hex: false, depth: Some(1), deref: false, raw: false };
+        let config = DumpConfig {
+            decode: false,
+            truncate: None,
+            json: false,
+            hex: false,
+            depth: Some(1),
+            deref: false,
+            raw: false,
+        };
         let out = output_of(|w| print_structure(w, &doc, &config));
         assert!(out.contains("/Document"));
         assert!(out.contains("/P"));
@@ -428,15 +494,32 @@ mod tests {
     #[test]
     fn structure_json_with_depth_limit() {
         let doc = make_struct_doc();
-        let config = DumpConfig { decode: false, truncate: None, json: true, hex: false, depth: Some(0), deref: false, raw: false };
+        let config = DumpConfig {
+            decode: false,
+            truncate: None,
+            json: true,
+            hex: false,
+            depth: Some(0),
+            deref: false,
+            raw: false,
+        };
         let out = output_of(|w| print_structure_json(w, &doc, &config));
         let parsed: Value = serde_json::from_str(&out).unwrap();
         let root = &parsed["structure"][0];
         // depth=0 shows root element fully; its children (depth 1) are truncated
-        assert!(root.get("children").is_some(), "root should have children array at depth 0");
+        assert!(
+            root.get("children").is_some(),
+            "root should have children array at depth 0"
+        );
         let child = &root["children"][0];
-        assert!(child.get("children_count").is_some(), "child at depth 1 should be truncated");
-        assert!(child.get("children").is_none(), "child at depth 1 should not have children array");
+        assert!(
+            child.get("children_count").is_some(),
+            "child at depth 1 should be truncated"
+        );
+        assert!(
+            child.get("children").is_none(),
+            "child at depth 1 should not have children array"
+        );
     }
 
     #[test]
@@ -499,7 +582,10 @@ mod tests {
 
         let mut elem = Dictionary::new();
         elem.set("S", Object::Name(b"Figure".to_vec()));
-        elem.set("Alt", Object::String(b"A photo of sunset".to_vec(), StringFormat::Literal));
+        elem.set(
+            "Alt",
+            Object::String(b"A photo of sunset".to_vec(), StringFormat::Literal),
+        );
         doc.objects.insert((10, 0), Object::Dictionary(elem));
 
         let mut str_root = Dictionary::new();
@@ -532,10 +618,10 @@ mod tests {
 
         let mut str_root = Dictionary::new();
         str_root.set("Type", Object::Name(b"StructTreeRoot".to_vec()));
-        str_root.set("K", Object::Array(vec![
-            Object::Reference((10, 0)),
-            Object::Reference((11, 0)),
-        ]));
+        str_root.set(
+            "K",
+            Object::Array(vec![Object::Reference((10, 0)), Object::Reference((11, 0))]),
+        );
         doc.objects.insert((5, 0), Object::Dictionary(str_root));
 
         let mut catalog = Dictionary::new();
@@ -642,7 +728,10 @@ mod tests {
         assert_eq!(tree[0].children.len(), 1);
         let inline = &tree[0].children[0];
         assert_eq!(inline.role, "Span");
-        assert!(inline.object_id.is_none(), "inline elements should have no object_id");
+        assert!(
+            inline.object_id.is_none(),
+            "inline elements should have no object_id"
+        );
         assert_eq!(inline.mcid, Some(7));
     }
 
@@ -652,7 +741,10 @@ mod tests {
         let mut doc = Document::new();
 
         let mut elem = Dictionary::new();
-        elem.set("S", Object::String(b"NotAName".to_vec(), StringFormat::Literal));
+        elem.set(
+            "S",
+            Object::String(b"NotAName".to_vec(), StringFormat::Literal),
+        );
         doc.objects.insert((10, 0), Object::Dictionary(elem));
 
         let mut str_root = Dictionary::new();
@@ -777,46 +869,42 @@ mod tests {
 
     #[test]
     fn count_struct_elems_nested() {
-        let tree = vec![
-            StructElemInfo {
-                object_id: Some((10, 0)),
-                role: "Document".to_string(),
-                page: None,
-                mcid: None,
-                title: None,
-                alt: None,
-                children: vec![
-                    StructElemInfo {
-                        object_id: Some((11, 0)),
-                        role: "P".to_string(),
+        let tree = vec![StructElemInfo {
+            object_id: Some((10, 0)),
+            role: "Document".to_string(),
+            page: None,
+            mcid: None,
+            title: None,
+            alt: None,
+            children: vec![
+                StructElemInfo {
+                    object_id: Some((11, 0)),
+                    role: "P".to_string(),
+                    page: None,
+                    mcid: None,
+                    title: None,
+                    alt: None,
+                    children: vec![StructElemInfo {
+                        object_id: Some((12, 0)),
+                        role: "Span".to_string(),
                         page: None,
-                        mcid: None,
-                        title: None,
-                        alt: None,
-                        children: vec![
-                            StructElemInfo {
-                                object_id: Some((12, 0)),
-                                role: "Span".to_string(),
-                                page: None,
-                                mcid: Some(0),
-                                title: None,
-                                alt: None,
-                                children: vec![],
-                            },
-                        ],
-                    },
-                    StructElemInfo {
-                        object_id: Some((13, 0)),
-                        role: "P".to_string(),
-                        page: None,
-                        mcid: Some(1),
+                        mcid: Some(0),
                         title: None,
                         alt: None,
                         children: vec![],
-                    },
-                ],
-            },
-        ];
+                    }],
+                },
+                StructElemInfo {
+                    object_id: Some((13, 0)),
+                    role: "P".to_string(),
+                    page: None,
+                    mcid: Some(1),
+                    title: None,
+                    alt: None,
+                    children: vec![],
+                },
+            ],
+        }];
         // 1 (Document) + 1 (P) + 1 (Span) + 1 (P) = 4
         assert_eq!(count_struct_elems(&tree), 4);
     }
@@ -856,8 +944,17 @@ mod tests {
 
         let mut elem = Dictionary::new();
         elem.set("S", Object::Name(b"Figure".to_vec()));
-        elem.set("T", Object::String(b"Chart Title".to_vec(), StringFormat::Literal));
-        elem.set("Alt", Object::String(b"A bar chart showing revenue".to_vec(), StringFormat::Literal));
+        elem.set(
+            "T",
+            Object::String(b"Chart Title".to_vec(), StringFormat::Literal),
+        );
+        elem.set(
+            "Alt",
+            Object::String(
+                b"A bar chart showing revenue".to_vec(),
+                StringFormat::Literal,
+            ),
+        );
         doc.objects.insert((10, 0), Object::Dictionary(elem));
 
         let mut str_root = Dictionary::new();
@@ -899,11 +996,14 @@ mod tests {
 
         let mut str_root = Dictionary::new();
         str_root.set("Type", Object::Name(b"StructTreeRoot".to_vec()));
-        str_root.set("K", Object::Array(vec![
-            Object::Reference((10, 0)),
-            Object::Reference((11, 0)),
-            Object::Reference((12, 0)),
-        ]));
+        str_root.set(
+            "K",
+            Object::Array(vec![
+                Object::Reference((10, 0)),
+                Object::Reference((11, 0)),
+                Object::Reference((12, 0)),
+            ]),
+        );
         doc.objects.insert((5, 0), Object::Dictionary(str_root));
 
         let mut catalog = Dictionary::new();
@@ -942,8 +1042,15 @@ mod tests {
 
         let config = default_config();
         let out = output_of(|w| print_structure(w, &doc, &config));
-        assert!(out.contains("[10]"), "output should contain object ID [10]: {}", out);
-        assert!(out.contains("[10] /P"), "output should contain '[10] /P': {}", out);
+        assert!(
+            out.contains("[10]"),
+            "output should contain object ID [10]: {}",
+            out
+        );
+        assert!(
+            out.contains("[10] /P"),
+            "output should contain '[10] /P': {}",
+            out
+        );
     }
-
 }

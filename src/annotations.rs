@@ -1,11 +1,11 @@
 use lopdf::{Document, Object, ObjectId};
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 use std::borrow::Cow;
 use std::io::Write;
 
-use crate::types::PageSpec;
-use crate::helpers::{name_to_string, format_dict_value, obj_to_string_lossy};
 use crate::bookmarks::format_dest_value;
+use crate::helpers::{format_dict_value, name_to_string, obj_to_string_lossy};
+use crate::types::PageSpec;
 
 pub(crate) struct AnnotationInfo {
     pub page_num: u32,
@@ -26,51 +26,66 @@ fn classify_link(doc: &Document, dict: &lopdf::Dictionary) -> (Cow<'static, str>
     if let Ok(action_obj) = dict.get(b"A") {
         let action_dict = match action_obj {
             Object::Dictionary(d) => d,
-            Object::Reference(id) => {
-                match doc.get_object(*id) {
-                    Ok(Object::Dictionary(d)) => d,
-                    _ => return (Cow::Borrowed("Unknown"), format!("{} {} R", id.0, id.1)),
-                }
-            }
+            Object::Reference(id) => match doc.get_object(*id) {
+                Ok(Object::Dictionary(d)) => d,
+                _ => return (Cow::Borrowed("Unknown"), format!("{} {} R", id.0, id.1)),
+            },
             _ => return (Cow::Borrowed("Unknown"), "-".to_string()),
         };
-        let action_type = action_dict.get(b"S").ok()
-            .and_then(|v| v.as_name().ok());
+        let action_type = action_dict.get(b"S").ok().and_then(|v| v.as_name().ok());
         match action_type {
             Some(b"GoTo") => {
-                let target = action_dict.get(b"D").ok()
+                let target = action_dict
+                    .get(b"D")
+                    .ok()
                     .map(|d| format_dest_value(doc, d))
                     .unwrap_or_else(|| "?".to_string());
                 (Cow::Borrowed("GoTo"), target)
             }
             Some(b"GoToR") => {
-                let file = action_dict.get(b"F").ok()
+                let file = action_dict
+                    .get(b"F")
+                    .ok()
                     .and_then(obj_to_string_lossy)
                     .unwrap_or_else(|| "?".to_string());
-                let dest = action_dict.get(b"D").ok()
+                let dest = action_dict
+                    .get(b"D")
+                    .ok()
                     .map(|d| format_dest_value(doc, d))
                     .unwrap_or_default();
-                (Cow::Borrowed("GoToR"), format!("{} {}", file, dest).trim().to_string())
+                (
+                    Cow::Borrowed("GoToR"),
+                    format!("{} {}", file, dest).trim().to_string(),
+                )
             }
             Some(b"URI") => {
-                let uri = action_dict.get(b"URI").ok()
+                let uri = action_dict
+                    .get(b"URI")
+                    .ok()
                     .and_then(obj_to_string_lossy)
                     .unwrap_or_else(|| "?".to_string());
                 (Cow::Borrowed("URI"), uri)
             }
             Some(b"Named") => {
-                let n = action_dict.get(b"N").ok()
+                let n = action_dict
+                    .get(b"N")
+                    .ok()
                     .and_then(obj_to_string_lossy)
                     .unwrap_or_else(|| "?".to_string());
                 (Cow::Borrowed("Named"), n)
             }
             Some(b"Launch") => {
-                let f = action_dict.get(b"F").ok()
+                let f = action_dict
+                    .get(b"F")
+                    .ok()
                     .and_then(obj_to_string_lossy)
                     .unwrap_or_else(|| "?".to_string());
                 (Cow::Borrowed("Launch"), f)
             }
-            Some(other) => (Cow::Owned(String::from_utf8_lossy(other).into_owned()), "-".to_string()),
+            Some(other) => (
+                Cow::Owned(String::from_utf8_lossy(other).into_owned()),
+                "-".to_string(),
+            ),
             None => (Cow::Borrowed("Unknown"), "-".to_string()),
         }
     } else {
@@ -78,13 +93,19 @@ fn classify_link(doc: &Document, dict: &lopdf::Dictionary) -> (Cow<'static, str>
     }
 }
 
-pub(crate) fn collect_annotations(doc: &Document, page_filter: Option<&PageSpec>) -> Vec<AnnotationInfo> {
+pub(crate) fn collect_annotations(
+    doc: &Document,
+    page_filter: Option<&PageSpec>,
+) -> Vec<AnnotationInfo> {
     let pages = doc.get_pages();
     let mut annotations = Vec::new();
 
     for (&page_num, &page_id) in &pages {
         if let Some(spec) = page_filter
-            && !spec.contains(page_num) { continue; }
+            && !spec.contains(page_num)
+        {
+            continue;
+        }
 
         let page_dict = match doc.get_object(page_id) {
             Ok(Object::Dictionary(d)) => d,
@@ -109,15 +130,21 @@ pub(crate) fn collect_annotations(doc: &Document, page_filter: Option<&PageSpec>
                 _ => continue,
             };
 
-            let subtype = annot_dict.get(b"Subtype").ok()
+            let subtype = annot_dict
+                .get(b"Subtype")
+                .ok()
                 .and_then(name_to_string)
                 .unwrap_or_else(|| "-".to_string());
 
-            let rect = annot_dict.get(b"Rect").ok()
+            let rect = annot_dict
+                .get(b"Rect")
+                .ok()
                 .map(format_dict_value)
                 .unwrap_or_else(|| "-".to_string());
 
-            let contents = annot_dict.get(b"Contents").ok()
+            let contents = annot_dict
+                .get(b"Contents")
+                .ok()
                 .map(|v| match v {
                     Object::String(bytes, _) => String::from_utf8_lossy(bytes).into_owned(),
                     _ => "-".to_string(),
@@ -146,33 +173,60 @@ pub(crate) fn collect_annotations(doc: &Document, page_filter: Option<&PageSpec>
     annotations
 }
 
-pub(crate) fn print_annotations(writer: &mut impl Write, doc: &Document, page_filter: Option<&PageSpec>) {
+pub(crate) fn print_annotations(
+    writer: &mut impl Write,
+    doc: &Document,
+    page_filter: Option<&PageSpec>,
+) {
     let annotations = collect_annotations(doc, page_filter);
     wln!(writer, "{} annotations found\n", annotations.len());
-    if annotations.is_empty() { return; }
-    wln!(writer, "  {:>4}  {:>4}  {:<12} {:<8} {:<30} {:<30} Contents", "Page", "Obj#", "Subtype", "Type", "Rect", "Target");
+    if annotations.is_empty() {
+        return;
+    }
+    wln!(
+        writer,
+        "  {:>4}  {:>4}  {:<12} {:<8} {:<30} {:<30} Contents",
+        "Page",
+        "Obj#",
+        "Subtype",
+        "Type",
+        "Rect",
+        "Target"
+    );
     for a in &annotations {
         let link_type = a.link_type.as_deref().unwrap_or("-");
         let target = a.target.as_deref().unwrap_or("-");
-        wln!(writer, "  {:>4}  {:>4}  {:<12} {:<8} {:<30} {:<30} {}",
-            a.page_num, a.object_id.0, a.subtype, link_type, a.rect, target, a.contents);
+        wln!(
+            writer,
+            "  {:>4}  {:>4}  {:<12} {:<8} {:<30} {:<30} {}",
+            a.page_num,
+            a.object_id.0,
+            a.subtype,
+            link_type,
+            a.rect,
+            target,
+            a.contents
+        );
     }
 }
 
 pub(crate) fn annotations_json_value(doc: &Document, page_filter: Option<&PageSpec>) -> Value {
     let annotations = collect_annotations(doc, page_filter);
-    let items: Vec<Value> = annotations.iter().map(|a| {
-        json!({
-            "page_number": a.page_num,
-            "object_number": a.object_id.0,
-            "generation": a.object_id.1,
-            "subtype": a.subtype,
-            "rect": a.rect,
-            "contents": a.contents,
-            "link_type": a.link_type,
-            "target": a.target,
+    let items: Vec<Value> = annotations
+        .iter()
+        .map(|a| {
+            json!({
+                "page_number": a.page_num,
+                "object_number": a.object_id.0,
+                "generation": a.object_id.1,
+                "subtype": a.subtype,
+                "rect": a.rect,
+                "contents": a.contents,
+                "link_type": a.link_type,
+                "target": a.target,
+            })
         })
-    }).collect();
+        .collect();
     json!({
         "annotation_count": items.len(),
         "annotations": items,
@@ -180,22 +234,25 @@ pub(crate) fn annotations_json_value(doc: &Document, page_filter: Option<&PageSp
 }
 
 #[cfg(test)]
-pub(crate) fn print_annotations_json(writer: &mut impl Write, doc: &Document, page_filter: Option<&PageSpec>) {
+pub(crate) fn print_annotations_json(
+    writer: &mut impl Write,
+    doc: &Document,
+    page_filter: Option<&PageSpec>,
+) {
     use crate::helpers::json_pretty;
     let output = annotations_json_value(doc, page_filter);
     writeln!(writer, "{}", json_pretty(&output)).unwrap();
 }
-
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::test_utils::*;
     use crate::types::PageSpec;
+    use lopdf::Object;
     use lopdf::{Dictionary, Stream, StringFormat};
     use pretty_assertions::assert_eq;
-    use serde_json::{Value};
-    use lopdf::Object;
+    use serde_json::Value;
 
     fn make_doc_with_annotations() -> Document {
         let mut doc = Document::new();
@@ -204,11 +261,19 @@ mod tests {
         let mut annot = Dictionary::new();
         annot.set("Type", Object::Name(b"Annot".to_vec()));
         annot.set("Subtype", Object::Name(b"Link".to_vec()));
-        annot.set("Rect", Object::Array(vec![
-            Object::Integer(0), Object::Integer(0),
-            Object::Integer(100), Object::Integer(50),
-        ]));
-        annot.set("Contents", Object::String(b"Click here".to_vec(), StringFormat::Literal));
+        annot.set(
+            "Rect",
+            Object::Array(vec![
+                Object::Integer(0),
+                Object::Integer(0),
+                Object::Integer(100),
+                Object::Integer(50),
+            ]),
+        );
+        annot.set(
+            "Contents",
+            Object::String(b"Click here".to_vec(), StringFormat::Literal),
+        );
         let annot_id = doc.add_object(Object::Dictionary(annot));
 
         // Content stream
@@ -220,10 +285,15 @@ mod tests {
         page_dict.set("Type", Object::Name(b"Page".to_vec()));
         page_dict.set("Contents", Object::Reference(content_id));
         page_dict.set("Annots", Object::Array(vec![Object::Reference(annot_id)]));
-        page_dict.set("MediaBox", Object::Array(vec![
-            Object::Integer(0), Object::Integer(0),
-            Object::Integer(612), Object::Integer(792),
-        ]));
+        page_dict.set(
+            "MediaBox",
+            Object::Array(vec![
+                Object::Integer(0),
+                Object::Integer(0),
+                Object::Integer(612),
+                Object::Integer(792),
+            ]),
+        );
         let page_id = doc.add_object(Object::Dictionary(page_dict));
 
         // Pages
@@ -276,10 +346,15 @@ mod tests {
         // Page without /Annots
         let mut page_dict = Dictionary::new();
         page_dict.set("Type", Object::Name(b"Page".to_vec()));
-        page_dict.set("MediaBox", Object::Array(vec![
-            Object::Integer(0), Object::Integer(0),
-            Object::Integer(612), Object::Integer(792),
-        ]));
+        page_dict.set(
+            "MediaBox",
+            Object::Array(vec![
+                Object::Integer(0),
+                Object::Integer(0),
+                Object::Integer(612),
+                Object::Integer(792),
+            ]),
+        );
         let page_id = doc.add_object(Object::Dictionary(page_dict));
 
         let mut pages_dict = Dictionary::new();
@@ -319,20 +394,33 @@ mod tests {
         let mut annot = Dictionary::new();
         annot.set("Type", Object::Name(b"Annot".to_vec()));
         annot.set("Subtype", Object::Name(b"Text".to_vec()));
-        annot.set("Rect", Object::Array(vec![
-            Object::Integer(10), Object::Integer(20),
-            Object::Integer(30), Object::Integer(40),
-        ]));
-        annot.set("Contents", Object::String(b"A note".to_vec(), StringFormat::Literal));
+        annot.set(
+            "Rect",
+            Object::Array(vec![
+                Object::Integer(10),
+                Object::Integer(20),
+                Object::Integer(30),
+                Object::Integer(40),
+            ]),
+        );
+        annot.set(
+            "Contents",
+            Object::String(b"A note".to_vec(), StringFormat::Literal),
+        );
         let annot_id = doc.add_object(Object::Dictionary(annot));
 
         let mut page_dict = Dictionary::new();
         page_dict.set("Type", Object::Name(b"Page".to_vec()));
         page_dict.set("Annots", Object::Array(vec![Object::Reference(annot_id)]));
-        page_dict.set("MediaBox", Object::Array(vec![
-            Object::Integer(0), Object::Integer(0),
-            Object::Integer(612), Object::Integer(792),
-        ]));
+        page_dict.set(
+            "MediaBox",
+            Object::Array(vec![
+                Object::Integer(0),
+                Object::Integer(0),
+                Object::Integer(612),
+                Object::Integer(792),
+            ]),
+        );
         let page_id = doc.add_object(Object::Dictionary(page_dict));
 
         let mut pages_dict = Dictionary::new();
@@ -361,11 +449,22 @@ mod tests {
         let mut doc = Document::new();
         let mut action = Dictionary::new();
         action.set("S", Object::Name(b"URI".to_vec()));
-        action.set("URI", Object::String(b"https://example.com".to_vec(), StringFormat::Literal));
+        action.set(
+            "URI",
+            Object::String(b"https://example.com".to_vec(), StringFormat::Literal),
+        );
 
         let mut annot = Dictionary::new();
         annot.set("Subtype", Object::Name(b"Link".to_vec()));
-        annot.set("Rect", Object::Array(vec![Object::Integer(0), Object::Integer(0), Object::Integer(100), Object::Integer(20)]));
+        annot.set(
+            "Rect",
+            Object::Array(vec![
+                Object::Integer(0),
+                Object::Integer(0),
+                Object::Integer(100),
+                Object::Integer(20),
+            ]),
+        );
         annot.set("A", Object::Dictionary(action));
         doc.objects.insert((20, 0), Object::Dictionary(annot));
 
@@ -385,7 +484,10 @@ mod tests {
         let annotations = collect_annotations(&doc, None);
         assert_eq!(annotations.len(), 1);
         assert_eq!(annotations[0].link_type.as_deref(), Some("URI"));
-        assert_eq!(annotations[0].target.as_deref(), Some("https://example.com"));
+        assert_eq!(
+            annotations[0].target.as_deref(),
+            Some("https://example.com")
+        );
     }
 
     #[test]
@@ -393,8 +495,22 @@ mod tests {
         let mut doc = Document::new();
         let mut annot = Dictionary::new();
         annot.set("Subtype", Object::Name(b"Link".to_vec()));
-        annot.set("Rect", Object::Array(vec![Object::Integer(0), Object::Integer(0), Object::Integer(100), Object::Integer(20)]));
-        annot.set("Dest", Object::Array(vec![Object::Reference((10, 0)), Object::Name(b"Fit".to_vec())]));
+        annot.set(
+            "Rect",
+            Object::Array(vec![
+                Object::Integer(0),
+                Object::Integer(0),
+                Object::Integer(100),
+                Object::Integer(20),
+            ]),
+        );
+        annot.set(
+            "Dest",
+            Object::Array(vec![
+                Object::Reference((10, 0)),
+                Object::Name(b"Fit".to_vec()),
+            ]),
+        );
         doc.objects.insert((20, 0), Object::Dictionary(annot));
 
         let mut pages_dict = Dictionary::new();
@@ -420,7 +536,15 @@ mod tests {
         let mut doc = Document::new();
         let mut annot = Dictionary::new();
         annot.set("Subtype", Object::Name(b"Text".to_vec()));
-        annot.set("Rect", Object::Array(vec![Object::Integer(0), Object::Integer(0), Object::Integer(100), Object::Integer(20)]));
+        annot.set(
+            "Rect",
+            Object::Array(vec![
+                Object::Integer(0),
+                Object::Integer(0),
+                Object::Integer(100),
+                Object::Integer(20),
+            ]),
+        );
         doc.objects.insert((20, 0), Object::Dictionary(annot));
 
         let mut pages_dict = Dictionary::new();
@@ -459,12 +583,26 @@ mod tests {
         let mut doc = Document::new();
         let mut action = Dictionary::new();
         action.set("S", Object::Name(b"GoToR".to_vec()));
-        action.set("F", Object::String(b"other.pdf".to_vec(), StringFormat::Literal));
-        action.set("D", Object::Array(vec![Object::Integer(0), Object::Name(b"Fit".to_vec())]));
+        action.set(
+            "F",
+            Object::String(b"other.pdf".to_vec(), StringFormat::Literal),
+        );
+        action.set(
+            "D",
+            Object::Array(vec![Object::Integer(0), Object::Name(b"Fit".to_vec())]),
+        );
 
         let mut annot = Dictionary::new();
         annot.set("Subtype", Object::Name(b"Link".to_vec()));
-        annot.set("Rect", Object::Array(vec![Object::Integer(0), Object::Integer(0), Object::Integer(100), Object::Integer(20)]));
+        annot.set(
+            "Rect",
+            Object::Array(vec![
+                Object::Integer(0),
+                Object::Integer(0),
+                Object::Integer(100),
+                Object::Integer(20),
+            ]),
+        );
         annot.set("A", Object::Dictionary(action));
         doc.objects.insert((20, 0), Object::Dictionary(annot));
 
@@ -483,7 +621,13 @@ mod tests {
 
         let annotations = collect_annotations(&doc, None);
         assert_eq!(annotations[0].link_type.as_deref(), Some("GoToR"));
-        assert!(annotations[0].target.as_ref().unwrap().contains("other.pdf"));
+        assert!(
+            annotations[0]
+                .target
+                .as_ref()
+                .unwrap()
+                .contains("other.pdf")
+        );
     }
 
     #[test]
@@ -495,7 +639,15 @@ mod tests {
 
         let mut annot = Dictionary::new();
         annot.set("Subtype", Object::Name(b"Link".to_vec()));
-        annot.set("Rect", Object::Array(vec![Object::Integer(0), Object::Integer(0), Object::Integer(100), Object::Integer(20)]));
+        annot.set(
+            "Rect",
+            Object::Array(vec![
+                Object::Integer(0),
+                Object::Integer(0),
+                Object::Integer(100),
+                Object::Integer(20),
+            ]),
+        );
         annot.set("A", Object::Dictionary(action));
         doc.objects.insert((20, 0), Object::Dictionary(annot));
 
@@ -522,11 +674,22 @@ mod tests {
         let mut doc = Document::new();
         let mut action = Dictionary::new();
         action.set("S", Object::Name(b"Launch".to_vec()));
-        action.set("F", Object::String(b"app.exe".to_vec(), StringFormat::Literal));
+        action.set(
+            "F",
+            Object::String(b"app.exe".to_vec(), StringFormat::Literal),
+        );
 
         let mut annot = Dictionary::new();
         annot.set("Subtype", Object::Name(b"Link".to_vec()));
-        annot.set("Rect", Object::Array(vec![Object::Integer(0), Object::Integer(0), Object::Integer(100), Object::Integer(20)]));
+        annot.set(
+            "Rect",
+            Object::Array(vec![
+                Object::Integer(0),
+                Object::Integer(0),
+                Object::Integer(100),
+                Object::Integer(20),
+            ]),
+        );
         annot.set("A", Object::Dictionary(action));
         doc.objects.insert((20, 0), Object::Dictionary(annot));
 
@@ -553,7 +716,15 @@ mod tests {
         let mut doc = Document::new();
         let mut annot = Dictionary::new();
         // No Subtype
-        annot.set("Rect", Object::Array(vec![Object::Integer(0), Object::Integer(0), Object::Integer(50), Object::Integer(50)]));
+        annot.set(
+            "Rect",
+            Object::Array(vec![
+                Object::Integer(0),
+                Object::Integer(0),
+                Object::Integer(50),
+                Object::Integer(50),
+            ]),
+        );
         doc.objects.insert((20, 0), Object::Dictionary(annot));
 
         let mut pages_dict = Dictionary::new();
@@ -605,8 +776,19 @@ mod tests {
         let mut doc = Document::new();
         let mut annot = Dictionary::new();
         annot.set("Subtype", Object::Name(b"Highlight".to_vec()));
-        annot.set("Rect", Object::Array(vec![Object::Integer(10), Object::Integer(20), Object::Integer(30), Object::Integer(40)]));
-        annot.set("Contents", Object::String(b"Highlighted text".to_vec(), StringFormat::Literal));
+        annot.set(
+            "Rect",
+            Object::Array(vec![
+                Object::Integer(10),
+                Object::Integer(20),
+                Object::Integer(30),
+                Object::Integer(40),
+            ]),
+        );
+        annot.set(
+            "Contents",
+            Object::String(b"Highlighted text".to_vec(), StringFormat::Literal),
+        );
         doc.objects.insert((20, 0), Object::Dictionary(annot));
 
         let mut pages_dict = Dictionary::new();
@@ -635,12 +817,28 @@ mod tests {
 
         let mut a1 = Dictionary::new();
         a1.set("Subtype", Object::Name(b"Text".to_vec()));
-        a1.set("Rect", Object::Array(vec![Object::Integer(0), Object::Integer(0), Object::Integer(50), Object::Integer(50)]));
+        a1.set(
+            "Rect",
+            Object::Array(vec![
+                Object::Integer(0),
+                Object::Integer(0),
+                Object::Integer(50),
+                Object::Integer(50),
+            ]),
+        );
         doc.objects.insert((20, 0), Object::Dictionary(a1));
 
         let mut a2 = Dictionary::new();
         a2.set("Subtype", Object::Name(b"Link".to_vec()));
-        a2.set("Rect", Object::Array(vec![Object::Integer(60), Object::Integer(60), Object::Integer(100), Object::Integer(100)]));
+        a2.set(
+            "Rect",
+            Object::Array(vec![
+                Object::Integer(60),
+                Object::Integer(60),
+                Object::Integer(100),
+                Object::Integer(100),
+            ]),
+        );
         doc.objects.insert((21, 0), Object::Dictionary(a2));
 
         let mut pages_dict = Dictionary::new();
@@ -666,7 +864,15 @@ mod tests {
         let mut doc = Document::new();
         let mut annot = Dictionary::new();
         annot.set("Subtype", Object::Name(b"Text".to_vec()));
-        annot.set("Rect", Object::Array(vec![Object::Integer(0), Object::Integer(0), Object::Integer(50), Object::Integer(50)]));
+        annot.set(
+            "Rect",
+            Object::Array(vec![
+                Object::Integer(0),
+                Object::Integer(0),
+                Object::Integer(50),
+                Object::Integer(50),
+            ]),
+        );
         doc.objects.insert((20, 0), Object::Dictionary(annot));
 
         // Annots array as its own object
@@ -676,7 +882,15 @@ mod tests {
         let mut page = Dictionary::new();
         page.set("Type", Object::Name(b"Page".to_vec()));
         page.set("Parent", Object::Reference((2, 0)));
-        page.set("MediaBox", Object::Array(vec![Object::Integer(0), Object::Integer(0), Object::Integer(612), Object::Integer(792)]));
+        page.set(
+            "MediaBox",
+            Object::Array(vec![
+                Object::Integer(0),
+                Object::Integer(0),
+                Object::Integer(612),
+                Object::Integer(792),
+            ]),
+        );
         page.set("Annots", Object::Reference((30, 0))); // Reference to array
         doc.objects.insert((10, 0), Object::Dictionary(page));
 
@@ -713,7 +927,15 @@ mod tests {
 
         let mut annot = Dictionary::new();
         annot.set("Subtype", Object::Name(b"Link".to_vec()));
-        annot.set("Rect", Object::Array(vec![Object::Integer(0), Object::Integer(0), Object::Integer(100), Object::Integer(20)]));
+        annot.set(
+            "Rect",
+            Object::Array(vec![
+                Object::Integer(0),
+                Object::Integer(0),
+                Object::Integer(100),
+                Object::Integer(20),
+            ]),
+        );
         annot.set("A", Object::Dictionary(action));
         doc.objects.insert((20, 0), Object::Dictionary(annot));
 
@@ -733,5 +955,4 @@ mod tests {
         let annotations = collect_annotations(&doc, None);
         assert_eq!(annotations[0].link_type.as_deref(), Some("CustomAction"));
     }
-
 }

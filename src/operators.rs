@@ -1,9 +1,9 @@
-use lopdf::{content::Content, Document, ObjectId};
-use serde_json::{json, Value};
+use lopdf::{Document, ObjectId, content::Content};
+use serde_json::{Value, json};
 use std::io::Write;
 
+use crate::helpers::{self, format_dict_value, format_operation};
 use crate::types::PageSpec;
-use crate::helpers::{self, format_operation, format_dict_value};
 
 pub(crate) struct OpsResult {
     pub operations: Vec<lopdf::content::Operation>,
@@ -13,24 +13,42 @@ pub(crate) struct OpsResult {
 pub(crate) fn get_page_operations_with_warnings(doc: &Document, page_id: ObjectId) -> OpsResult {
     let stream_data = match helpers::read_content_streams(doc, page_id) {
         Some(data) => data,
-        None => return OpsResult { operations: vec![], warnings: vec![] },
+        None => {
+            return OpsResult {
+                operations: vec![],
+                warnings: vec![],
+            };
+        }
     };
 
     let mut warnings = stream_data.warnings;
 
     match Content::decode(&stream_data.bytes) {
-        Ok(content) => OpsResult { operations: content.operations, warnings },
+        Ok(content) => OpsResult {
+            operations: content.operations,
+            warnings,
+        },
         Err(_) => {
             warnings.push("Content stream has syntax errors".to_string());
-            OpsResult { operations: vec![], warnings }
+            OpsResult {
+                operations: vec![],
+                warnings,
+            }
         }
     }
 }
 
-pub(crate) fn print_operators(writer: &mut impl Write, doc: &Document, page_filter: Option<&PageSpec>) {
+pub(crate) fn print_operators(
+    writer: &mut impl Write,
+    doc: &Document,
+    page_filter: Option<&PageSpec>,
+) {
     let page_list = match helpers::build_page_list(doc, page_filter) {
         Ok(list) => list,
-        Err(msg) => { eprintln!("Error: {}", msg); return; }
+        Err(msg) => {
+            eprintln!("Error: {}", msg);
+            return;
+        }
     };
 
     for (pn, page_id) in &page_list {
@@ -38,7 +56,12 @@ pub(crate) fn print_operators(writer: &mut impl Write, doc: &Document, page_filt
         for warn in &result.warnings {
             eprintln!("Warning: Page {}: {}", pn, warn);
         }
-        wln!(writer, "--- Page {} ({} operations) ---", pn, result.operations.len());
+        wln!(
+            writer,
+            "--- Page {} ({} operations) ---",
+            pn,
+            result.operations.len()
+        );
         for op in &result.operations {
             wln!(writer, "{}", format_operation(op));
         }
@@ -49,7 +72,9 @@ pub(crate) fn print_operators(writer: &mut impl Write, doc: &Document, page_filt
 pub(crate) fn operators_json_value(doc: &Document, page_filter: Option<&PageSpec>) -> Value {
     let page_list = match helpers::build_page_list(doc, page_filter) {
         Ok(list) => list,
-        Err(msg) => { return json!({"error": msg}); }
+        Err(msg) => {
+            return json!({"error": msg});
+        }
     };
 
     let mut page_results = Vec::new();
@@ -58,16 +83,27 @@ pub(crate) fn operators_json_value(doc: &Document, page_filter: Option<&PageSpec
         for warn in &result.warnings {
             eprintln!("Warning: Page {}: {}", pn, warn);
         }
-        let json_ops: Vec<Value> = result.operations.iter().map(|op| {
-            let operands: Vec<Value> = op.operands.iter().map(|o| json!(format_dict_value(o))).collect();
-            json!({
-                "operator": op.operator,
-                "operands": operands,
+        let json_ops: Vec<Value> = result
+            .operations
+            .iter()
+            .map(|op| {
+                let operands: Vec<Value> = op
+                    .operands
+                    .iter()
+                    .map(|o| json!(format_dict_value(o)))
+                    .collect();
+                json!({
+                    "operator": op.operator,
+                    "operands": operands,
+                })
             })
-        }).collect();
+            .collect();
         let mut entry = serde_json::Map::new();
         entry.insert("page_number".to_string(), json!(pn));
-        entry.insert("operation_count".to_string(), json!(result.operations.len()));
+        entry.insert(
+            "operation_count".to_string(),
+            json!(result.operations.len()),
+        );
         entry.insert("operations".to_string(), json!(json_ops));
         if !result.warnings.is_empty() {
             entry.insert("warnings".to_string(), json!(result.warnings));
@@ -79,23 +115,26 @@ pub(crate) fn operators_json_value(doc: &Document, page_filter: Option<&PageSpec
 }
 
 #[cfg(test)]
-pub(crate) fn print_operators_json(writer: &mut impl Write, doc: &Document, page_filter: Option<&PageSpec>) {
+pub(crate) fn print_operators_json(
+    writer: &mut impl Write,
+    doc: &Document,
+    page_filter: Option<&PageSpec>,
+) {
     use crate::helpers::json_pretty;
     let output = operators_json_value(doc, page_filter);
     writeln!(writer, "{}", json_pretty(&output)).unwrap();
 }
-
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::test_utils::*;
     use crate::types::PageSpec;
-    use lopdf::{Dictionary};
-    use pretty_assertions::assert_eq;
-    use serde_json::{Value};
-    use lopdf::Object;
+    use lopdf::Dictionary;
     use lopdf::Document;
+    use lopdf::Object;
+    use pretty_assertions::assert_eq;
+    use serde_json::Value;
 
     #[test]
     fn operators_shows_operations() {
@@ -175,7 +214,11 @@ mod tests {
         // Assert
         assert!(result.warnings.is_empty());
         assert!(result.operations.len() >= 3); // BT, Tf, Tj, ET
-        let op_names: Vec<&str> = result.operations.iter().map(|o| o.operator.as_str()).collect();
+        let op_names: Vec<&str> = result
+            .operations
+            .iter()
+            .map(|o| o.operator.as_str())
+            .collect();
         assert!(op_names.contains(&"BT"));
         assert!(op_names.contains(&"Tj"));
         assert!(op_names.contains(&"ET"));
@@ -249,5 +292,4 @@ mod tests {
         assert_eq!(pages.len(), 1);
         assert_eq!(pages[0]["page_number"], 1);
     }
-
 }

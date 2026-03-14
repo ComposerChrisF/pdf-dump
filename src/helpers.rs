@@ -2,8 +2,8 @@ use lopdf::{Document, Object, ObjectId};
 use serde_json::Value;
 use std::collections::BTreeSet;
 
-use crate::types::PageSpec;
 use crate::stream::decode_stream;
+use crate::types::PageSpec;
 
 pub(crate) fn build_page_list(
     doc: &Document,
@@ -11,16 +11,23 @@ pub(crate) fn build_page_list(
 ) -> Result<Vec<(u32, ObjectId)>, String> {
     let pages = doc.get_pages();
     if let Some(spec) = page_filter {
-        spec.pages().into_iter().map(|pn| {
-            pages.get(&pn).map(|&id| (pn, id))
-                .ok_or_else(|| format!("Page {} not found. Document has {} pages.", pn, pages.len()))
-        }).collect()
+        spec.pages()
+            .into_iter()
+            .map(|pn| {
+                pages.get(&pn).map(|&id| (pn, id)).ok_or_else(|| {
+                    format!("Page {} not found. Document has {} pages.", pn, pages.len())
+                })
+            })
+            .collect()
     } else {
         Ok(pages.iter().map(|(&pn, &id)| (pn, id)).collect())
     }
 }
 
-pub(crate) fn resolve_dict<'a>(doc: &'a Document, obj: &'a Object) -> Option<&'a lopdf::Dictionary> {
+pub(crate) fn resolve_dict<'a>(
+    doc: &'a Document,
+    obj: &'a Object,
+) -> Option<&'a lopdf::Dictionary> {
     match obj {
         Object::Dictionary(d) => Some(d),
         Object::Reference(id) => match doc.get_object(*id).ok()? {
@@ -89,12 +96,15 @@ pub(crate) fn format_color_space(obj: &Object, doc: &Document) -> String {
     match obj {
         Object::Name(n) => String::from_utf8_lossy(n).into_owned(),
         Object::Array(arr) => {
-            let names: Vec<String> = arr.iter().map(|item| match item {
-                Object::Name(n) => String::from_utf8_lossy(n).into_owned(),
-                Object::Reference(id) => format!("{} {} R", id.0, id.1),
-                Object::Integer(i) => i.to_string(),
-                _ => "?".to_string(),
-            }).collect();
+            let names: Vec<String> = arr
+                .iter()
+                .map(|item| match item {
+                    Object::Name(n) => String::from_utf8_lossy(n).into_owned(),
+                    Object::Reference(id) => format!("{} {} R", id.0, id.1),
+                    Object::Integer(i) => i.to_string(),
+                    _ => "?".to_string(),
+                })
+                .collect();
             format!("[{}]", names.join(" "))
         }
         Object::Reference(id) => {
@@ -112,10 +122,13 @@ pub(crate) fn format_filter(obj: &Object) -> String {
     match obj {
         Object::Name(n) => String::from_utf8_lossy(n).into_owned(),
         Object::Array(arr) => {
-            let names: Vec<String> = arr.iter().map(|item| match item {
-                Object::Name(n) => String::from_utf8_lossy(n).into_owned(),
-                _ => "?".to_string(),
-            }).collect();
+            let names: Vec<String> = arr
+                .iter()
+                .map(|item| match item {
+                    Object::Name(n) => String::from_utf8_lossy(n).into_owned(),
+                    _ => "?".to_string(),
+                })
+                .collect();
             names.join(", ")
         }
         _ => "-".to_string(),
@@ -152,7 +165,10 @@ fn walk_name_tree_inner(
         while i + 1 < names.len() {
             let key = match &names[i] {
                 Object::String(bytes, _) => String::from_utf8_lossy(bytes).into_owned(),
-                _ => { i += 2; continue; }
+                _ => {
+                    i += 2;
+                    continue;
+                }
             };
             results.push((key, names[i + 1].clone()));
             i += 2;
@@ -164,7 +180,9 @@ fn walk_name_tree_inner(
                 Object::Reference(id) => *id,
                 _ => continue,
             };
-            if visited.contains(&kid_id) { continue; }
+            if visited.contains(&kid_id) {
+                continue;
+            }
             visited.insert(kid_id);
             if let Ok(Object::Dictionary(kid_dict)) = doc.get_object(kid_id) {
                 walk_name_tree_inner(doc, kid_dict, results, visited);
@@ -203,7 +221,10 @@ fn walk_number_tree_inner(
         while i + 1 < nums.len() {
             let key = match &nums[i] {
                 Object::Integer(n) => *n,
-                _ => { i += 2; continue; }
+                _ => {
+                    i += 2;
+                    continue;
+                }
             };
             results.push((key, nums[i + 1].clone()));
             i += 2;
@@ -215,7 +236,9 @@ fn walk_number_tree_inner(
                 Object::Reference(id) => *id,
                 _ => continue,
             };
-            if visited.contains(&kid_id) { continue; }
+            if visited.contains(&kid_id) {
+                continue;
+            }
             visited.insert(kid_id);
             if let Ok(Object::Dictionary(kid_dict)) = doc.get_object(kid_id) {
                 walk_number_tree_inner(doc, kid_dict, results, visited);
@@ -223,7 +246,6 @@ fn walk_number_tree_inner(
         }
     }
 }
-
 
 /// Decoded content stream bytes and any warnings encountered during decoding.
 pub(crate) struct ContentStreamData {
@@ -259,7 +281,10 @@ pub(crate) fn read_content_streams(doc: &Document, page_id: ObjectId) -> Option<
                 bytes.extend_from_slice(&decoded);
             }
             Ok(_) => {
-                warnings.push(format!("Content stream {} {} is not a stream object", cid.0, cid.1));
+                warnings.push(format!(
+                    "Content stream {} {} is not a stream object",
+                    cid.0, cid.1
+                ));
                 decode_failed = true;
             }
             Err(_) => {
@@ -287,8 +312,9 @@ pub(crate) fn find_font_file_id(doc: &Document, font_dict: &lopdf::Dictionary) -
     };
     for key in &[b"FontFile".as_slice(), b"FontFile2", b"FontFile3"] {
         if let Ok(ff_ref) = fd_dict.get(key)
-            && let Ok(id) = ff_ref.as_reference() {
-                return Some(id);
+            && let Ok(id) = ff_ref.as_reference()
+        {
+            return Some(id);
         }
     }
     None
@@ -298,9 +324,9 @@ pub(crate) fn find_font_file_id(doc: &Document, font_dict: &lopdf::Dictionary) -
 mod tests {
     use super::*;
     use crate::test_utils::*;
+    use lopdf::Object;
     use lopdf::{Dictionary, Stream, StringFormat};
     use pretty_assertions::assert_eq;
-    use lopdf::Object;
 
     #[test]
     fn object_type_label_dictionary_with_type() {
@@ -411,13 +437,19 @@ mod tests {
 
     #[test]
     fn format_operation_string_tj() {
-        let op = lopdf::content::Operation::new("Tj", vec![Object::String(b"Hello".to_vec(), StringFormat::Literal)]);
+        let op = lopdf::content::Operation::new(
+            "Tj",
+            vec![Object::String(b"Hello".to_vec(), StringFormat::Literal)],
+        );
         assert_eq!(format_operation(&op), "(Hello) Tj");
     }
 
     #[test]
     fn format_operation_name_and_int() {
-        let op = lopdf::content::Operation::new("Tf", vec![Object::Name(b"F1".to_vec()), Object::Integer(12)]);
+        let op = lopdf::content::Operation::new(
+            "Tf",
+            vec![Object::Name(b"F1".to_vec()), Object::Integer(12)],
+        );
         assert_eq!(format_operation(&op), "/F1 12 Tf");
     }
 
@@ -448,10 +480,7 @@ mod tests {
     #[test]
     fn format_color_space_array() {
         let doc = Document::new();
-        let obj = Object::Array(vec![
-            Object::Name(b"ICCBased".to_vec()),
-            Object::Integer(5),
-        ]);
+        let obj = Object::Array(vec![Object::Name(b"ICCBased".to_vec()), Object::Integer(5)]);
         assert_eq!(format_color_space(&obj, &doc), "[ICCBased 5]");
     }
 
@@ -516,12 +545,15 @@ mod tests {
     fn walk_name_tree_leaf_only() {
         let mut doc = Document::new();
         let mut leaf = Dictionary::new();
-        leaf.set("Names", Object::Array(vec![
-            Object::String(b"file1.pdf".to_vec(), StringFormat::Literal),
-            Object::Integer(1),
-            Object::String(b"file2.pdf".to_vec(), StringFormat::Literal),
-            Object::Integer(2),
-        ]));
+        leaf.set(
+            "Names",
+            Object::Array(vec![
+                Object::String(b"file1.pdf".to_vec(), StringFormat::Literal),
+                Object::Integer(1),
+                Object::String(b"file2.pdf".to_vec(), StringFormat::Literal),
+                Object::Integer(2),
+            ]),
+        );
         doc.objects.insert((1, 0), Object::Dictionary(leaf.clone()));
 
         let results = walk_name_tree(&doc, &leaf);
@@ -534,10 +566,13 @@ mod tests {
     fn walk_name_tree_with_kids() {
         let mut doc = Document::new();
         let mut child = Dictionary::new();
-        child.set("Names", Object::Array(vec![
-            Object::String(b"a.txt".to_vec(), StringFormat::Literal),
-            Object::Integer(10),
-        ]));
+        child.set(
+            "Names",
+            Object::Array(vec![
+                Object::String(b"a.txt".to_vec(), StringFormat::Literal),
+                Object::Integer(10),
+            ]),
+        );
         doc.objects.insert((2, 0), Object::Dictionary(child));
         let mut root = Dictionary::new();
         root.set("Kids", Object::Array(vec![Object::Reference((2, 0))]));
@@ -562,13 +597,17 @@ mod tests {
         // Create two nodes that reference each other
         let mut node_a = Dictionary::new();
         node_a.set("Kids", Object::Array(vec![Object::Reference((2, 0))]));
-        doc.objects.insert((1, 0), Object::Dictionary(node_a.clone()));
+        doc.objects
+            .insert((1, 0), Object::Dictionary(node_a.clone()));
         let mut node_b = Dictionary::new();
         node_b.set("Kids", Object::Array(vec![Object::Reference((1, 0))]));
-        node_b.set("Names", Object::Array(vec![
-            Object::String(b"found".to_vec(), StringFormat::Literal),
-            Object::Integer(1),
-        ]));
+        node_b.set(
+            "Names",
+            Object::Array(vec![
+                Object::String(b"found".to_vec(), StringFormat::Literal),
+                Object::Integer(1),
+            ]),
+        );
         doc.objects.insert((2, 0), Object::Dictionary(node_b));
 
         let results = walk_name_tree(&doc, &node_a);
@@ -581,10 +620,15 @@ mod tests {
     fn walk_number_tree_leaf_only() {
         let doc = Document::new();
         let mut leaf = Dictionary::new();
-        leaf.set("Nums", Object::Array(vec![
-            Object::Integer(0), Object::Name(b"D".to_vec()),
-            Object::Integer(5), Object::Name(b"r".to_vec()),
-        ]));
+        leaf.set(
+            "Nums",
+            Object::Array(vec![
+                Object::Integer(0),
+                Object::Name(b"D".to_vec()),
+                Object::Integer(5),
+                Object::Name(b"r".to_vec()),
+            ]),
+        );
         let results = walk_number_tree(&doc, &leaf);
         assert_eq!(results.len(), 2);
         assert_eq!(results[0].0, 0);
@@ -595,9 +639,10 @@ mod tests {
     fn walk_number_tree_with_kids() {
         let mut doc = Document::new();
         let mut child = Dictionary::new();
-        child.set("Nums", Object::Array(vec![
-            Object::Integer(3), Object::Integer(99),
-        ]));
+        child.set(
+            "Nums",
+            Object::Array(vec![Object::Integer(3), Object::Integer(99)]),
+        );
         doc.objects.insert((5, 0), Object::Dictionary(child));
         let mut root = Dictionary::new();
         root.set("Kids", Object::Array(vec![Object::Reference((5, 0))]));
@@ -622,17 +667,18 @@ mod tests {
         // Two nodes that reference each other
         let mut node_a = Dictionary::new();
         node_a.set("Kids", Object::Array(vec![Object::Reference((2, 0))]));
-        doc.objects.insert((1, 0), Object::Dictionary(node_a.clone()));
+        doc.objects
+            .insert((1, 0), Object::Dictionary(node_a.clone()));
         let mut node_b = Dictionary::new();
         node_b.set("Kids", Object::Array(vec![Object::Reference((1, 0))]));
-        node_b.set("Nums", Object::Array(vec![
-            Object::Integer(0), Object::Integer(1),
-        ]));
+        node_b.set(
+            "Nums",
+            Object::Array(vec![Object::Integer(0), Object::Integer(1)]),
+        );
         doc.objects.insert((2, 0), Object::Dictionary(node_b));
 
         let results = walk_number_tree(&doc, &node_a);
         // Should find the one entry from node_b without infinite loop
         assert_eq!(results.len(), 1);
     }
-
 }

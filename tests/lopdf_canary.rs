@@ -35,10 +35,15 @@ fn build_minimal_doc() -> Document {
 
     let mut page = Dictionary::new();
     page.set(b"Type", Object::Name(b"Page".to_vec()));
-    page.set(b"MediaBox", Object::Array(vec![
-        Object::Integer(0), Object::Integer(0),
-        Object::Integer(612), Object::Integer(792),
-    ]));
+    page.set(
+        b"MediaBox",
+        Object::Array(vec![
+            Object::Integer(0),
+            Object::Integer(0),
+            Object::Integer(612),
+            Object::Integer(792),
+        ]),
+    );
 
     let page_id = doc.add_object(Object::Dictionary(page));
     pages.set(b"Kids", Object::Array(vec![Object::Reference(page_id)]));
@@ -56,10 +61,13 @@ fn build_minimal_doc() -> Document {
     doc.trailer.set(b"Root", Object::Reference(catalog_id));
 
     // File ID is required for encryption
-    doc.trailer.set(b"ID", Object::Array(vec![
-        Object::String(vec![1u8; 16], StringFormat::Hexadecimal),
-        Object::String(vec![1u8; 16], StringFormat::Hexadecimal),
-    ]));
+    doc.trailer.set(
+        b"ID",
+        Object::Array(vec![
+            Object::String(vec![1u8; 16], StringFormat::Hexadecimal),
+            Object::String(vec![1u8; 16], StringFormat::Hexadecimal),
+        ]),
+    );
 
     doc
 }
@@ -77,7 +85,8 @@ fn encrypt_and_reload(mut doc: Document) -> Document {
     doc.encrypt(&state).expect("failed to encrypt document");
 
     let mut buf = Vec::new();
-    doc.save_to(&mut buf).expect("failed to save encrypted document");
+    doc.save_to(&mut buf)
+        .expect("failed to save encrypted document");
     Document::load_mem(&buf).expect("failed to load encrypted document")
 }
 
@@ -100,13 +109,15 @@ fn has_xref_stream_in_objects(doc: &Document) -> bool {
 fn find_encrypt_ref_in_xref_stream(doc: &Document) -> Option<(u32, u16)> {
     doc.objects.values().find_map(|obj| {
         if let Object::Stream(s) = obj {
-            let is_xref = s.dict
+            let is_xref = s
+                .dict
                 .get(b"Type")
                 .ok()
                 .and_then(|v| v.as_name().ok())
                 .is_some_and(|n| n == b"XRef");
             if is_xref {
-                return s.dict
+                return s
+                    .dict
                     .get(b"Encrypt")
                     .ok()
                     .and_then(|v| v.as_reference().ok());

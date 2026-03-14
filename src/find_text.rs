@@ -1,5 +1,5 @@
 use lopdf::Document;
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 use std::io::Write;
 
 use crate::text::extract_text_from_page_with_warnings;
@@ -18,9 +18,10 @@ fn find_matches(doc: &Document, pattern: &str, page_filter: Option<&PageSpec>) -
     let lower_pattern = pattern.to_lowercase();
 
     let page_list: Vec<(u32, lopdf::ObjectId)> = if let Some(spec) = page_filter {
-        spec.pages().into_iter().filter_map(|pn| {
-            pages.get(&pn).map(|&id| (pn, id))
-        }).collect()
+        spec.pages()
+            .into_iter()
+            .filter_map(|pn| pages.get(&pn).map(|&id| (pn, id)))
+            .collect()
     } else {
         pages.iter().map(|(&pn, &id)| (pn, id)).collect()
     };
@@ -42,9 +43,13 @@ fn find_matches(doc: &Document, pattern: &str, page_filter: Option<&PageSpec>) -
             let ctx_end = text.ceil_char_boundary((abs_pos + pattern.len() + 40).min(text.len()));
             let snippet = text[ctx_start..ctx_end].replace('\n', " ");
             let mut formatted = String::new();
-            if ctx_start > 0 { formatted.push_str("..."); }
+            if ctx_start > 0 {
+                formatted.push_str("...");
+            }
             formatted.push_str(snippet.trim());
-            if ctx_end < text.len() { formatted.push_str("..."); }
+            if ctx_end < text.len() {
+                formatted.push_str("...");
+            }
             snippets.push(formatted);
             search_start = abs_pos + pattern.len();
         }
@@ -60,7 +65,12 @@ fn find_matches(doc: &Document, pattern: &str, page_filter: Option<&PageSpec>) -
     results
 }
 
-pub(crate) fn print_find_text(writer: &mut impl Write, doc: &Document, pattern: &str, page_filter: Option<&PageSpec>) {
+pub(crate) fn print_find_text(
+    writer: &mut impl Write,
+    doc: &Document,
+    pattern: &str,
+    page_filter: Option<&PageSpec>,
+) {
     let matches = find_matches(doc, pattern, page_filter);
 
     if matches.is_empty() {
@@ -89,16 +99,23 @@ pub(crate) fn print_find_text(writer: &mut impl Write, doc: &Document, pattern: 
     );
 }
 
-pub(crate) fn find_text_json_value(doc: &Document, pattern: &str, page_filter: Option<&PageSpec>) -> Value {
+pub(crate) fn find_text_json_value(
+    doc: &Document,
+    pattern: &str,
+    page_filter: Option<&PageSpec>,
+) -> Value {
     let matches = find_matches(doc, pattern, page_filter);
     let total_matches: usize = matches.iter().map(|m| m.snippets.len()).sum();
 
-    let pages: Vec<Value> = matches.iter().map(|m| {
-        json!({
-            "page_number": m.page_number,
-            "matches": m.snippets,
+    let pages: Vec<Value> = matches
+        .iter()
+        .map(|m| {
+            json!({
+                "page_number": m.page_number,
+                "matches": m.snippets,
+            })
         })
-    }).collect();
+        .collect();
 
     json!({
         "pattern": pattern,
@@ -108,7 +125,12 @@ pub(crate) fn find_text_json_value(doc: &Document, pattern: &str, page_filter: O
 }
 
 #[cfg(test)]
-pub(crate) fn print_find_text_json(writer: &mut impl Write, doc: &Document, pattern: &str, page_filter: Option<&PageSpec>) {
+pub(crate) fn print_find_text_json(
+    writer: &mut impl Write,
+    doc: &Document,
+    pattern: &str,
+    page_filter: Option<&PageSpec>,
+) {
     use crate::helpers::json_pretty;
     let output = find_text_json_value(doc, pattern, page_filter);
     writeln!(writer, "{}", json_pretty(&output)).unwrap();
@@ -117,7 +139,7 @@ pub(crate) fn print_find_text_json(writer: &mut impl Write, doc: &Document, patt
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::test_utils::{output_of, build_two_page_doc, build_page_doc_with_content};
+    use crate::test_utils::{build_page_doc_with_content, build_two_page_doc, output_of};
     use crate::types::PageSpec;
 
     #[test]

@@ -1,9 +1,11 @@
 use lopdf::{Document, Object, ObjectId};
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 use std::collections::{BTreeMap, BTreeSet};
 use std::io::Write;
 
-use crate::helpers::{resolve_dict, resolve_array, name_to_string, obj_to_string_lossy, get_catalog};
+use crate::helpers::{
+    get_catalog, name_to_string, obj_to_string_lossy, resolve_array, resolve_dict,
+};
 
 pub(crate) struct OcgInfo {
     pub object_id: ObjectId,
@@ -18,24 +20,36 @@ pub(crate) fn collect_layers(doc: &Document) -> Vec<OcgInfo> {
         None => return Vec::new(),
     };
 
-    let oc_props = match catalog.get(b"OCProperties").ok().and_then(|o| resolve_dict(doc, o)) {
+    let oc_props = match catalog
+        .get(b"OCProperties")
+        .ok()
+        .and_then(|o| resolve_dict(doc, o))
+    {
         Some(d) => d,
         None => return Vec::new(),
     };
 
     // Get OCGs array
-    let ocgs_arr = match oc_props.get(b"OCGs").ok().and_then(|o| resolve_array(doc, o)) {
+    let ocgs_arr = match oc_props
+        .get(b"OCGs")
+        .ok()
+        .and_then(|o| resolve_array(doc, o))
+    {
         Some(a) => a,
         None => return Vec::new(),
     };
 
     // Get default config /D
     let empty_dict = lopdf::Dictionary::new();
-    let d_dict = oc_props.get(b"D").ok()
+    let d_dict = oc_props
+        .get(b"D")
+        .ok()
         .and_then(|o| resolve_dict(doc, o))
         .unwrap_or(&empty_dict);
 
-    let base_state = d_dict.get(b"BaseState").ok()
+    let base_state = d_dict
+        .get(b"BaseState")
+        .ok()
         .and_then(name_to_string)
         .unwrap_or_else(|| "ON".to_string());
 
@@ -45,7 +59,8 @@ pub(crate) fn collect_layers(doc: &Document) -> Vec<OcgInfo> {
 
     // Build page_id -> page_num lookup
     let pages = doc.get_pages();
-    let page_id_to_num: BTreeMap<ObjectId, u32> = pages.into_iter().map(|(num, id)| (id, num)).collect();
+    let page_id_to_num: BTreeMap<ObjectId, u32> =
+        pages.into_iter().map(|(num, id)| (id, num)).collect();
 
     // Scan pages for OCG references in /Properties
     let mut ocg_pages: BTreeMap<ObjectId, Vec<u32>> = BTreeMap::new();
@@ -71,7 +86,9 @@ pub(crate) fn collect_layers(doc: &Document) -> Vec<OcgInfo> {
             _ => continue,
         };
 
-        let name = ocg_dict.get(b"Name").ok()
+        let name = ocg_dict
+            .get(b"Name")
+            .ok()
             .and_then(obj_to_string_lossy)
             .unwrap_or_else(|| "(unnamed)".to_string());
 
@@ -84,7 +101,12 @@ pub(crate) fn collect_layers(doc: &Document) -> Vec<OcgInfo> {
         };
 
         let page_numbers = ocg_pages.remove(&ocg_id).unwrap_or_default();
-        layers.push(OcgInfo { object_id: ocg_id, name, default_state, page_numbers });
+        layers.push(OcgInfo {
+            object_id: ocg_id,
+            name,
+            default_state,
+            page_numbers,
+        });
     }
 
     layers
@@ -102,15 +124,27 @@ fn extract_id_set(dict: &lopdf::Dictionary, key: &[u8]) -> BTreeSet<ObjectId> {
     set
 }
 
-fn scan_page_for_ocgs(doc: &Document, page_dict: &lopdf::Dictionary, page_num: u32, ocg_pages: &mut BTreeMap<ObjectId, Vec<u32>>) {
+fn scan_page_for_ocgs(
+    doc: &Document,
+    page_dict: &lopdf::Dictionary,
+    page_num: u32,
+    ocg_pages: &mut BTreeMap<ObjectId, Vec<u32>>,
+) {
     // Look for Resources -> Properties which holds OCG references
-    let resources = match page_dict.get(b"Resources").ok().and_then(|o| resolve_dict(doc, o)) {
+    let resources = match page_dict
+        .get(b"Resources")
+        .ok()
+        .and_then(|o| resolve_dict(doc, o))
+    {
         Some(d) => d,
         None => {
             // Try inheriting from parent
             if let Ok(Object::Reference(parent_id)) = page_dict.get(b"Parent")
                 && let Ok(Object::Dictionary(parent)) = doc.get_object(*parent_id)
-                && let Some(d) = parent.get(b"Resources").ok().and_then(|o| resolve_dict(doc, o))
+                && let Some(d) = parent
+                    .get(b"Resources")
+                    .ok()
+                    .and_then(|o| resolve_dict(doc, o))
             {
                 d
             } else {
@@ -119,7 +153,11 @@ fn scan_page_for_ocgs(doc: &Document, page_dict: &lopdf::Dictionary, page_num: u
         }
     };
 
-    let props = match resources.get(b"Properties").ok().and_then(|o| resolve_dict(doc, o)) {
+    let props = match resources
+        .get(b"Properties")
+        .ok()
+        .and_then(|o| resolve_dict(doc, o))
+    {
         Some(d) => d,
         None => return,
     };
@@ -145,29 +183,51 @@ fn scan_page_for_ocgs(doc: &Document, page_dict: &lopdf::Dictionary, page_num: u
 pub(crate) fn print_layers(writer: &mut impl Write, doc: &Document) {
     let layers = collect_layers(doc);
     wln!(writer, "{} layers found\n", layers.len());
-    if layers.is_empty() { return; }
-    wln!(writer, "  {:>4}  {:<30} {:<8} Pages", "Obj#", "Name", "Default");
+    if layers.is_empty() {
+        return;
+    }
+    wln!(
+        writer,
+        "  {:>4}  {:<30} {:<8} Pages",
+        "Obj#",
+        "Name",
+        "Default"
+    );
     for l in &layers {
         let pages_str = if l.page_numbers.is_empty() {
             "-".to_string()
         } else {
-            l.page_numbers.iter().map(|n| n.to_string()).collect::<Vec<_>>().join(", ")
+            l.page_numbers
+                .iter()
+                .map(|n| n.to_string())
+                .collect::<Vec<_>>()
+                .join(", ")
         };
-        wln!(writer, "  {:>4}  {:<30} {:<8} {}", l.object_id.0, l.name, l.default_state, pages_str);
+        wln!(
+            writer,
+            "  {:>4}  {:<30} {:<8} {}",
+            l.object_id.0,
+            l.name,
+            l.default_state,
+            pages_str
+        );
     }
 }
 
 pub(crate) fn layers_json_value(doc: &Document) -> Value {
     let layers = collect_layers(doc);
-    let items: Vec<Value> = layers.iter().map(|l| {
-        json!({
-            "object_number": l.object_id.0,
-            "generation": l.object_id.1,
-            "name": l.name,
-            "default_state": l.default_state,
-            "pages": l.page_numbers,
+    let items: Vec<Value> = layers
+        .iter()
+        .map(|l| {
+            json!({
+                "object_number": l.object_id.0,
+                "generation": l.object_id.1,
+                "name": l.name,
+                "default_state": l.default_state,
+                "pages": l.page_numbers,
+            })
         })
-    }).collect();
+        .collect();
     json!({
         "layer_count": items.len(),
         "layers": items,
@@ -181,15 +241,14 @@ pub(crate) fn print_layers_json(writer: &mut impl Write, doc: &Document) {
     writeln!(writer, "{}", json_pretty(&output)).unwrap();
 }
 
-
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::test_utils::*;
+    use lopdf::Object;
     use lopdf::{Dictionary, StringFormat};
     use pretty_assertions::assert_eq;
-    use serde_json::{Value};
-    use lopdf::Object;
+    use serde_json::Value;
 
     fn make_ocg_doc() -> Document {
         let mut doc = Document::new();
@@ -197,12 +256,18 @@ mod tests {
         // OCG objects
         let mut ocg1 = Dictionary::new();
         ocg1.set("Type", Object::Name(b"OCG".to_vec()));
-        ocg1.set("Name", Object::String(b"Layer1".to_vec(), StringFormat::Literal));
+        ocg1.set(
+            "Name",
+            Object::String(b"Layer1".to_vec(), StringFormat::Literal),
+        );
         doc.objects.insert((10, 0), Object::Dictionary(ocg1));
 
         let mut ocg2 = Dictionary::new();
         ocg2.set("Type", Object::Name(b"OCG".to_vec()));
-        ocg2.set("Name", Object::String(b"Layer2".to_vec(), StringFormat::Literal));
+        ocg2.set(
+            "Name",
+            Object::String(b"Layer2".to_vec(), StringFormat::Literal),
+        );
         doc.objects.insert((11, 0), Object::Dictionary(ocg2));
 
         // Default config
@@ -212,10 +277,10 @@ mod tests {
 
         // OCProperties
         let mut oc_props = Dictionary::new();
-        oc_props.set("OCGs", Object::Array(vec![
-            Object::Reference((10, 0)),
-            Object::Reference((11, 0)),
-        ]));
+        oc_props.set(
+            "OCGs",
+            Object::Array(vec![Object::Reference((10, 0)), Object::Reference((11, 0))]),
+        );
         oc_props.set("D", Object::Dictionary(d_config));
 
         // Page with Properties referencing OCG
@@ -310,12 +375,18 @@ mod tests {
 
         let mut ocg1 = Dictionary::new();
         ocg1.set("Type", Object::Name(b"OCG".to_vec()));
-        ocg1.set("Name", Object::String(b"Hidden".to_vec(), StringFormat::Literal));
+        ocg1.set(
+            "Name",
+            Object::String(b"Hidden".to_vec(), StringFormat::Literal),
+        );
         doc.objects.insert((10, 0), Object::Dictionary(ocg1));
 
         let mut ocg2 = Dictionary::new();
         ocg2.set("Type", Object::Name(b"OCG".to_vec()));
-        ocg2.set("Name", Object::String(b"Visible".to_vec(), StringFormat::Literal));
+        ocg2.set(
+            "Name",
+            Object::String(b"Visible".to_vec(), StringFormat::Literal),
+        );
         doc.objects.insert((11, 0), Object::Dictionary(ocg2));
 
         let mut d_config = Dictionary::new();
@@ -323,10 +394,10 @@ mod tests {
         d_config.set("ON", Object::Array(vec![Object::Reference((11, 0))]));
 
         let mut oc_props = Dictionary::new();
-        oc_props.set("OCGs", Object::Array(vec![
-            Object::Reference((10, 0)),
-            Object::Reference((11, 0)),
-        ]));
+        oc_props.set(
+            "OCGs",
+            Object::Array(vec![Object::Reference((10, 0)), Object::Reference((11, 0))]),
+        );
         oc_props.set("D", Object::Dictionary(d_config));
 
         let mut catalog = Dictionary::new();
@@ -391,7 +462,10 @@ mod tests {
         let mut doc = Document::new();
         let mut ocg = Dictionary::new();
         ocg.set("Type", Object::Name(b"OCG".to_vec()));
-        ocg.set("Name", Object::String(b"RefLayer".to_vec(), StringFormat::Literal));
+        ocg.set(
+            "Name",
+            Object::String(b"RefLayer".to_vec(), StringFormat::Literal),
+        );
         doc.objects.insert((10, 0), Object::Dictionary(ocg));
 
         let d_config = Dictionary::new();
@@ -417,7 +491,10 @@ mod tests {
 
         let mut ocg = Dictionary::new();
         ocg.set("Type", Object::Name(b"OCG".to_vec()));
-        ocg.set("Name", Object::String(b"NoConfig".to_vec(), StringFormat::Literal));
+        ocg.set(
+            "Name",
+            Object::String(b"NoConfig".to_vec(), StringFormat::Literal),
+        );
         doc.objects.insert((10, 0), Object::Dictionary(ocg));
 
         // OCProperties with OCGs but no /D config dict
@@ -443,7 +520,10 @@ mod tests {
 
         let mut ocg = Dictionary::new();
         ocg.set("Type", Object::Name(b"OCG".to_vec()));
-        ocg.set("Name", Object::String(b"MultiPage".to_vec(), StringFormat::Literal));
+        ocg.set(
+            "Name",
+            Object::String(b"MultiPage".to_vec(), StringFormat::Literal),
+        );
         doc.objects.insert((10, 0), Object::Dictionary(ocg));
 
         let d_config = Dictionary::new();
@@ -475,10 +555,10 @@ mod tests {
 
         let mut pages = Dictionary::new();
         pages.set("Type", Object::Name(b"Pages".to_vec()));
-        pages.set("Kids", Object::Array(vec![
-            Object::Reference((3, 0)),
-            Object::Reference((4, 0)),
-        ]));
+        pages.set(
+            "Kids",
+            Object::Array(vec![Object::Reference((3, 0)), Object::Reference((4, 0))]),
+        );
         pages.set("Count", Object::Integer(2));
         doc.objects.insert((2, 0), Object::Dictionary(pages));
 
@@ -500,17 +580,23 @@ mod tests {
 
         let mut ocg = Dictionary::new();
         ocg.set("Type", Object::Name(b"OCG".to_vec()));
-        ocg.set("Name", Object::String(b"Real".to_vec(), StringFormat::Literal));
+        ocg.set(
+            "Name",
+            Object::String(b"Real".to_vec(), StringFormat::Literal),
+        );
         doc.objects.insert((10, 0), Object::Dictionary(ocg));
 
         let d_config = Dictionary::new();
         let mut oc_props = Dictionary::new();
         // Mix of reference and non-reference items
-        oc_props.set("OCGs", Object::Array(vec![
-            Object::Integer(42),
-            Object::Reference((10, 0)),
-            Object::Name(b"Bogus".to_vec()),
-        ]));
+        oc_props.set(
+            "OCGs",
+            Object::Array(vec![
+                Object::Integer(42),
+                Object::Reference((10, 0)),
+                Object::Name(b"Bogus".to_vec()),
+            ]),
+        );
         oc_props.set("D", Object::Dictionary(d_config));
 
         let mut catalog = Dictionary::new();
@@ -532,17 +618,23 @@ mod tests {
         // OCG (10,0) exists
         let mut ocg = Dictionary::new();
         ocg.set("Type", Object::Name(b"OCG".to_vec()));
-        ocg.set("Name", Object::String(b"Exists".to_vec(), StringFormat::Literal));
+        ocg.set(
+            "Name",
+            Object::String(b"Exists".to_vec(), StringFormat::Literal),
+        );
         doc.objects.insert((10, 0), Object::Dictionary(ocg));
 
         // OCG (99,0) does NOT exist in doc.objects
 
         let d_config = Dictionary::new();
         let mut oc_props = Dictionary::new();
-        oc_props.set("OCGs", Object::Array(vec![
-            Object::Reference((10, 0)),
-            Object::Reference((99, 0)), // dangling reference
-        ]));
+        oc_props.set(
+            "OCGs",
+            Object::Array(vec![
+                Object::Reference((10, 0)),
+                Object::Reference((99, 0)), // dangling reference
+            ]),
+        );
         oc_props.set("D", Object::Dictionary(d_config));
 
         let mut catalog = Dictionary::new();
@@ -563,7 +655,10 @@ mod tests {
 
         let mut ocg = Dictionary::new();
         ocg.set("Type", Object::Name(b"OCG".to_vec()));
-        ocg.set("Name", Object::String(b"Inherited".to_vec(), StringFormat::Literal));
+        ocg.set(
+            "Name",
+            Object::String(b"Inherited".to_vec(), StringFormat::Literal),
+        );
         doc.objects.insert((10, 0), Object::Dictionary(ocg));
 
         let d_config = Dictionary::new();
@@ -608,7 +703,10 @@ mod tests {
 
         let mut ocg = Dictionary::new();
         ocg.set("Type", Object::Name(b"OCG".to_vec()));
-        ocg.set("Name", Object::String(b"RealOCG".to_vec(), StringFormat::Literal));
+        ocg.set(
+            "Name",
+            Object::String(b"RealOCG".to_vec(), StringFormat::Literal),
+        );
         doc.objects.insert((10, 0), Object::Dictionary(ocg));
 
         // A dictionary that is NOT an OCG (different /Type)
@@ -658,11 +756,15 @@ mod tests {
 
         let mut ocg = Dictionary::new();
         ocg.set("Type", Object::Name(b"OCG".to_vec()));
-        ocg.set("Name", Object::String(b"IndirectArr".to_vec(), StringFormat::Literal));
+        ocg.set(
+            "Name",
+            Object::String(b"IndirectArr".to_vec(), StringFormat::Literal),
+        );
         doc.objects.insert((10, 0), Object::Dictionary(ocg));
 
         // Store the OCGs array as a separate object
-        doc.objects.insert((20, 0), Object::Array(vec![Object::Reference((10, 0))]));
+        doc.objects
+            .insert((20, 0), Object::Array(vec![Object::Reference((10, 0))]));
 
         let d_config = Dictionary::new();
         let mut oc_props = Dictionary::new();
@@ -702,7 +804,10 @@ mod tests {
 
         let mut ocg = Dictionary::new();
         ocg.set("Type", Object::Name(b"OCG".to_vec()));
-        ocg.set("Name", Object::String(b"GenTest".to_vec(), StringFormat::Literal));
+        ocg.set(
+            "Name",
+            Object::String(b"GenTest".to_vec(), StringFormat::Literal),
+        );
         // Use generation 0 (standard)
         doc.objects.insert((10, 0), Object::Dictionary(ocg));
 
@@ -730,7 +835,10 @@ mod tests {
 
         let mut ocg = Dictionary::new();
         ocg.set("Type", Object::Name(b"OCG".to_vec()));
-        ocg.set("Name", Object::String(b"TwoPages".to_vec(), StringFormat::Literal));
+        ocg.set(
+            "Name",
+            Object::String(b"TwoPages".to_vec(), StringFormat::Literal),
+        );
         doc.objects.insert((10, 0), Object::Dictionary(ocg));
 
         let d_config = Dictionary::new();
@@ -768,11 +876,14 @@ mod tests {
 
         let mut pages = Dictionary::new();
         pages.set("Type", Object::Name(b"Pages".to_vec()));
-        pages.set("Kids", Object::Array(vec![
-            Object::Reference((3, 0)),
-            Object::Reference((4, 0)),
-            Object::Reference((5, 0)),
-        ]));
+        pages.set(
+            "Kids",
+            Object::Array(vec![
+                Object::Reference((3, 0)),
+                Object::Reference((4, 0)),
+                Object::Reference((5, 0)),
+            ]),
+        );
         pages.set("Count", Object::Integer(3));
         doc.objects.insert((2, 0), Object::Dictionary(pages));
 
@@ -784,7 +895,10 @@ mod tests {
         doc.trailer.set("Root", Object::Reference((1, 0)));
 
         let out = output_of(|w| print_layers(w, &doc));
-        assert!(out.contains("1, 3"), "Expected pages '1, 3' in output, got:\n{}", out);
+        assert!(
+            out.contains("1, 3"),
+            "Expected pages '1, 3' in output, got:\n{}",
+            out
+        );
     }
-
 }

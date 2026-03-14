@@ -1,8 +1,8 @@
 use lopdf::{Document, Object, ObjectId};
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 use std::collections::BTreeSet;
 
-use crate::helpers::{resolve_dict, format_color_space, find_font_file_id};
+use crate::helpers::{find_font_file_id, format_color_space, resolve_dict};
 
 pub(crate) struct ResourceEntry {
     pub name: String,
@@ -17,12 +17,17 @@ pub(crate) struct PageResources {
     pub color_spaces: Vec<ResourceEntry>,
 }
 
-pub(crate) fn resolve_page_resources(doc: &Document, page_id: ObjectId) -> Option<&lopdf::Dictionary> {
+pub(crate) fn resolve_page_resources(
+    doc: &Document,
+    page_id: ObjectId,
+) -> Option<&lopdf::Dictionary> {
     // Walk up the page tree to find inherited Resources
     let mut current_id = page_id;
     let mut visited = BTreeSet::new();
     while let Ok(Object::Dictionary(dict)) = doc.get_object(current_id) {
-        if !visited.insert(current_id) { break; }
+        if !visited.insert(current_id) {
+            break;
+        }
         if let Ok(res) = dict.get(b"Resources") {
             return resolve_dict(doc, res);
         }
@@ -42,28 +47,64 @@ pub(crate) fn font_detail(doc: &Document, obj_id: ObjectId) -> String {
         Ok(Object::Stream(s)) => &s.dict,
         _ => return "?".to_string(),
     };
-    let base_font = dict.get(b"BaseFont").ok()
-        .and_then(|v| v.as_name().ok().map(|n| String::from_utf8_lossy(n).into_owned()));
-    let subtype = dict.get(b"Subtype").ok()
-        .and_then(|v| v.as_name().ok().map(|n| String::from_utf8_lossy(n).into_owned()));
+    let base_font = dict.get(b"BaseFont").ok().and_then(|v| {
+        v.as_name()
+            .ok()
+            .map(|n| String::from_utf8_lossy(n).into_owned())
+    });
+    let subtype = dict.get(b"Subtype").ok().and_then(|v| {
+        v.as_name()
+            .ok()
+            .map(|n| String::from_utf8_lossy(n).into_owned())
+    });
     let embedded = find_font_file_id(doc, dict).map(|_| true);
     let mut parts = Vec::new();
-    if let Some(bf) = base_font { parts.push(bf); }
-    if let Some(st) = subtype { parts.push(st); }
-    if embedded == Some(true) { parts.push("embedded".to_string()); }
-    if parts.is_empty() { "?".to_string() } else { parts.join(", ") }
+    if let Some(bf) = base_font {
+        parts.push(bf);
+    }
+    if let Some(st) = subtype {
+        parts.push(st);
+    }
+    if embedded == Some(true) {
+        parts.push("embedded".to_string());
+    }
+    if parts.is_empty() {
+        "?".to_string()
+    } else {
+        parts.join(", ")
+    }
 }
 
 pub(crate) fn xobject_detail(doc: &Document, obj_id: ObjectId) -> String {
     match doc.get_object(obj_id) {
         Ok(Object::Stream(s)) => {
-            let subtype = s.dict.get(b"Subtype").ok()
-                .and_then(|v| v.as_name().ok().map(|n| String::from_utf8_lossy(n).into_owned()))
+            let subtype = s
+                .dict
+                .get(b"Subtype")
+                .ok()
+                .and_then(|v| {
+                    v.as_name()
+                        .ok()
+                        .map(|n| String::from_utf8_lossy(n).into_owned())
+                })
                 .unwrap_or_else(|| "?".to_string());
             if subtype == "Image" {
-                let w = s.dict.get(b"Width").ok().and_then(|v| v.as_i64().ok()).unwrap_or(0);
-                let h = s.dict.get(b"Height").ok().and_then(|v| v.as_i64().ok()).unwrap_or(0);
-                let cs = s.dict.get(b"ColorSpace").ok()
+                let w = s
+                    .dict
+                    .get(b"Width")
+                    .ok()
+                    .and_then(|v| v.as_i64().ok())
+                    .unwrap_or(0);
+                let h = s
+                    .dict
+                    .get(b"Height")
+                    .ok()
+                    .and_then(|v| v.as_i64().ok())
+                    .unwrap_or(0);
+                let cs = s
+                    .dict
+                    .get(b"ColorSpace")
+                    .ok()
                     .map(|v| format_color_space(v, doc))
                     .unwrap_or_else(|| "-".to_string());
                 format!("Image, {}x{}, {}", w, h, cs)
@@ -77,7 +118,10 @@ pub(crate) fn xobject_detail(doc: &Document, obj_id: ObjectId) -> String {
 
 pub(crate) fn collect_page_resources(doc: &Document, page_id: ObjectId) -> PageResources {
     let empty = PageResources {
-        fonts: vec![], xobjects: vec![], ext_gstate: vec![], color_spaces: vec![],
+        fonts: vec![],
+        xobjects: vec![],
+        ext_gstate: vec![],
+        color_spaces: vec![],
     };
 
     let res_dict = match resolve_page_resources(doc, page_id) {
@@ -98,7 +142,11 @@ pub(crate) fn collect_page_resources(doc: &Document, page_id: ObjectId) -> PageR
                     detail: font_detail(doc, id),
                 });
             } else {
-                fonts.push(ResourceEntry { name: name_str, object_id: None, detail: "inline".to_string() });
+                fonts.push(ResourceEntry {
+                    name: name_str,
+                    object_id: None,
+                    detail: "inline".to_string(),
+                });
             }
         }
     }
@@ -151,20 +199,20 @@ pub(crate) fn collect_page_resources(doc: &Document, page_id: ObjectId) -> PageR
             let name_str = format!("/{}", String::from_utf8_lossy(name));
             let detail = match val {
                 Object::Name(n) => String::from_utf8_lossy(n).into_owned(),
-                Object::Array(arr) => {
-                    arr.first().and_then(|v| v.as_name().ok())
-                        .map(|n| String::from_utf8_lossy(n).into_owned())
-                        .unwrap_or_else(|| format!("[{} items]", arr.len()))
-                }
+                Object::Array(arr) => arr
+                    .first()
+                    .and_then(|v| v.as_name().ok())
+                    .map(|n| String::from_utf8_lossy(n).into_owned())
+                    .unwrap_or_else(|| format!("[{} items]", arr.len())),
                 Object::Reference(id) => {
                     if let Ok(resolved) = doc.get_object(*id) {
                         match resolved {
                             Object::Name(n) => String::from_utf8_lossy(n).into_owned(),
-                            Object::Array(arr) => {
-                                arr.first().and_then(|v| v.as_name().ok())
-                                    .map(|n| String::from_utf8_lossy(n).into_owned())
-                                    .unwrap_or_else(|| format!("[{} items]", arr.len()))
-                            }
+                            Object::Array(arr) => arr
+                                .first()
+                                .and_then(|v| v.as_name().ok())
+                                .map(|n| String::from_utf8_lossy(n).into_owned())
+                                .unwrap_or_else(|| format!("[{} items]", arr.len())),
                             _ => format!("obj {}", id.0),
                         }
                     } else {
@@ -174,26 +222,38 @@ pub(crate) fn collect_page_resources(doc: &Document, page_id: ObjectId) -> PageR
                 _ => "?".to_string(),
             };
             let obj_id = val.as_reference().ok();
-            color_spaces.push(ResourceEntry { name: name_str, object_id: obj_id, detail });
+            color_spaces.push(ResourceEntry {
+                name: name_str,
+                object_id: obj_id,
+                detail,
+            });
         }
     }
     color_spaces.sort_by(|a, b| a.name.cmp(&b.name));
 
-    PageResources { fonts, xobjects, ext_gstate, color_spaces }
+    PageResources {
+        fonts,
+        xobjects,
+        ext_gstate,
+        color_spaces,
+    }
 }
 
 pub(crate) fn resource_entries_to_json(entries: &[ResourceEntry]) -> Vec<Value> {
-    entries.iter().map(|e| {
-        let mut obj = json!({
-            "name": e.name,
-            "detail": e.detail,
-        });
-        if let Some(id) = e.object_id {
-            obj["object_number"] = json!(id.0);
-            obj["generation"] = json!(id.1);
-        }
-        obj
-    }).collect()
+    entries
+        .iter()
+        .map(|e| {
+            let mut obj = json!({
+                "name": e.name,
+                "detail": e.detail,
+            });
+            if let Some(id) = e.object_id {
+                obj["object_number"] = json!(id.0);
+                obj["generation"] = json!(id.1);
+            }
+            obj
+        })
+        .collect()
 }
 
 #[cfg(test)]
@@ -620,7 +680,8 @@ mod tests {
     fn collect_resources_with_color_spaces_reference() {
         let mut doc = Document::new();
         // Resolved reference target is a Name
-        doc.objects.insert((20, 0), Object::Name(b"DeviceCMYK".to_vec()));
+        doc.objects
+            .insert((20, 0), Object::Name(b"DeviceCMYK".to_vec()));
 
         let mut cs_dict = Dictionary::new();
         cs_dict.set("CS2", Object::Reference((20, 0)));

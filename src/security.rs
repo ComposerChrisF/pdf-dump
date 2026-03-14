@@ -1,9 +1,8 @@
 use lopdf::{Document, Object, ObjectId};
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 use std::collections::BTreeMap;
 use std::io::Write;
 use std::path::Path;
-
 
 pub(crate) struct SecurityInfo {
     pub encrypted: bool,
@@ -44,18 +43,18 @@ fn decode_permissions(p: i64) -> BTreeMap<String, bool> {
 
 pub(crate) fn collect_security(doc: &Document, file_path: Option<&Path>) -> SecurityInfo {
     // Try trailer first (works for traditional xref tables)
-    let encrypt_ref = doc.trailer.get(b"Encrypt").ok()
-        .and_then(|v| match v {
-            Object::Reference(id) => Some(*id),
-            _ => None,
-        });
+    let encrypt_ref = doc.trailer.get(b"Encrypt").ok().and_then(|v| match v {
+        Object::Reference(id) => Some(*id),
+        _ => None,
+    });
 
-    let encrypt_dict = encrypt_ref
-        .and_then(|id| doc.get_object(id).ok())
-        .and_then(|obj| match obj {
-            Object::Dictionary(d) => Some(d),
-            _ => None,
-        });
+    let encrypt_dict =
+        encrypt_ref
+            .and_then(|id| doc.get_object(id).ok())
+            .and_then(|obj| match obj {
+                Object::Dictionary(d) => Some(d),
+                _ => None,
+            });
 
     // Also check if /Encrypt is an inline dictionary in the trailer
     let encrypt_dict = encrypt_dict.or_else(|| {
@@ -78,16 +77,19 @@ pub(crate) fn collect_security(doc: &Document, file_path: Option<&Path>) -> Secu
             Object::Stream(s) => &s.dict,
             _ => continue,
         };
-        let is_xref = stream_dict.get(b"Type").ok()
+        let is_xref = stream_dict
+            .get(b"Type")
+            .ok()
             .and_then(|v| v.as_name().ok())
             .is_some_and(|n| n == b"XRef");
-        if !is_xref { continue; }
+        if !is_xref {
+            continue;
+        }
 
-        let enc_ref = stream_dict.get(b"Encrypt").ok()
-            .and_then(|v| match v {
-                Object::Reference(id) => Some(*id),
-                _ => None,
-            });
+        let enc_ref = stream_dict.get(b"Encrypt").ok().and_then(|v| match v {
+            Object::Reference(id) => Some(*id),
+            _ => None,
+        });
 
         if let Some(ref_id) = enc_ref {
             // Try to resolve the encrypt dict (usually consumed by lopdf)
@@ -126,8 +128,15 @@ pub(crate) fn collect_security(doc: &Document, file_path: Option<&Path>) -> Secu
 }
 
 fn dict_int(dict: &lopdf::Dictionary, key: &[u8], default: i64) -> i64 {
-    dict.get(key).ok()
-        .and_then(|o| if let Object::Integer(i) = o { Some(*i) } else { None })
+    dict.get(key)
+        .ok()
+        .and_then(|o| {
+            if let Object::Integer(i) = o {
+                Some(*i)
+            } else {
+                None
+            }
+        })
         .unwrap_or(default)
 }
 
@@ -158,7 +167,8 @@ fn parse_encrypt_from_raw_file(path: &Path, obj_num: u32) -> Option<SecurityInfo
     let marker_bytes = marker.as_bytes();
 
     // Find the object in the raw bytes
-    let pos = data.windows(marker_bytes.len())
+    let pos = data
+        .windows(marker_bytes.len())
         .position(|w| w == marker_bytes)?;
 
     // Extract a window after the marker — encrypt dicts are small
@@ -198,7 +208,9 @@ fn extract_int_after_key(data: &[u8], key: &[u8]) -> Option<i64> {
     while i < after.len() && (after[i] == b' ' || after[i] == b'\r' || after[i] == b'\n') {
         i += 1;
     }
-    if i >= after.len() { return None; }
+    if i >= after.len() {
+        return None;
+    }
 
     // Parse the integer (possibly negative)
     let mut end = i;
@@ -208,9 +220,13 @@ fn extract_int_after_key(data: &[u8], key: &[u8]) -> Option<i64> {
     while end < after.len() && after[end].is_ascii_digit() {
         end += 1;
     }
-    if end == i { return None; }
+    if end == i {
+        return None;
+    }
     // If we only got a sign with no digits, bail
-    if end == i + 1 && (after[i] == b'-' || after[i] == b'+') { return None; }
+    if end == i + 1 && (after[i] == b'-' || after[i] == b'+') {
+        return None;
+    }
 
     let num_str = std::str::from_utf8(&after[i..end]).ok()?;
     num_str.parse().ok()
@@ -232,8 +248,14 @@ pub(crate) fn print_security(writer: &mut impl Write, doc: &Document, file_path:
     }
     wln!(writer, "\nPermissions (raw: {}):", info.permissions_raw);
     let perm_order = [
-        "Print", "Modify", "Copy/extract text", "Annotate",
-        "Fill forms", "Accessibility extract", "Assemble", "Print high quality",
+        "Print",
+        "Modify",
+        "Copy/extract text",
+        "Annotate",
+        "Fill forms",
+        "Accessibility extract",
+        "Assemble",
+        "Print high quality",
     ];
     for name in &perm_order {
         if let Some(&allowed) = info.permissions.get(*name) {
@@ -245,7 +267,9 @@ pub(crate) fn print_security(writer: &mut impl Write, doc: &Document, file_path:
 
 pub(crate) fn security_json_value(doc: &Document, file_path: &Path) -> Value {
     let info = collect_security(doc, Some(file_path));
-    let perms: Value = info.permissions.iter()
+    let perms: Value = info
+        .permissions
+        .iter()
         .map(|(k, v)| (k.clone(), json!(*v)))
         .collect::<serde_json::Map<String, Value>>()
         .into();
@@ -268,15 +292,14 @@ pub(crate) fn print_security_json(writer: &mut impl Write, doc: &Document, file_
     writeln!(writer, "{}", json_pretty(&output)).unwrap();
 }
 
-
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::test_utils::*;
-    use lopdf::{Dictionary};
-    use pretty_assertions::assert_eq;
-    use serde_json::{Value};
+    use lopdf::Dictionary;
     use lopdf::Object;
+    use pretty_assertions::assert_eq;
+    use serde_json::Value;
 
     #[test]
     fn security_unencrypted() {
@@ -434,7 +457,8 @@ mod tests {
 
     #[test]
     fn parse_encrypt_from_raw_file_with_tempfile() {
-        let content = b"%PDF-1.6\n5 0 obj\n<</Filter/Standard/V 2/R 3/Length 128/P -1084>>\nendobj\n";
+        let content =
+            b"%PDF-1.6\n5 0 obj\n<</Filter/Standard/V 2/R 3/Length 128/P -1084>>\nendobj\n";
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("test.pdf");
         std::fs::write(&path, content).unwrap();
@@ -629,8 +653,12 @@ mod tests {
         let dummy = std::path::Path::new("nonexistent.pdf");
         let out = output_of(|w| print_security(w, &doc, dummy));
         let expected = format!("Encrypt Object: {}", enc_id.0);
-        assert!(out.contains(&expected),
-            "Expected output to contain '{}', got:\n{}", expected, out);
+        assert!(
+            out.contains(&expected),
+            "Expected output to contain '{}', got:\n{}",
+            expected,
+            out
+        );
     }
 
     #[test]
@@ -639,5 +667,4 @@ mod tests {
         let result = parse_encrypt_from_raw_file(path, 1);
         assert!(result.is_none());
     }
-
 }
