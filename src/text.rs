@@ -55,18 +55,16 @@ pub(crate) fn extract_text_from_page_with_warnings(
                 }
                 first_bt = false;
             }
-            "Td" | "TD" => {
+            "Td" | "TD" if op.operands.len() >= 2 => {
                 // Check ty (second operand) for line break — negative y means downward movement
-                if op.operands.len() >= 2 {
-                    if let Object::Integer(ty) = &op.operands[1] {
-                        if *ty < 0 {
-                            text.push('\n');
-                        }
-                    } else if let Object::Real(ty) = &op.operands[1]
-                        && *ty < 0.0
-                    {
+                if let Object::Integer(ty) = &op.operands[1] {
+                    if *ty < 0 {
                         text.push('\n');
                     }
+                } else if let Object::Real(ty) = &op.operands[1]
+                    && *ty < 0.0
+                {
+                    text.push('\n');
                 }
             }
             "T*" => {

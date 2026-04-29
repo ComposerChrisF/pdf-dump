@@ -1,6 +1,6 @@
 [package]
 name = "pdf-dump"
-version = "0.12.7"
+version = "0.12.8"
 edition = "2024"
 rust-version = "1.91"
 description = "CLI tool for inspecting and debugging PDF internals"

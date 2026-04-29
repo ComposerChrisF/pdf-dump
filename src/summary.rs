@@ -244,7 +244,7 @@ fn collect_stream_stats(doc: &Document, decode: bool) -> StreamStats {
             largest.push((obj_num, raw_bytes));
         }
     }
-    largest.sort_by(|a, b| b.1.cmp(&a.1));
+    largest.sort_by_key(|b| std::cmp::Reverse(b.1));
     largest.truncate(3);
 
     StreamStats {

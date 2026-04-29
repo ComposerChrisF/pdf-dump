@@ -130,10 +130,8 @@ fn check_broken_references(
 
 fn collect_broken_refs(obj: &Object, doc: &Document, broken: &mut Vec<(u32, u16)>) {
     match obj {
-        Object::Reference(id) => {
-            if doc.get_object(*id).is_err() {
-                broken.push(*id);
-            }
+        Object::Reference(id) if doc.get_object(*id).is_err() => {
+            broken.push(*id);
         }
         Object::Array(arr) => {
             for item in arr {
