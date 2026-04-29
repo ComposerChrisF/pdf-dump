@@ -102,20 +102,16 @@ pub(crate) fn object_matches(obj: &Object, conditions: &[SearchCondition]) -> bo
         }),
         SearchCondition::HasKey { key } => dict.get(key).is_ok(),
         SearchCondition::ValueContains { text } => {
-            let needle = text.to_lowercase();
-            let needle_bytes = needle.as_bytes();
+            let needle = text.as_bytes();
             dict.iter().any(|(_, v)| {
                 let haystack: &[u8] = match v {
                     Object::Name(n) => n,
                     Object::String(bytes, _) => bytes,
                     _ => return false,
                 };
-                // Case-insensitive byte search: zero-allocation byte-by-byte compare
-                haystack.windows(needle_bytes.len()).any(|w| {
-                    w.iter()
-                        .zip(needle_bytes)
-                        .all(|(a, b)| a.to_ascii_lowercase() == *b)
-                })
+                haystack
+                    .windows(needle.len())
+                    .any(|w| w.eq_ignore_ascii_case(needle))
             })
         }
         SearchCondition::StreamContains { text } => {

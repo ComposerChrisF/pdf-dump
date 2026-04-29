@@ -115,17 +115,6 @@ pub(crate) fn operators_json_value(doc: &Document, page_filter: Option<&PageSpec
 }
 
 #[cfg(test)]
-pub(crate) fn print_operators_json(
-    writer: &mut impl Write,
-    doc: &Document,
-    page_filter: Option<&PageSpec>,
-) {
-    use crate::helpers::json_pretty;
-    let output = operators_json_value(doc, page_filter);
-    writeln!(writer, "{}", json_pretty(&output)).unwrap();
-}
-
-#[cfg(test)]
 mod tests {
     use super::*;
     use crate::test_utils::*;
@@ -151,7 +140,7 @@ mod tests {
     #[test]
     fn operators_json_structure() {
         let doc = build_page_doc_with_content(b"BT (Test) Tj ET");
-        let out = output_of(|w| print_operators_json(w, &doc, None));
+        let out = output_of(|w| render_json(w, &operators_json_value(&doc, None)));
         let parsed: Value = serde_json::from_str(&out).unwrap();
         assert!(parsed["pages"].is_array());
         let page = &parsed["pages"][0];
@@ -171,7 +160,7 @@ mod tests {
     #[test]
     fn operators_json_has_operator_and_operands() {
         let doc = build_page_doc_with_content(b"BT /F1 12 Tf ET");
-        let out = output_of(|w| print_operators_json(w, &doc, None));
+        let out = output_of(|w| render_json(w, &operators_json_value(&doc, None)));
         let parsed: Value = serde_json::from_str(&out).unwrap();
         let ops = parsed["pages"][0]["operations"].as_array().unwrap();
         // Find the Tf operation

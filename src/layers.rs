@@ -235,13 +235,6 @@ pub(crate) fn layers_json_value(doc: &Document) -> Value {
 }
 
 #[cfg(test)]
-pub(crate) fn print_layers_json(writer: &mut impl Write, doc: &Document) {
-    use crate::helpers::json_pretty;
-    let output = layers_json_value(doc);
-    writeln!(writer, "{}", json_pretty(&output)).unwrap();
-}
-
-#[cfg(test)]
 mod tests {
     use super::*;
     use crate::test_utils::*;
@@ -448,7 +441,7 @@ mod tests {
     #[test]
     fn layers_json_output() {
         let doc = make_ocg_doc();
-        let out = output_of(|w| print_layers_json(w, &doc));
+        let out = output_of(|w| render_json(w, &layers_json_value(&doc)));
         let parsed: Value = serde_json::from_str(&out).unwrap();
         assert_eq!(parsed["layer_count"], 2);
         assert_eq!(parsed["layers"][0]["name"], "Layer1");

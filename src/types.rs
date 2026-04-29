@@ -98,11 +98,26 @@ Common workflows:
   pdf-dump file.pdf --text --page 3      Extract text from page 3
   pdf-dump file.pdf --find-text \"word\"   Search for text across pages
   pdf-dump file.pdf --page 3             Page 3 info (dimensions, resources, text preview)
+  pdf-dump file.pdf --page 5-            Pages 5 to last
   pdf-dump file.pdf --inspect 5          Explain object 5
   pdf-dump file.pdf --search Type=Font   Find all font objects
   pdf-dump file.pdf --validate --json    Validation results as JSON
   pdf-dump file.pdf --fonts --images     Combine multiple modes
   pdf-dump file.pdf --list               One-line listing of every object
+
+Search expression syntax (--search):
+  <KeyName>=<value>   Dictionary has /KeyName equal to <value>
+  key=<name>          Dictionary has a key named <name>
+  value=<text>        Any Name/String value contains <text> (case-insensitive)
+  stream=<text>       Decoded stream content contains <text> (case-insensitive)
+  regex=<pattern>     Any key, Name, or String value matches the regex
+
+Exit codes:
+  0   Success (or validation passed with no errors)
+  1   Runtime error (file not found, IO failure, invalid argument value)
+  2   Argument parse error (clap; e.g. unknown flag, missing required arg)
+  3   Tool ran successfully but the input had problems
+      (--validate found errors, or --page was out of range)
 ")]
 pub(crate) struct Args {
     /// Path to the PDF file
@@ -209,7 +224,7 @@ pub(crate) struct Args {
     #[arg(long, help_heading = "Modifiers")]
     pub depth: Option<usize>,
 
-    /// Display binary stream content as hex dump (use with --decode-streams)
+    /// Display binary stream content as hex dump (use with --decode)
     #[arg(long, help_heading = "Modifiers")]
     pub hex: bool,
 
@@ -231,9 +246,11 @@ impl Args {
         // Collect standalone modes
         let mut standalone: Vec<StandaloneMode> = Vec::new();
 
-        if let Some(obj_num) = self.extract_stream {
-            let output = self.output.clone().unwrap();
-            standalone.push(StandaloneMode::ExtractStream { obj_num, output });
+        if let (Some(obj_num), Some(output)) = (self.extract_stream, self.output.as_ref()) {
+            standalone.push(StandaloneMode::ExtractStream {
+                obj_num,
+                output: output.clone(),
+            });
         }
         if let Some(ref spec) = self.object {
             let nums = parse_object_spec(spec)?;
@@ -328,6 +345,9 @@ pub(crate) struct DumpConfig {
 pub(crate) enum PageSpec {
     Single(u32),
     Range(u32, u32),
+    /// Open-ended range: `start-` means "from `start` to the last page".
+    /// Resolution against the document's page count happens at the call site.
+    OpenRange(u32),
 }
 
 impl PageSpec {
@@ -337,11 +357,17 @@ impl PageSpec {
                 .trim()
                 .parse()
                 .map_err(|_| format!("Invalid page range start: '{}'", start_s.trim()))?;
+            if start == 0 {
+                return Err("Page numbers must be >= 1".to_string());
+            }
+            let end_s = end_s.trim();
+            if end_s.is_empty() {
+                return Ok(PageSpec::OpenRange(start));
+            }
             let end: u32 = end_s
-                .trim()
                 .parse()
-                .map_err(|_| format!("Invalid page range end: '{}'", end_s.trim()))?;
-            if start == 0 || end == 0 {
+                .map_err(|_| format!("Invalid page range end: '{}'", end_s))?;
+            if end == 0 {
                 return Err("Page numbers must be >= 1".to_string());
             }
             if start > end {
@@ -364,13 +390,18 @@ impl PageSpec {
         match self {
             PageSpec::Single(n) => page == *n,
             PageSpec::Range(start, end) => page >= *start && page <= *end,
+            PageSpec::OpenRange(start) => page >= *start,
         }
     }
 
+    /// Returns the explicit page numbers for `Single`/`Range`.
+    /// `OpenRange` returns an empty Vec — callers that need to enumerate it
+    /// must filter `doc.get_pages()` via `contains()` (see `helpers::build_page_list`).
     pub fn pages(&self) -> Vec<u32> {
         match self {
             PageSpec::Single(n) => vec![*n],
             PageSpec::Range(start, end) => (*start..=*end).collect(),
+            PageSpec::OpenRange(_) => Vec::new(),
         }
     }
 }
@@ -435,6 +466,37 @@ mod tests {
         assert!(PageSpec::parse("5-3").is_err()); // start > end
         assert!(PageSpec::parse("0-5").is_err()); // zero
         assert!(PageSpec::parse("1-0").is_err()); // zero
+    }
+
+    #[test]
+    fn page_spec_parse_open_range() {
+        let spec = PageSpec::parse("5-").unwrap();
+        assert!(matches!(spec, PageSpec::OpenRange(5)));
+
+        let spec = PageSpec::parse(" 2 - ").unwrap();
+        assert!(matches!(spec, PageSpec::OpenRange(2)));
+    }
+
+    #[test]
+    fn page_spec_parse_open_range_invalid() {
+        assert!(PageSpec::parse("0-").is_err());
+        assert!(PageSpec::parse("-").is_err());
+    }
+
+    #[test]
+    fn page_spec_open_range_contains() {
+        let spec = PageSpec::OpenRange(3);
+        assert!(!spec.contains(1));
+        assert!(!spec.contains(2));
+        assert!(spec.contains(3));
+        assert!(spec.contains(100));
+    }
+
+    #[test]
+    fn page_spec_open_range_pages_empty() {
+        // OpenRange::pages() returns empty — callers must use contains() with doc context.
+        let spec = PageSpec::OpenRange(5);
+        assert!(spec.pages().is_empty());
     }
 
     #[test]

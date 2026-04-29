@@ -10,17 +10,35 @@ pub(crate) fn build_page_list(
     page_filter: Option<&PageSpec>,
 ) -> Result<Vec<(u32, ObjectId)>, String> {
     let pages = doc.get_pages();
-    if let Some(spec) = page_filter {
-        spec.pages()
+    let Some(spec) = page_filter else {
+        return Ok(pages.iter().map(|(&pn, &id)| (pn, id)).collect());
+    };
+    match spec {
+        PageSpec::Single(_) | PageSpec::Range(_, _) => spec
+            .pages()
             .into_iter()
             .map(|pn| {
                 pages.get(&pn).map(|&id| (pn, id)).ok_or_else(|| {
                     format!("Page {} not found. Document has {} pages.", pn, pages.len())
                 })
             })
-            .collect()
-    } else {
-        Ok(pages.iter().map(|(&pn, &id)| (pn, id)).collect())
+            .collect(),
+        PageSpec::OpenRange(start) => {
+            let result: Vec<(u32, ObjectId)> = pages
+                .iter()
+                .filter(|(pn, _)| **pn >= *start)
+                .map(|(&pn, &id)| (pn, id))
+                .collect();
+            if result.is_empty() {
+                Err(format!(
+                    "Page {} not found. Document has {} pages.",
+                    start,
+                    pages.len()
+                ))
+            } else {
+                Ok(result)
+            }
+        }
     }
 }
 

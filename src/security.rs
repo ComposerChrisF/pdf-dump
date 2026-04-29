@@ -286,13 +286,6 @@ pub(crate) fn security_json_value(doc: &Document, file_path: &Path) -> Value {
 }
 
 #[cfg(test)]
-pub(crate) fn print_security_json(writer: &mut impl Write, doc: &Document, file_path: &Path) {
-    use crate::helpers::json_pretty;
-    let output = security_json_value(doc, file_path);
-    writeln!(writer, "{}", json_pretty(&output)).unwrap();
-}
-
-#[cfg(test)]
 mod tests {
     use super::*;
     use crate::test_utils::*;
@@ -419,7 +412,7 @@ mod tests {
         let enc_id = doc.add_object(Object::Dictionary(encrypt));
         doc.trailer.set("Encrypt", Object::Reference(enc_id));
         let dummy = std::path::Path::new("nonexistent.pdf");
-        let out = output_of(|w| print_security_json(w, &doc, dummy));
+        let out = output_of(|w| render_json(w, &security_json_value(&doc, dummy)));
         let parsed: Value = serde_json::from_str(&out).unwrap();
         assert_eq!(parsed["encrypted"], true);
         assert_eq!(parsed["algorithm"], "AES-128");

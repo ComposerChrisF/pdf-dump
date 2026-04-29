@@ -178,12 +178,13 @@ fn collect_page_info(
     }
 }
 
-pub(crate) fn print_page_info(writer: &mut impl Write, doc: &Document, spec: &PageSpec) {
+/// Returns `true` when the requested page was out of range (exit-3 signal).
+pub(crate) fn print_page_info(writer: &mut impl Write, doc: &Document, spec: &PageSpec) -> bool {
     let page_list = match helpers::build_page_list(doc, Some(spec)) {
         Ok(list) => list,
         Err(msg) => {
             eprintln!("Error: {}", msg);
-            return;
+            return true;
         }
     };
     let all_annots = collect_annotations(doc, Some(spec));
@@ -329,12 +330,19 @@ pub(crate) fn print_page_info(writer: &mut impl Write, doc: &Document, spec: &Pa
         }
         wln!(writer);
     }
+    false
 }
 
+#[cfg(test)]
 pub(crate) fn page_info_json_value(doc: &Document, spec: &PageSpec) -> Value {
+    page_info_json_value_with_status(doc, spec).0
+}
+
+/// JSON variant that also reports whether the requested page was out of range.
+pub(crate) fn page_info_json_value_with_status(doc: &Document, spec: &PageSpec) -> (Value, bool) {
     let page_list = match helpers::build_page_list(doc, Some(spec)) {
         Ok(list) => list,
-        Err(msg) => return json!({"error": msg}),
+        Err(msg) => return (json!({"error": msg}), true),
     };
     let all_annots = collect_annotations(doc, Some(spec));
     let mut results = Vec::new();
@@ -383,12 +391,18 @@ pub(crate) fn page_info_json_value(doc: &Document, spec: &PageSpec) -> Value {
         results.push(page_json);
     }
 
-    json!({"pages": results})
+    (json!({"pages": results}), false)
 }
 
-pub(crate) fn print_page_info_json(writer: &mut impl Write, doc: &Document, spec: &PageSpec) {
-    let output = page_info_json_value(doc, spec);
+/// Returns `true` when the requested page was out of range (exit-3 signal).
+pub(crate) fn print_page_info_json(
+    writer: &mut impl Write,
+    doc: &Document,
+    spec: &PageSpec,
+) -> bool {
+    let (output, had_error) = page_info_json_value_with_status(doc, spec);
     wln!(writer, "{}", helpers::json_pretty(&output));
+    had_error
 }
 
 #[cfg(test)]

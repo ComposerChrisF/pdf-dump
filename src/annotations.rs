@@ -234,17 +234,6 @@ pub(crate) fn annotations_json_value(doc: &Document, page_filter: Option<&PageSp
 }
 
 #[cfg(test)]
-pub(crate) fn print_annotations_json(
-    writer: &mut impl Write,
-    doc: &Document,
-    page_filter: Option<&PageSpec>,
-) {
-    use crate::helpers::json_pretty;
-    let output = annotations_json_value(doc, page_filter);
-    writeln!(writer, "{}", json_pretty(&output)).unwrap();
-}
-
-#[cfg(test)]
 mod tests {
     use super::*;
     use crate::test_utils::*;
@@ -380,7 +369,7 @@ mod tests {
     #[test]
     fn annotations_json_output() {
         let doc = make_doc_with_annotations();
-        let out = output_of(|w| print_annotations_json(w, &doc, None));
+        let out = output_of(|w| render_json(w, &annotations_json_value(&doc, None)));
         let val: Value = serde_json::from_str(&out).unwrap();
         assert_eq!(val["annotation_count"], 1);
         assert_eq!(val["annotations"][0]["subtype"], "Link");
@@ -473,7 +462,7 @@ mod tests {
         pages_dict.set("Count", Object::Integer(1));
         pages_dict.set("Kids", Object::Array(vec![Object::Reference((10, 0))]));
         doc.objects.insert((2, 0), Object::Dictionary(pages_dict));
-        make_page_with_annots(&mut doc, (10, 0), (2, 0), vec![(20, 0)]);
+        make_page_with_annots(&mut doc, (10, 0), (2, 0), &[(20, 0)]);
 
         let mut catalog = Dictionary::new();
         catalog.set("Type", Object::Name(b"Catalog".to_vec()));
@@ -518,7 +507,7 @@ mod tests {
         pages_dict.set("Count", Object::Integer(1));
         pages_dict.set("Kids", Object::Array(vec![Object::Reference((10, 0))]));
         doc.objects.insert((2, 0), Object::Dictionary(pages_dict));
-        make_page_with_annots(&mut doc, (10, 0), (2, 0), vec![(20, 0)]);
+        make_page_with_annots(&mut doc, (10, 0), (2, 0), &[(20, 0)]);
 
         let mut catalog = Dictionary::new();
         catalog.set("Type", Object::Name(b"Catalog".to_vec()));
@@ -552,7 +541,7 @@ mod tests {
         pages_dict.set("Count", Object::Integer(1));
         pages_dict.set("Kids", Object::Array(vec![Object::Reference((10, 0))]));
         doc.objects.insert((2, 0), Object::Dictionary(pages_dict));
-        make_page_with_annots(&mut doc, (10, 0), (2, 0), vec![(20, 0)]);
+        make_page_with_annots(&mut doc, (10, 0), (2, 0), &[(20, 0)]);
 
         let mut catalog = Dictionary::new();
         catalog.set("Type", Object::Name(b"Catalog".to_vec()));
@@ -569,7 +558,7 @@ mod tests {
     #[test]
     fn annotations_json_includes_link_fields() {
         let doc = make_doc_with_annotations();
-        let out = output_of(|w| print_annotations_json(w, &doc, None));
+        let out = output_of(|w| render_json(w, &annotations_json_value(&doc, None)));
         let val: Value = serde_json::from_str(&out).unwrap();
         // Link annotation should have link_type populated
         let annot = &val["annotations"][0];
@@ -611,7 +600,7 @@ mod tests {
         pages_dict.set("Count", Object::Integer(1));
         pages_dict.set("Kids", Object::Array(vec![Object::Reference((10, 0))]));
         doc.objects.insert((2, 0), Object::Dictionary(pages_dict));
-        make_page_with_annots(&mut doc, (10, 0), (2, 0), vec![(20, 0)]);
+        make_page_with_annots(&mut doc, (10, 0), (2, 0), &[(20, 0)]);
 
         let mut catalog = Dictionary::new();
         catalog.set("Type", Object::Name(b"Catalog".to_vec()));
@@ -656,7 +645,7 @@ mod tests {
         pages_dict.set("Count", Object::Integer(1));
         pages_dict.set("Kids", Object::Array(vec![Object::Reference((10, 0))]));
         doc.objects.insert((2, 0), Object::Dictionary(pages_dict));
-        make_page_with_annots(&mut doc, (10, 0), (2, 0), vec![(20, 0)]);
+        make_page_with_annots(&mut doc, (10, 0), (2, 0), &[(20, 0)]);
 
         let mut catalog = Dictionary::new();
         catalog.set("Type", Object::Name(b"Catalog".to_vec()));
@@ -698,7 +687,7 @@ mod tests {
         pages_dict.set("Count", Object::Integer(1));
         pages_dict.set("Kids", Object::Array(vec![Object::Reference((10, 0))]));
         doc.objects.insert((2, 0), Object::Dictionary(pages_dict));
-        make_page_with_annots(&mut doc, (10, 0), (2, 0), vec![(20, 0)]);
+        make_page_with_annots(&mut doc, (10, 0), (2, 0), &[(20, 0)]);
 
         let mut catalog = Dictionary::new();
         catalog.set("Type", Object::Name(b"Catalog".to_vec()));
@@ -732,7 +721,7 @@ mod tests {
         pages_dict.set("Count", Object::Integer(1));
         pages_dict.set("Kids", Object::Array(vec![Object::Reference((10, 0))]));
         doc.objects.insert((2, 0), Object::Dictionary(pages_dict));
-        make_page_with_annots(&mut doc, (10, 0), (2, 0), vec![(20, 0)]);
+        make_page_with_annots(&mut doc, (10, 0), (2, 0), &[(20, 0)]);
 
         let mut catalog = Dictionary::new();
         catalog.set("Type", Object::Name(b"Catalog".to_vec()));
@@ -758,7 +747,7 @@ mod tests {
         pages_dict.set("Count", Object::Integer(1));
         pages_dict.set("Kids", Object::Array(vec![Object::Reference((10, 0))]));
         doc.objects.insert((2, 0), Object::Dictionary(pages_dict));
-        make_page_with_annots(&mut doc, (10, 0), (2, 0), vec![(20, 0)]);
+        make_page_with_annots(&mut doc, (10, 0), (2, 0), &[(20, 0)]);
 
         let mut catalog = Dictionary::new();
         catalog.set("Type", Object::Name(b"Catalog".to_vec()));
@@ -796,7 +785,7 @@ mod tests {
         pages_dict.set("Count", Object::Integer(1));
         pages_dict.set("Kids", Object::Array(vec![Object::Reference((10, 0))]));
         doc.objects.insert((2, 0), Object::Dictionary(pages_dict));
-        make_page_with_annots(&mut doc, (10, 0), (2, 0), vec![(20, 0)]);
+        make_page_with_annots(&mut doc, (10, 0), (2, 0), &[(20, 0)]);
 
         let mut catalog = Dictionary::new();
         catalog.set("Type", Object::Name(b"Catalog".to_vec()));
@@ -846,7 +835,7 @@ mod tests {
         pages_dict.set("Count", Object::Integer(1));
         pages_dict.set("Kids", Object::Array(vec![Object::Reference((10, 0))]));
         doc.objects.insert((2, 0), Object::Dictionary(pages_dict));
-        make_page_with_annots(&mut doc, (10, 0), (2, 0), vec![(20, 0), (21, 0)]);
+        make_page_with_annots(&mut doc, (10, 0), (2, 0), &[(20, 0), (21, 0)]);
 
         let mut catalog = Dictionary::new();
         catalog.set("Type", Object::Name(b"Catalog".to_vec()));
@@ -944,7 +933,7 @@ mod tests {
         pages_dict.set("Count", Object::Integer(1));
         pages_dict.set("Kids", Object::Array(vec![Object::Reference((10, 0))]));
         doc.objects.insert((2, 0), Object::Dictionary(pages_dict));
-        make_page_with_annots(&mut doc, (10, 0), (2, 0), vec![(20, 0)]);
+        make_page_with_annots(&mut doc, (10, 0), (2, 0), &[(20, 0)]);
 
         let mut catalog = Dictionary::new();
         catalog.set("Type", Object::Name(b"Catalog".to_vec()));

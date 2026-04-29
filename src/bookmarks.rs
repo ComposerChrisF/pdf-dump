@@ -232,13 +232,6 @@ pub(crate) fn bookmarks_json_value(doc: &Document) -> Value {
 }
 
 #[cfg(test)]
-pub(crate) fn print_bookmarks_json(writer: &mut impl Write, doc: &Document) {
-    use crate::helpers::json_pretty;
-    let output = bookmarks_json_value(doc);
-    writeln!(writer, "{}", json_pretty(&output)).unwrap();
-}
-
-#[cfg(test)]
 mod tests {
     use super::*;
     use crate::test_utils::*;
@@ -415,7 +408,7 @@ mod tests {
     #[test]
     fn bookmarks_json_output() {
         let doc = make_doc_with_bookmarks();
-        let out = output_of(|w| print_bookmarks_json(w, &doc));
+        let out = output_of(|w| render_json(w, &bookmarks_json_value(&doc)));
         let val: Value = serde_json::from_str(&out).unwrap();
         assert_eq!(val["bookmark_count"], 2);
         assert_eq!(val["bookmarks"][0]["title"], "Chapter 1");
@@ -430,7 +423,7 @@ mod tests {
         let catalog_id = doc.add_object(Object::Dictionary(catalog));
         doc.trailer.set("Root", Object::Reference(catalog_id));
 
-        let out = output_of(|w| print_bookmarks_json(w, &doc));
+        let out = output_of(|w| render_json(w, &bookmarks_json_value(&doc)));
         let val: Value = serde_json::from_str(&out).unwrap();
         assert_eq!(val["bookmark_count"], 0);
     }
@@ -588,7 +581,7 @@ mod tests {
         let catalog_id = doc.add_object(Object::Dictionary(catalog));
         doc.trailer.set("Root", Object::Reference(catalog_id));
 
-        let out = output_of(|w| print_bookmarks_json(w, &doc));
+        let out = output_of(|w| render_json(w, &bookmarks_json_value(&doc)));
         let val: Value = serde_json::from_str(&out).unwrap();
         assert_eq!(val["bookmark_count"], 2);
         let bm = &val["bookmarks"][0];

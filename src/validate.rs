@@ -568,12 +568,14 @@ fn check_duplicate_objects(doc: &Document, issues: &mut Vec<ValidationIssue>) {
     }
 }
 
-pub(crate) fn print_validation(writer: &mut impl Write, doc: &Document) {
+/// Renders the validation report. Returns `true` when the report has any
+/// errors (used by the dispatcher to set exit code 3).
+pub(crate) fn print_validation(writer: &mut impl Write, doc: &Document) -> bool {
     let report = validate_pdf(doc, None);
 
     if report.issues.is_empty() {
         wln!(writer, "[OK] No issues found.");
-        return;
+        return false;
     }
 
     for issue in &report.issues {
@@ -586,9 +588,11 @@ pub(crate) fn print_validation(writer: &mut impl Write, doc: &Document) {
         report.warn_count,
         report.info_count
     );
+    report.error_count > 0
 }
 
-pub(crate) fn validation_json_value(doc: &Document) -> Value {
+/// JSON variant that also reports whether the input had errors (exit-3 signal).
+pub(crate) fn validation_json_value_with_status(doc: &Document) -> (Value, bool) {
     let report = validate_pdf(doc, None);
 
     let issues: Vec<Value> = report
@@ -602,19 +606,18 @@ pub(crate) fn validation_json_value(doc: &Document) -> Value {
         })
         .collect();
 
-    json!({
+    let value = json!({
         "error_count": report.error_count,
         "warning_count": report.warn_count,
         "info_count": report.info_count,
         "issues": issues,
-    })
+    });
+    (value, report.error_count > 0)
 }
 
 #[cfg(test)]
-pub(crate) fn print_validation_json(writer: &mut impl Write, doc: &Document) {
-    use crate::helpers::json_pretty;
-    let output = validation_json_value(doc);
-    writeln!(writer, "{}", json_pretty(&output)).unwrap();
+pub(crate) fn validation_json_value(doc: &Document) -> Value {
+    validation_json_value_with_status(doc).0
 }
 
 #[cfg(test)]
@@ -809,7 +812,7 @@ mod tests {
     #[test]
     fn print_validation_json_produces_valid_json() {
         let doc = Document::new();
-        let out = output_of(|w| print_validation_json(w, &doc));
+        let out = output_of(|w| render_json(w, &validation_json_value(&doc)));
         let parsed: Value = serde_json::from_str(&out).unwrap();
         assert!(parsed["error_count"].is_number());
         assert!(parsed["warning_count"].is_number());
@@ -1110,7 +1113,7 @@ mod tests {
         dict.set(b"Ref", Object::Reference((99, 0)));
         doc.objects.insert((1, 0), Object::Dictionary(dict));
 
-        let out = output_of(|w| print_validation_json(w, &doc));
+        let out = output_of(|w| render_json(w, &validation_json_value(&doc)));
         let parsed: Value = serde_json::from_str(&out).unwrap();
 
         // Check structure

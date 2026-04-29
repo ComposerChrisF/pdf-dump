@@ -124,13 +124,6 @@ pub(crate) fn images_json_value(doc: &Document) -> Value {
 }
 
 #[cfg(test)]
-pub(crate) fn print_images_json(writer: &mut impl Write, doc: &Document) {
-    use crate::helpers::json_pretty;
-    let output = images_json_value(doc);
-    writeln!(writer, "{}", json_pretty(&output)).unwrap();
-}
-
-#[cfg(test)]
 mod tests {
     use super::*;
     use crate::test_utils::*;
@@ -256,7 +249,7 @@ mod tests {
         let stream = Stream::new(dict, vec![0; 300]);
         doc.objects.insert((1, 0), Object::Stream(stream));
 
-        let out = output_of(|w| print_images_json(w, &doc));
+        let out = output_of(|w| render_json(w, &images_json_value(&doc)));
         let parsed: Value = serde_json::from_str(&out).unwrap();
         assert_eq!(parsed["image_count"], 1);
         assert_eq!(parsed["images"][0]["width"], 100);
@@ -434,7 +427,7 @@ mod tests {
         let stream = Stream::new(dict, vec![0; 5000]);
         doc.objects.insert((1, 0), Object::Stream(stream));
 
-        let out = output_of(|w| print_images_json(w, &doc));
+        let out = output_of(|w| render_json(w, &images_json_value(&doc)));
         let parsed: Value = serde_json::from_str(&out).unwrap();
         let img = &parsed["images"][0];
         assert_eq!(img["width"], 640);

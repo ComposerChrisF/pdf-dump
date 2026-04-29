@@ -271,13 +271,6 @@ pub(crate) fn forms_json_value(doc: &Document) -> Value {
 }
 
 #[cfg(test)]
-pub(crate) fn print_forms_json(writer: &mut impl Write, doc: &Document) {
-    use crate::helpers::json_pretty;
-    let output = forms_json_value(doc);
-    writeln!(writer, "{}", json_pretty(&output)).unwrap();
-}
-
-#[cfg(test)]
 mod tests {
     use super::*;
     use crate::test_utils::*;
@@ -357,7 +350,7 @@ mod tests {
     #[test]
     fn forms_json_structure() {
         let doc = build_form_doc();
-        let out = output_of(|w| print_forms_json(w, &doc));
+        let out = output_of(|w| render_json(w, &forms_json_value(&doc)));
         let parsed: Value = serde_json::from_str(&out).unwrap();
         assert!(parsed["acroform_object"].is_number());
         assert_eq!(parsed["need_appearances"], true);
@@ -371,7 +364,7 @@ mod tests {
     #[test]
     fn forms_page_mapping() {
         let doc = build_form_doc();
-        let out = output_of(|w| print_forms_json(w, &doc));
+        let out = output_of(|w| render_json(w, &forms_json_value(&doc)));
         let parsed: Value = serde_json::from_str(&out).unwrap();
         let fields = parsed["fields"].as_array().unwrap();
         // Fields should be mapped to page 1 via Annots
@@ -460,7 +453,7 @@ mod tests {
         catalog.set("Type", Object::Name(b"Catalog".to_vec()));
         doc.objects.insert((1, 0), Object::Dictionary(catalog));
         doc.trailer.set("Root", Object::Reference((1, 0)));
-        let out = output_of(|w| print_forms_json(w, &doc));
+        let out = output_of(|w| render_json(w, &forms_json_value(&doc)));
         let parsed: Value = serde_json::from_str(&out).unwrap();
         assert!(parsed["acroform_object"].is_null());
         assert_eq!(parsed["field_count"], 0);

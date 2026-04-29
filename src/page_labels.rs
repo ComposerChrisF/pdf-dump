@@ -193,13 +193,6 @@ pub(crate) fn labels_json_value(doc: &Document) -> Value {
 }
 
 #[cfg(test)]
-pub(crate) fn print_page_labels_json(writer: &mut impl Write, doc: &Document) {
-    use crate::helpers::json_pretty;
-    let output = labels_json_value(doc);
-    writeln!(writer, "{}", json_pretty(&output)).unwrap();
-}
-
-#[cfg(test)]
 mod tests {
     use super::*;
     use crate::test_utils::*;
@@ -403,7 +396,7 @@ mod tests {
         catalog.set("Type", Object::Name(b"Catalog".to_vec()));
         doc.objects.insert((1, 0), Object::Dictionary(catalog));
         doc.trailer.set("Root", Object::Reference((1, 0)));
-        let out = output_of(|w| print_page_labels_json(w, &doc));
+        let out = output_of(|w| render_json(w, &labels_json_value(&doc)));
         let parsed: Value = serde_json::from_str(&out).unwrap();
         assert_eq!(parsed["page_count"], 0);
     }

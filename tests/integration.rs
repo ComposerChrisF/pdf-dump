@@ -2289,3 +2289,91 @@ fn page_invalid_range_rejected() {
         "Reversed range should be rejected"
     );
 }
+
+// ── exit code 3: input had problems ────────────────────────────────
+
+#[test]
+fn page_out_of_range_exits_3() {
+    let pdf = create_minimal_pdf();
+    let output = Command::new(binary_path())
+        .arg(pdf.path())
+        .arg("--page")
+        .arg("99")
+        .output()
+        .expect("failed to execute binary");
+
+    assert_eq!(
+        output.status.code(),
+        Some(3),
+        "--page out of range should exit 3, got {:?}\nstderr: {}",
+        output.status.code(),
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
+#[test]
+fn page_out_of_range_json_exits_3() {
+    let pdf = create_minimal_pdf();
+    let output = Command::new(binary_path())
+        .arg(pdf.path())
+        .arg("--page")
+        .arg("99")
+        .arg("--json")
+        .output()
+        .expect("failed to execute binary");
+
+    assert_eq!(
+        output.status.code(),
+        Some(3),
+        "--page out of range with --json should exit 3"
+    );
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let parsed: serde_json::Value = serde_json::from_str(&stdout).unwrap();
+    assert!(
+        parsed["error"].is_string(),
+        "JSON should carry an error field"
+    );
+}
+
+// ── --page open-range (e.g. "2-") ──────────────────────────────────
+
+#[test]
+fn page_open_range_dumps_from_start_to_last() {
+    let pdf = create_two_page_pdf_for_range();
+    let output = Command::new(binary_path())
+        .arg(pdf.path())
+        .arg("--page")
+        .arg("2-")
+        .output()
+        .expect("failed to execute binary");
+
+    assert!(output.status.success(), "open range should succeed");
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        !stdout.contains("Page 1"),
+        "should NOT contain Page 1: {}",
+        stdout
+    );
+    assert!(
+        stdout.contains("Page 2"),
+        "should contain Page 2: {}",
+        stdout
+    );
+}
+
+#[test]
+fn page_open_range_above_last_exits_3() {
+    let pdf = create_two_page_pdf_for_range();
+    let output = Command::new(binary_path())
+        .arg(pdf.path())
+        .arg("--page")
+        .arg("99-")
+        .output()
+        .expect("failed to execute binary");
+
+    assert_eq!(
+        output.status.code(),
+        Some(3),
+        "open range above last page should exit 3"
+    );
+}

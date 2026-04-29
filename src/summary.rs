@@ -221,7 +221,7 @@ pub(crate) struct StreamStats {
 fn collect_stream_stats(doc: &Document, decode: bool) -> StreamStats {
     let mut count = 0usize;
     let mut total_bytes = 0usize;
-    let mut total_decoded_bytes = if decode { Some(0usize) } else { None };
+    let mut decoded_total: usize = 0;
     let mut filter_counts: BTreeMap<String, usize> = BTreeMap::new();
     let mut largest: Vec<(u32, usize)> = Vec::new();
 
@@ -233,7 +233,7 @@ fn collect_stream_stats(doc: &Document, decode: bool) -> StreamStats {
 
             if decode {
                 let (decoded, _) = decode_stream(stream);
-                *total_decoded_bytes.as_mut().unwrap() += decoded.len();
+                decoded_total += decoded.len();
             }
 
             for filter in get_filter_names(stream) {
@@ -250,7 +250,7 @@ fn collect_stream_stats(doc: &Document, decode: bool) -> StreamStats {
     StreamStats {
         count,
         total_bytes,
-        total_decoded_bytes,
+        total_decoded_bytes: decode.then_some(decoded_total),
         filter_counts,
         largest,
     }

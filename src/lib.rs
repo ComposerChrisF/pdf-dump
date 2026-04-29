@@ -114,16 +114,19 @@ pub fn run() {
 
     let mut out = io::stdout().lock();
 
-    match resolved {
-        ResolvedMode::Default => {
-            dispatch_default(&mut out, &doc, &config, page_spec.as_ref());
-        }
+    let had_issues = match resolved {
+        ResolvedMode::Default => dispatch_default(&mut out, &doc, &config, page_spec.as_ref()),
         ResolvedMode::Standalone(mode) => {
             dispatch_standalone(&mut out, &doc, &config, mode);
+            false
         }
         ResolvedMode::Combined(modes) => {
-            dispatch_combined(&mut out, &doc, &config, page_spec.as_ref(), &args, &modes);
+            dispatch_combined(&mut out, &doc, &config, page_spec.as_ref(), &args, &modes)
         }
+    };
+
+    if had_issues {
+        std::process::exit(3);
     }
 }
 
@@ -132,17 +135,20 @@ fn dispatch_default(
     doc: &Document,
     config: &DumpConfig,
     page_spec: Option<&PageSpec>,
-) {
+) -> bool {
     if let Some(spec) = page_spec {
         if config.json {
-            page_info::print_page_info_json(out, doc, spec);
+            page_info::print_page_info_json(out, doc, spec)
         } else {
-            page_info::print_page_info(out, doc, spec);
+            page_info::print_page_info(out, doc, spec)
         }
-    } else if config.json {
-        summary::print_overview_json(out, doc, config.decode);
     } else {
-        summary::print_overview(out, doc, config.decode);
+        if config.json {
+            summary::print_overview_json(out, doc, config.decode);
+        } else {
+            summary::print_overview(out, doc, config.decode);
+        }
+        false
     }
 }
 
@@ -229,22 +235,25 @@ fn dispatch_combined(
     page_spec: Option<&PageSpec>,
     args: &Args,
     modes: &[DocMode],
-) {
+) -> bool {
     let multi = modes.len() > 1;
+    let mut had_issues = false;
 
     if config.json {
         if multi {
             // Multiple modes: wrap in { "key": value, ... }
             let mut map = serde_json::Map::new();
             for mode in modes {
-                let value = build_mode_json_value(mode, doc, config, page_spec, args);
+                let (value, had) = build_mode_json_value(mode, doc, config, page_spec, args);
+                had_issues |= had;
                 map.insert(mode.json_key().to_string(), value);
             }
             let output = Value::Object(map);
             wln!(out, "{}", json_pretty(&output));
         } else {
             // Single mode: output directly (unchanged schema)
-            let value = build_mode_json_value(&modes[0], doc, config, page_spec, args);
+            let (value, had) = build_mode_json_value(&modes[0], doc, config, page_spec, args);
+            had_issues |= had;
             wln!(out, "{}", json_pretty(&value));
         }
     } else {
@@ -255,9 +264,10 @@ fn dispatch_combined(
                 }
                 wln!(out, "=== {} ===", mode.label());
             }
-            dispatch_mode_text(out, mode, doc, config, page_spec, args);
+            had_issues |= dispatch_mode_text(out, mode, doc, config, page_spec, args);
         }
     }
+    had_issues
 }
 
 fn build_mode_json_value(
@@ -266,31 +276,40 @@ fn build_mode_json_value(
     config: &DumpConfig,
     page_spec: Option<&PageSpec>,
     args: &Args,
-) -> Value {
+) -> (Value, bool) {
     match mode {
-        DocMode::List => summary::list_json_value(doc),
-        DocMode::Validate => validate::validation_json_value(doc),
-        DocMode::Fonts => fonts::fonts_json_value(doc),
-        DocMode::Images => images::images_json_value(doc),
-        DocMode::Forms => forms::forms_json_value(doc),
-        DocMode::Bookmarks => bookmarks::bookmarks_json_value(doc),
-        DocMode::Annotations => annotations::annotations_json_value(doc, page_spec),
-        DocMode::Text => text::text_json_value(doc, page_spec),
-        DocMode::Operators => operators::operators_json_value(doc, page_spec),
-        DocMode::Tags => structure::structure_json_value(doc, config),
-        DocMode::Tree => tree::tree_json_value(doc, config),
-        DocMode::FindText => {
-            find_text::find_text_json_value(doc, args.find_text.as_deref().unwrap_or(""), page_spec)
+        DocMode::List => (summary::list_json_value(doc), false),
+        DocMode::Validate => validate::validation_json_value_with_status(doc),
+        DocMode::Fonts => (fonts::fonts_json_value(doc), false),
+        DocMode::Images => (images::images_json_value(doc), false),
+        DocMode::Forms => (forms::forms_json_value(doc), false),
+        DocMode::Bookmarks => (bookmarks::bookmarks_json_value(doc), false),
+        DocMode::Annotations => (annotations::annotations_json_value(doc, page_spec), false),
+        DocMode::Text => (text::text_json_value(doc, page_spec), false),
+        DocMode::Operators => (operators::operators_json_value(doc, page_spec), false),
+        DocMode::Tags => (structure::structure_json_value(doc, config), false),
+        DocMode::Tree => (tree::tree_json_value(doc, config), false),
+        DocMode::FindText => (
+            find_text::find_text_json_value(
+                doc,
+                args.find_text.as_deref().unwrap_or(""),
+                page_spec,
+            ),
+            false,
+        ),
+        DocMode::Detail(sub) => {
+            let value = match sub {
+                types::DetailSub::Security => security::security_json_value(doc, &args.file),
+                types::DetailSub::Embedded => embedded::embedded_json_value(doc),
+                types::DetailSub::Labels => page_labels::labels_json_value(doc),
+                types::DetailSub::Layers => layers::layers_json_value(doc),
+            };
+            (value, false)
         }
-        DocMode::Detail(sub) => match sub {
-            types::DetailSub::Security => security::security_json_value(doc, &args.file),
-            types::DetailSub::Embedded => embedded::embedded_json_value(doc),
-            types::DetailSub::Labels => page_labels::labels_json_value(doc),
-            types::DetailSub::Layers => layers::layers_json_value(doc),
-        },
     }
 }
 
+/// Returns `true` if the mode reported issues (currently only `--validate`).
 fn dispatch_mode_text(
     out: &mut impl Write,
     mode: &DocMode,
@@ -298,20 +317,53 @@ fn dispatch_mode_text(
     config: &DumpConfig,
     page_spec: Option<&PageSpec>,
     args: &Args,
-) {
+) -> bool {
     match mode {
-        DocMode::List => summary::print_list(out, doc),
+        DocMode::List => {
+            summary::print_list(out, doc);
+            false
+        }
         DocMode::Validate => validate::print_validation(out, doc),
-        DocMode::Fonts => fonts::print_fonts(out, doc),
-        DocMode::Images => images::print_images(out, doc),
-        DocMode::Forms => forms::print_forms(out, doc),
-        DocMode::Bookmarks => bookmarks::print_bookmarks(out, doc),
-        DocMode::Annotations => annotations::print_annotations(out, doc, page_spec),
-        DocMode::Text => text::print_text(out, doc, page_spec),
-        DocMode::Operators => operators::print_operators(out, doc, page_spec),
-        DocMode::Tags => structure::print_structure(out, doc, config),
+        DocMode::Fonts => {
+            fonts::print_fonts(out, doc);
+            false
+        }
+        DocMode::Images => {
+            images::print_images(out, doc);
+            false
+        }
+        DocMode::Forms => {
+            forms::print_forms(out, doc);
+            false
+        }
+        DocMode::Bookmarks => {
+            bookmarks::print_bookmarks(out, doc);
+            false
+        }
+        DocMode::Annotations => {
+            annotations::print_annotations(out, doc, page_spec);
+            false
+        }
+        DocMode::Text => {
+            text::print_text(out, doc, page_spec);
+            false
+        }
+        DocMode::Operators => {
+            operators::print_operators(out, doc, page_spec);
+            false
+        }
+        DocMode::Tags => {
+            structure::print_structure(out, doc, config);
+            false
+        }
         DocMode::FindText => {
-            find_text::print_find_text(out, doc, args.find_text.as_deref().unwrap_or(""), page_spec)
+            find_text::print_find_text(
+                out,
+                doc,
+                args.find_text.as_deref().unwrap_or(""),
+                page_spec,
+            );
+            false
         }
         DocMode::Tree => {
             if args.dot {
@@ -319,13 +371,17 @@ fn dispatch_mode_text(
             } else {
                 tree::print_tree(out, doc, config);
             }
+            false
         }
-        DocMode::Detail(sub) => match sub {
-            types::DetailSub::Security => security::print_security(out, doc, &args.file),
-            types::DetailSub::Embedded => embedded::print_embedded_files(out, doc),
-            types::DetailSub::Labels => page_labels::print_page_labels(out, doc),
-            types::DetailSub::Layers => layers::print_layers(out, doc),
-        },
+        DocMode::Detail(sub) => {
+            match sub {
+                types::DetailSub::Security => security::print_security(out, doc, &args.file),
+                types::DetailSub::Embedded => embedded::print_embedded_files(out, doc),
+                types::DetailSub::Labels => page_labels::print_page_labels(out, doc),
+                types::DetailSub::Layers => layers::print_layers(out, doc),
+            }
+            false
+        }
     }
 }
 
@@ -337,10 +393,17 @@ pub(crate) mod test_utils {
     use lopdf::{Document, Object, Stream};
     use std::io::Write;
 
-    pub fn output_of(f: impl FnOnce(&mut Vec<u8>)) -> String {
+    pub fn output_of<R>(f: impl FnOnce(&mut Vec<u8>) -> R) -> String {
         let mut buf = Vec::new();
-        f(&mut buf);
+        let _ = f(&mut buf);
         String::from_utf8(buf).unwrap()
+    }
+
+    /// Pretty-print a JSON value to the writer. Replaces the dozen
+    /// `#[cfg(test)] fn print_*_json(...)` wrappers that all did the same thing.
+    pub fn render_json(writer: &mut impl std::io::Write, value: &serde_json::Value) {
+        use crate::helpers::json_pretty;
+        writeln!(writer, "{}", json_pretty(value)).unwrap();
     }
 
     pub fn empty_doc() -> Document {
@@ -490,7 +553,7 @@ pub(crate) mod test_utils {
         doc: &mut Document,
         page_id: lopdf::ObjectId,
         parent_id: lopdf::ObjectId,
-        annot_ids: Vec<lopdf::ObjectId>,
+        annot_ids: &[lopdf::ObjectId],
     ) {
         use lopdf::Dictionary;
 

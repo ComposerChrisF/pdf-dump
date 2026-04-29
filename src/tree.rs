@@ -134,13 +134,6 @@ pub(crate) fn tree_json_value(doc: &Document, config: &DumpConfig) -> Value {
     })
 }
 
-#[cfg(test)]
-pub(crate) fn print_tree_json(writer: &mut impl Write, doc: &Document, config: &DumpConfig) {
-    use crate::helpers::json_pretty;
-    let output = tree_json_value(doc, config);
-    writeln!(writer, "{}", json_pretty(&output)).unwrap();
-}
-
 fn tree_node_to_json(
     obj_id: ObjectId,
     doc: &Document,
@@ -458,7 +451,7 @@ mod tests {
             deref: false,
             raw: false,
         };
-        let out = output_of(|w| print_tree_json(w, &doc, &config));
+        let out = output_of(|w| render_json(w, &tree_json_value(&doc, &config)));
         let parsed: Value = serde_json::from_str(&out).unwrap();
         assert_eq!(parsed["tree"]["node"], "Trailer");
         assert!(parsed["tree"]["children"].is_array());
@@ -491,7 +484,7 @@ mod tests {
             deref: false,
             raw: false,
         };
-        let out = output_of(|w| print_tree_json(w, &doc, &config));
+        let out = output_of(|w| render_json(w, &tree_json_value(&doc, &config)));
         let parsed: Value = serde_json::from_str(&out).unwrap();
         // Should contain "visited" status somewhere in the tree
         let tree_str = serde_json::to_string(&parsed).unwrap();
@@ -516,7 +509,7 @@ mod tests {
             deref: false,
             raw: false,
         };
-        let out = output_of(|w| print_tree_json(w, &doc, &config));
+        let out = output_of(|w| render_json(w, &tree_json_value(&doc, &config)));
         let parsed: Value = serde_json::from_str(&out).unwrap();
         let tree_str = serde_json::to_string(&parsed).unwrap();
         assert!(tree_str.contains("depth_limit_reached"));
@@ -674,7 +667,7 @@ mod tests {
             deref: false,
             raw: false,
         };
-        let out = output_of(|w| print_tree_json(w, &doc, &config));
+        let out = output_of(|w| render_json(w, &tree_json_value(&doc, &config)));
         let parsed: Value = serde_json::from_str(&out).unwrap();
         let tree_str = serde_json::to_string(&parsed).unwrap();
         assert!(

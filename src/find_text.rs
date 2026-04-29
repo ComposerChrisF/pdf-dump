@@ -18,9 +18,10 @@ fn find_matches(doc: &Document, pattern: &str, page_filter: Option<&PageSpec>) -
     let lower_pattern = pattern.to_lowercase();
 
     let page_list: Vec<(u32, lopdf::ObjectId)> = if let Some(spec) = page_filter {
-        spec.pages()
-            .into_iter()
-            .filter_map(|pn| pages.get(&pn).map(|&id| (pn, id)))
+        pages
+            .iter()
+            .filter(|(pn, _)| spec.contains(**pn))
+            .map(|(&pn, &id)| (pn, id))
             .collect()
     } else {
         pages.iter().map(|(&pn, &id)| (pn, id)).collect()
@@ -125,21 +126,11 @@ pub(crate) fn find_text_json_value(
 }
 
 #[cfg(test)]
-pub(crate) fn print_find_text_json(
-    writer: &mut impl Write,
-    doc: &Document,
-    pattern: &str,
-    page_filter: Option<&PageSpec>,
-) {
-    use crate::helpers::json_pretty;
-    let output = find_text_json_value(doc, pattern, page_filter);
-    writeln!(writer, "{}", json_pretty(&output)).unwrap();
-}
-
-#[cfg(test)]
 mod tests {
     use super::*;
-    use crate::test_utils::{build_page_doc_with_content, build_two_page_doc, output_of};
+    use crate::test_utils::{
+        build_page_doc_with_content, build_two_page_doc, output_of, render_json,
+    };
     use crate::types::PageSpec;
 
     #[test]
@@ -188,7 +179,7 @@ mod tests {
     #[test]
     fn find_text_json_output() {
         let doc = build_page_doc_with_content(b"BT (Hello World) Tj ET");
-        let out = output_of(|w| print_find_text_json(w, &doc, "Hello", None));
+        let out = output_of(|w| render_json(w, &find_text_json_value(&doc, "Hello", None)));
         let v: serde_json::Value = serde_json::from_str(&out).unwrap();
         assert_eq!(v["pattern"], "Hello");
         assert_eq!(v["match_count"], 1);
@@ -199,7 +190,7 @@ mod tests {
     #[test]
     fn find_text_json_no_matches() {
         let doc = build_page_doc_with_content(b"BT (Hello) Tj ET");
-        let out = output_of(|w| print_find_text_json(w, &doc, "xyz", None));
+        let out = output_of(|w| render_json(w, &find_text_json_value(&doc, "xyz", None)));
         let v: serde_json::Value = serde_json::from_str(&out).unwrap();
         assert_eq!(v["match_count"], 0);
         assert_eq!(v["pages"].as_array().unwrap().len(), 0);
@@ -250,7 +241,7 @@ mod tests {
     #[test]
     fn find_text_json_multiple_pages() {
         let doc = build_two_page_doc();
-        let out = output_of(|w| print_find_text_json(w, &doc, "Page", None));
+        let out = output_of(|w| render_json(w, &find_text_json_value(&doc, "Page", None)));
         let v: serde_json::Value = serde_json::from_str(&out).unwrap();
         assert!(v["match_count"].as_u64().unwrap() >= 2);
         assert!(v["pages"].as_array().unwrap().len() >= 2);

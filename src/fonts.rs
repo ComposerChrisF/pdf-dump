@@ -300,13 +300,6 @@ pub(crate) fn fonts_json_value(doc: &Document) -> Value {
 }
 
 #[cfg(test)]
-pub(crate) fn print_fonts_json(writer: &mut impl Write, doc: &Document) {
-    use crate::helpers::json_pretty;
-    let output = fonts_json_value(doc);
-    writeln!(writer, "{}", json_pretty(&output)).unwrap();
-}
-
-#[cfg(test)]
 mod tests {
     use super::*;
     use crate::test_utils::*;
@@ -418,7 +411,7 @@ mod tests {
         dict.set(b"BaseFont", Object::Name(b"Helvetica".to_vec()));
         doc.objects.insert((1, 0), Object::Dictionary(dict));
 
-        let out = output_of(|w| print_fonts_json(w, &doc));
+        let out = output_of(|w| render_json(w, &fonts_json_value(&doc)));
         let parsed: Value = serde_json::from_str(&out).unwrap();
         assert_eq!(parsed["font_count"], 1);
         assert_eq!(parsed["fonts"][0]["base_font"], "Helvetica");
@@ -662,7 +655,7 @@ mod tests {
         dict.set(b"BaseFont", Object::Name(b"Helvetica".to_vec()));
         doc.objects.insert((1, 0), Object::Dictionary(dict));
 
-        let out = output_of(|w| print_fonts_json(w, &doc));
+        let out = output_of(|w| render_json(w, &fonts_json_value(&doc)));
         let parsed: Value = serde_json::from_str(&out).unwrap();
         assert!(parsed["fonts"][0]["embedded"].is_null());
     }
@@ -682,7 +675,7 @@ mod tests {
         font.set(b"FontDescriptor", Object::Reference((2, 0)));
         doc.objects.insert((1, 0), Object::Dictionary(font));
 
-        let out = output_of(|w| print_fonts_json(w, &doc));
+        let out = output_of(|w| render_json(w, &fonts_json_value(&doc)));
         let parsed: Value = serde_json::from_str(&out).unwrap();
         let embedded = &parsed["fonts"][0]["embedded"];
         assert_eq!(embedded["object_number"], 3);
@@ -878,7 +871,7 @@ mod tests {
         font.set("Widths", Object::Array(vec![Object::Integer(600); 95]));
         doc.objects.insert((1, 0), Object::Dictionary(font));
 
-        let out = output_of(|w| print_fonts_json(w, &doc));
+        let out = output_of(|w| render_json(w, &fonts_json_value(&doc)));
         let parsed: Value = serde_json::from_str(&out).unwrap();
         let font_json = &parsed["fonts"][0];
         assert_eq!(font_json["to_unicode"]["object_number"], 10);
@@ -916,7 +909,7 @@ mod tests {
         );
         doc.objects.insert((1, 0), Object::Dictionary(type0));
 
-        let out = output_of(|w| print_fonts_json(w, &doc));
+        let out = output_of(|w| render_json(w, &fonts_json_value(&doc)));
         let parsed: Value = serde_json::from_str(&out).unwrap();
         let type0_json = parsed["fonts"]
             .as_array()
@@ -955,7 +948,7 @@ mod tests {
         font.set("BaseFont", Object::Name(b"Courier".to_vec()));
         doc.objects.insert((1, 0), Object::Dictionary(font));
 
-        let out = output_of(|w| print_fonts_json(w, &doc));
+        let out = output_of(|w| render_json(w, &fonts_json_value(&doc)));
         let parsed: Value = serde_json::from_str(&out).unwrap();
         let f = &parsed["fonts"][0];
         assert!(f.get("to_unicode").is_none());

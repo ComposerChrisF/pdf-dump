@@ -257,13 +257,6 @@ pub(crate) fn structure_json_value(doc: &Document, config: &DumpConfig) -> Value
     })
 }
 
-#[cfg(test)]
-pub(crate) fn print_structure_json(writer: &mut impl Write, doc: &Document, config: &DumpConfig) {
-    use crate::helpers::json_pretty;
-    let output = structure_json_value(doc, config);
-    writeln!(writer, "{}", json_pretty(&output)).unwrap();
-}
-
 fn struct_elem_to_json(elem: &StructElemInfo, depth: usize, config: &DumpConfig) -> Value {
     let mut obj = json!({
         "role": elem.role,
@@ -444,7 +437,7 @@ mod tests {
     fn structure_json_output() {
         let doc = make_struct_doc();
         let config = default_config();
-        let out = output_of(|w| print_structure_json(w, &doc, &config));
+        let out = output_of(|w| render_json(w, &structure_json_value(&doc, &config)));
         let parsed: Value = serde_json::from_str(&out).unwrap();
         assert_eq!(parsed["tagged"], true);
         assert_eq!(parsed["element_count"], 3);
@@ -503,7 +496,7 @@ mod tests {
             deref: false,
             raw: false,
         };
-        let out = output_of(|w| print_structure_json(w, &doc, &config));
+        let out = output_of(|w| render_json(w, &structure_json_value(&doc, &config)));
         let parsed: Value = serde_json::from_str(&out).unwrap();
         let root = &parsed["structure"][0];
         // depth=0 shows root element fully; its children (depth 1) are truncated
@@ -969,7 +962,7 @@ mod tests {
         doc.trailer.set("Root", Object::Reference((1, 0)));
 
         let config = default_config();
-        let out = output_of(|w| print_structure_json(w, &doc, &config));
+        let out = output_of(|w| render_json(w, &structure_json_value(&doc, &config)));
         let parsed: Value = serde_json::from_str(&out).unwrap();
         let elem_json = &parsed["structure"][0];
         assert_eq!(elem_json["role"], "Figure");

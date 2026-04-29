@@ -157,13 +157,6 @@ pub(crate) fn embedded_json_value(doc: &Document) -> Value {
 }
 
 #[cfg(test)]
-pub(crate) fn print_embedded_files_json(writer: &mut impl Write, doc: &Document) {
-    use crate::helpers::json_pretty;
-    let output = embedded_json_value(doc);
-    writeln!(writer, "{}", json_pretty(&output)).unwrap();
-}
-
-#[cfg(test)]
 mod tests {
     use super::*;
     use crate::test_utils::*;
@@ -292,7 +285,7 @@ mod tests {
     #[test]
     fn embedded_files_json() {
         let doc = Document::new();
-        let out = output_of(|w| print_embedded_files_json(w, &doc));
+        let out = output_of(|w| render_json(w, &embedded_json_value(&doc)));
         let parsed: Value = serde_json::from_str(&out).unwrap();
         assert_eq!(parsed["embedded_file_count"], 0);
         assert_eq!(parsed["embedded_files"].as_array().unwrap().len(), 0);
@@ -483,7 +476,7 @@ mod tests {
         doc.objects.insert((1, 0), Object::Dictionary(catalog));
         doc.trailer.set("Root", Object::Reference((1, 0)));
 
-        let out = output_of(|w| print_embedded_files_json(w, &doc));
+        let out = output_of(|w| render_json(w, &embedded_json_value(&doc)));
         let parsed: Value = serde_json::from_str(&out).unwrap();
         assert_eq!(parsed["embedded_file_count"], 1);
         let file = &parsed["embedded_files"][0];

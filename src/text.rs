@@ -287,17 +287,6 @@ pub(crate) fn text_json_value(doc: &Document, page_filter: Option<&PageSpec>) ->
 }
 
 #[cfg(test)]
-pub(crate) fn print_text_json(
-    writer: &mut impl Write,
-    doc: &Document,
-    page_filter: Option<&PageSpec>,
-) {
-    use crate::helpers::json_pretty;
-    let output = text_json_value(doc, page_filter);
-    writeln!(writer, "{}", json_pretty(&output)).unwrap();
-}
-
-#[cfg(test)]
 mod tests {
     use super::*;
     use crate::test_utils::*;
@@ -422,7 +411,7 @@ mod tests {
     #[test]
     fn print_text_json_produces_valid_json() {
         let doc = build_two_page_doc();
-        let out = output_of(|w| print_text_json(w, &doc, None));
+        let out = output_of(|w| render_json(w, &text_json_value(&doc, None)));
         let parsed: Value = serde_json::from_str(&out).expect("Should be valid JSON");
         assert!(parsed["pages"].is_array());
         assert_eq!(parsed["pages"].as_array().unwrap().len(), 2);
@@ -659,7 +648,7 @@ mod tests {
     fn print_text_json_with_page_filter() {
         let doc = build_two_page_doc();
         let spec = PageSpec::Single(1);
-        let out = output_of(|w| print_text_json(w, &doc, Some(&spec)));
+        let out = output_of(|w| render_json(w, &text_json_value(&doc, Some(&spec))));
         let parsed: Value = serde_json::from_str(&out).expect("Should be valid JSON");
         let pages = parsed["pages"].as_array().unwrap();
         assert_eq!(pages.len(), 1, "Should have exactly one page");
