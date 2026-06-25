@@ -31,7 +31,9 @@ macro_rules! w {
 
 pub(crate) mod annotations;
 pub(crate) mod bookmarks;
+pub(crate) mod cmap;
 pub(crate) mod embedded;
+pub(crate) mod encodings;
 pub(crate) mod find_text;
 pub(crate) mod fonts;
 pub(crate) mod forms;
@@ -285,7 +287,7 @@ fn build_mode_json_value(
         DocMode::Forms => (forms::forms_json_value(doc), false),
         DocMode::Bookmarks => (bookmarks::bookmarks_json_value(doc), false),
         DocMode::Annotations => (annotations::annotations_json_value(doc, page_spec), false),
-        DocMode::Text => (text::text_json_value(doc, page_spec), false),
+        DocMode::Text => text::text_json_value(doc, page_spec),
         DocMode::Operators => (operators::operators_json_value(doc, page_spec), false),
         DocMode::Tags => (structure::structure_json_value(doc, config), false),
         DocMode::Tree => (tree::tree_json_value(doc, config), false),
@@ -344,10 +346,7 @@ fn dispatch_mode_text(
             annotations::print_annotations(out, doc, page_spec);
             false
         }
-        DocMode::Text => {
-            text::print_text(out, doc, page_spec);
-            false
-        }
+        DocMode::Text => text::print_text(out, doc, page_spec),
         DocMode::Operators => {
             operators::print_operators(out, doc, page_spec);
             false

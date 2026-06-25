@@ -2377,3 +2377,178 @@ fn page_open_range_above_last_exits_3() {
         "open range above last page should exit 3"
     );
 }
+
+// ── --text font-aware decoding + reliability detection ─────────────
+
+/// Build a single-page PDF whose page uses one font `/F1` (optionally with a
+/// ToUnicode CMap stream) and the given content stream.
+fn create_pdf_with_font(
+    mut font_dict: Dictionary,
+    tounicode: Option<&[u8]>,
+    content: &[u8],
+) -> tempfile::NamedTempFile {
+    let mut doc = Document::new();
+
+    let content_stream = Stream::new(Dictionary::new(), content.to_vec());
+    let content_id = doc.add_object(Object::Stream(content_stream));
+
+    if let Some(tu) = tounicode {
+        let tu_stream = Stream::new(Dictionary::new(), tu.to_vec());
+        let tu_id = doc.add_object(Object::Stream(tu_stream));
+        font_dict.set("ToUnicode", Object::Reference(tu_id));
+    }
+    let font_id = doc.add_object(Object::Dictionary(font_dict));
+
+    let mut f1_dict = Dictionary::new();
+    f1_dict.set("F1", Object::Reference(font_id));
+    let mut resources = Dictionary::new();
+    resources.set("Font", Object::Dictionary(f1_dict));
+
+    let mut page_dict = Dictionary::new();
+    page_dict.set("Type", Object::Name(b"Page".to_vec()));
+    page_dict.set("Contents", Object::Reference(content_id));
+    page_dict.set("Resources", Object::Dictionary(resources));
+    page_dict.set(
+        "MediaBox",
+        Object::Array(vec![
+            Object::Integer(0),
+            Object::Integer(0),
+            Object::Integer(612),
+            Object::Integer(792),
+        ]),
+    );
+    let page_id = doc.add_object(Object::Dictionary(page_dict));
+
+    let mut pages_dict = Dictionary::new();
+    pages_dict.set("Type", Object::Name(b"Pages".to_vec()));
+    pages_dict.set("Kids", Object::Array(vec![Object::Reference(page_id)]));
+    pages_dict.set("Count", Object::Integer(1));
+    let pages_id = doc.add_object(Object::Dictionary(pages_dict));
+    if let Ok(Object::Dictionary(d)) = doc.get_object_mut(page_id) {
+        d.set("Parent", Object::Reference(pages_id));
+    }
+
+    let mut catalog = Dictionary::new();
+    catalog.set("Type", Object::Name(b"Catalog".to_vec()));
+    catalog.set("Pages", Object::Reference(pages_id));
+    let catalog_id = doc.add_object(Object::Dictionary(catalog));
+    doc.trailer.set("Root", Object::Reference(catalog_id));
+
+    let mut tmp = tempfile::NamedTempFile::new().unwrap();
+    doc.save_to(&mut tmp).unwrap();
+    tmp.flush().unwrap();
+    tmp
+}
+
+fn type0_font_dict(base_font: &[u8]) -> Dictionary {
+    let mut font = Dictionary::new();
+    font.set("Type", Object::Name(b"Font".to_vec()));
+    font.set("Subtype", Object::Name(b"Type0".to_vec()));
+    font.set("BaseFont", Object::Name(base_font.to_vec()));
+    font
+}
+
+#[test]
+fn text_type0_with_tounicode_decodes_and_exits_0() {
+    // Codes 0x0041 -> 'H', 0x0042 -> 'i'.
+    let cmap = b"begincodespacerange <0000> <FFFF> endcodespacerange \
+                 beginbfchar <0041> <0048> <0042> <0069> endbfchar";
+    let pdf = create_pdf_with_font(
+        type0_font_dict(b"ABCDEF+Custom"),
+        Some(cmap),
+        b"BT /F1 12 Tf <00410042> Tj ET",
+    );
+    let output = Command::new(binary_path())
+        .arg(pdf.path())
+        .arg("--text")
+        .output()
+        .expect("failed to execute binary");
+
+    assert!(
+        output.status.success(),
+        "reliable ToUnicode decode should exit 0, stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        stdout.contains("Hi"),
+        "should decode 2-byte codes via ToUnicode, got: {}",
+        stdout
+    );
+}
+
+#[test]
+fn text_cid_without_tounicode_exits_3_with_banner() {
+    let pdf = create_pdf_with_font(
+        type0_font_dict(b"ABCDEF+NoMap"),
+        None,
+        b"BT /F1 12 Tf <0041> Tj ET",
+    );
+    let output = Command::new(binary_path())
+        .arg(pdf.path())
+        .arg("--text")
+        .output()
+        .expect("failed to execute binary");
+
+    assert_eq!(
+        output.status.code(),
+        Some(3),
+        "CID font without ToUnicode should exit 3, got {:?}\nstderr: {}",
+        output.status.code(),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("UNRELIABLE") && stderr.contains("TEXT EXTRACTION RELIABILITY"),
+        "should print the loud reliability banner, stderr: {}",
+        stderr
+    );
+}
+
+#[test]
+fn text_reliable_font_exits_0_no_banner() {
+    // create_minimal_pdf uses standard-14 Helvetica.
+    let pdf = create_minimal_pdf();
+    let output = Command::new(binary_path())
+        .arg(pdf.path())
+        .arg("--text")
+        .output()
+        .expect("failed to execute binary");
+
+    assert!(
+        output.status.success(),
+        "reliable text should exit 0, stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(String::from_utf8_lossy(&output.stdout).contains("Hello"));
+    assert!(
+        !String::from_utf8_lossy(&output.stderr).contains("RELIABILITY"),
+        "no banner on the happy path"
+    );
+}
+
+#[test]
+fn text_cid_without_tounicode_json_reliability_object() {
+    let pdf = create_pdf_with_font(
+        type0_font_dict(b"ABCDEF+NoMap"),
+        None,
+        b"BT /F1 12 Tf <0041> Tj ET",
+    );
+    let output = Command::new(binary_path())
+        .arg(pdf.path())
+        .arg("--text")
+        .arg("--json")
+        .output()
+        .expect("failed to execute binary");
+
+    assert_eq!(
+        output.status.code(),
+        Some(3),
+        "unreliable --text --json should exit 3"
+    );
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let parsed: serde_json::Value = serde_json::from_str(&stdout).unwrap();
+    assert_eq!(parsed["reliability"]["verdict"], "unreliable");
+    assert!(parsed["reliability"]["fonts"].is_array());
+    assert!(parsed["pages"].is_array());
+}

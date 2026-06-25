@@ -1,8 +1,8 @@
 # pdf-dump: AI Reference Guide
 
-Use `pdf-dump` instead of writing Python/shell scripts to inspect PDF internals. This guide covers everything needed to use the tool and interpret its output.
+Use `pdf-dump` instead of writing Python/shell scripts to inspect PDF internals.  This guide covers everything needed to use the tool and interpret its output.
 
-## Quick lookup: "I need to..." → command
+## Quick lookup: “I need to...” → command
 
 | Goal | Command |
 |------|---------|
@@ -28,7 +28,7 @@ Use `pdf-dump` instead of writing Python/shell scripts to inspect PDF internals.
 | Print object with decoded stream | `pdf-dump f.pdf --object 42 --decode` |
 | Print object with refs expanded | `pdf-dump f.pdf --object 42 --deref` |
 | Raw undecoded stream bytes | `pdf-dump f.pdf --object 42 --raw --hex` |
-| Explain object's role and refs | `pdf-dump f.pdf --inspect 42` |
+| Explain object’s role and refs | `pdf-dump f.pdf --inspect 42` |
 | Find objects by criteria | `pdf-dump f.pdf --search Type=Font` |
 | Find objects, compact output | `pdf-dump f.pdf --search Type=Font --list` |
 | Search decoded stream content | `pdf-dump f.pdf --search "stream=text"` |
@@ -40,14 +40,14 @@ Use `pdf-dump` instead of writing Python/shell scripts to inspect PDF internals.
 
 ## Combinability rules
 
-- **Document-level modes** combine freely: `--list`, `--validate`, `--fonts`, `--images`, `--forms`, `--bookmarks`, `--annotations`, `--text`, `--operators`, `--tags`, `--tree`, `--find-text`, `--detail`. Multi-mode text output gets `=== Mode Name ===` headers; multi-mode JSON wraps values in `{"mode_name": ...}`.
-- **Standalone modes** are mutually exclusive (pick one): `--object`, `--inspect`, `--search`, `--extract-stream`. Cannot combine with document-level modes.
-- **`--page N` or `--page N-M`**: always a modifier. Filters `--text`, `--operators`, `--annotations`, `--find-text` to specific pages. When used alone, shows page info.
+- **Document-level modes** combine freely: `--list`, `--validate`, `--fonts`, `--images`, `--forms`, `--bookmarks`, `--annotations`, `--text`, `--operators`, `--tags`, `--tree`, `--find-text`, `--detail`.  Multi-mode text output gets `=== Mode Name ===` headers; multi-mode JSON wraps values in `{"mode_name": ...}`.
+- **Standalone modes** are mutually exclusive (pick one): `--object`, `--inspect`, `--search`, `--extract-stream`.  Cannot combine with document-level modes.
+- **`--page N` or `--page N-M`**: always a modifier.  Filters `--text`, `--operators`, `--annotations`, `--find-text` to specific pages.  When used alone, shows page info.
 - **Modifier flags**: `--json` (all modes), `--decode` (with `--object`; in overview enables decoded stats), `--deref` (with `--object`), `--depth N` (with `--tree`, `--tags`), `--hex` (with `--decode` or `--raw`), `--raw` (with `--object`, conflicts with `--decode`), `--truncate N` (limit binary output), `--dot` (with `--tree`).
 
 ## Search syntax
 
-Conditions are ANDed. Case-insensitive on values.
+Conditions are ANDed.  Case-insensitive on values.
 
 | Condition | Example | Matches |
 |-----------|---------|---------|
@@ -60,7 +60,7 @@ Conditions are ANDed. Case-insensitive on values.
 
 ## Validation checks (10)
 
-Broken references, unreachable objects, missing required keys (`/MediaBox`, `/Pages`), stream length mismatches, page tree integrity, content stream syntax, font requirements (`/BaseFont`, `/Widths` consistency), page tree cycles, names tree structure, duplicate objects. Severity levels: `[ERROR]`, `[WARN]`, `[INFO]`, `[OK]`.
+Broken references, unreachable objects, missing required keys (`/MediaBox`, `/Pages`), stream length mismatches, page tree integrity, content stream syntax, font requirements (`/BaseFont`, `/Widths` consistency), page tree cycles, names tree structure, duplicate objects.  Severity levels: `[ERROR]`, `[WARN]`, `[INFO]`, `[OK]`.
 
 ## PDF structure primer
 
@@ -76,7 +76,7 @@ Object types: null, boolean, integer, real, name (`/Type`), string (`(Hello)`), 
 
 ## JSON output schemas
 
-Add `--json` to any mode. All schemas below show the structure of a single mode's JSON output.
+Add `--json` to any mode.  All schemas below show the structure of a single mode’s JSON output.
 
 ### Object type mapping (used in `--object --json`, `--search --json`, `--inspect --json`)
 
@@ -91,7 +91,7 @@ Add `--json` to any mode. All schemas below show the structure of a single mode'
 | Array | `"array"` | `"items": [...]` |
 | Dictionary | `"dictionary"` | `"keys": {"Key": {...}}` |
 | Stream | `"stream"` | `"dict"`, optional `"content"` / `"content_hex"` / `"content_binary"` / `"decode_warning"` |
-| Reference | `"reference"` | `"object": "N M"`. With `--deref`: adds `"resolved": {...}` |
+| Reference | `"reference"` | `"object": "N M"`.  With `--deref`: adds `"resolved": {...}` |
 
 ### Mode-specific schemas
 
@@ -113,7 +113,9 @@ Add `--json` to any mode. All schemas below show the structure of a single mode'
 `{role, description, details: [[key, value]], domain_details: [str], page_associations: [N], forward_references: [{key, object, summary}], reverse_references: [{from_object, key_path}], object: {...}}`
 
 **Text** (`--text --json`):
-`{pages: [{page_number, text, warnings?: [str]}]}`
+`{pages: [{page_number, text, warnings?: [str]}], reliability: {verdict: "reliable"|"degraded"|"unreliable", total_codes, unmapped_codes, unmapped_ratio, fonts: [{name, base_font, subtype, classification, has_to_unicode, reason}]}}`
+
+Text extraction is font-aware: show-strings are decoded through each font’s `/ToUnicode` CMap (the fix for CID/Type0 mojibake) and through a WinAnsiEncoding table for simple fonts lacking ToUnicode; undecodable fonts fall back to raw byte passthrough.  A loud reliability banner prints to **stderr** (stdout stays clean for piping) when a document is not fully reliable, and `--text` exits **3** when the verdict is `unreliable` (a CID/Type0 font with no ToUnicode map).
 
 **Operators** (`--operators --json`):
 `{pages: [{page_number, operation_count, operations: [{operator, operands: [str]}], warnings?: [str]}]}`
@@ -196,8 +198,8 @@ Unsupported (reported as warnings, decoding stops): DCTDecode, JPXDecode, JBIG2D
 - Use `--json` when parsing output programmatically.
 - Use `--depth 2` with `--tree` or `--tags` for large files, increase as needed.
 - `--decode --truncate 200 --hex` for a quick peek at binary streams.
-- `--search` is case-insensitive on values. Use `regex=(?i)pattern` for case-insensitive regex.
-- `--text` garbage → almost always `Identity-H` encoding without ToUnicode. Check `--fonts`.
+- `--search` is case-insensitive on values.  Use `regex=(?i)pattern` for case-insensitive regex.
+- `--text` garbage → almost always `Identity-H` encoding without ToUnicode.  `--text` now flags this loudly (stderr banner + `reliability.verdict: "unreliable"` + exit 3); confirm with `--fonts`.
 - `--inspect N` replaces multiple `--object` + manual ref chasing.
 - `--deref` with `--object` shows ref targets inline.
 - Combine document-level modes freely: `--fonts --images --validate`.

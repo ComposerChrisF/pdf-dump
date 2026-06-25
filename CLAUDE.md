@@ -12,20 +12,20 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## What This Is
 
-`pdf-dump` is a Rust CLI tool that dumps the internal object structure of a PDF file. It uses `lopdf` for PDF parsing, `clap` (derive) for CLI arguments, `flate2` for zlib/FlateDecode stream decompression, and `weezl` for LZW decoding.
+`pdf-dump` is a Rust CLI tool that dumps the internal object structure of a PDF file.  It uses `lopdf` for PDF parsing, `clap` (derive) for CLI arguments, `flate2` for zlib/FlateDecode stream decompression, and `weezl` for LZW decoding.
 
 For CLI usage documentation, see the global `pdf-tools.md` rules or `DEBUGGING_WITH_PDF_DUMP.md` in this repo.
 
 ## Architecture
 
-The tool is split across ~28 source files in `src/`. The flow is:
+The tool is split across ~30 source files in `src/`.  The flow is:
 
-1. **CLI parsing** (`types.rs`) — `Args` struct via clap derive. Modes are divided into **document-level** (combinable) and **standalone** (mutually exclusive). `--page` is always a modifier. Help output uses `help_heading` for organized grouping.
+1. **CLI parsing** (`types.rs`) — `Args` struct via clap derive.  Modes are divided into **document-level** (combinable) and **standalone** (mutually exclusive). `--page` is always a modifier.  Help output uses `help_heading` for organized grouping.
 2. **Mode resolution** (`types.rs`) — `Args::resolve_mode()` validates exclusivity and returns `ResolvedMode` enum (Default, Combined, Standalone).
 3. **Dispatch** (`lib.rs`) — `run()` matches on `ResolvedMode`:
    - `Default` → page info if `--page` present, else overview
    - `Standalone(mode)` → extract-stream, object, inspect, or search
-   - `Combined(modes)` → single mode calls directly; multiple modes get section headers (text) or are wrapped in a JSON object (json). Uses `*_json_value()` functions for JSON output.
+   - `Combined(modes)` → single mode calls directly; multiple modes get section headers (text) or are wrapped in a JSON object (json).  Uses `*_json_value()` functions for JSON output.
 
 ### Mode → Module mapping
 
@@ -37,7 +37,7 @@ The tool is split across ~28 source files in `src/`. The flow is:
 | `--page` | `page_info.rs` | `print_page_info`, `page_info_json_value` |
 | `--inspect` | `inspect.rs` | `print_inspect`, `inspect_json_value` |
 | `--search` | `search.rs` | `print_search`, `search_json_value` |
-| `--text` | `text.rs` | `print_text`, `text_json_value` |
+| `--text` | `text.rs` | `print_text`, `text_json_value` (font-aware: decodes via `/ToUnicode` + WinAnsi) |
 | `--operators` | `operators.rs` | `print_operators`, `operators_json_value` |
 | `--find-text` | `find_text.rs` | `print_find_text`, `find_text_json_value` |
 | `--fonts` | `fonts.rs` | `print_fonts`, `fonts_json_value` |
@@ -63,14 +63,17 @@ The tool is split across ~28 source files in `src/`. The flow is:
 | `helpers.rs` | Shared formatting utilities |
 | `refs.rs` | Reference traversal, reverse ref lookup |
 | `resources.rs` | Page resource extraction (fonts, XObjects, ExtGState, ColorSpaces) |
+| `cmap.rs` | `ToUnicodeCMap::parse` — best-effort ToUnicode CMap parser (bfchar/bfrange, codespace byte-width) for `--text` |
+| `encodings.rs` | `winansi(b)` — WinAnsiEncoding (CP1252) → Unicode table for simple fonts lacking ToUnicode |
 
 ### Key patterns
 
-- `pub fn run()` in `lib.rs` holds all dispatch (binary crate can't access `pub(crate)` items from lib)
+- `pub fn run()` in `lib.rs` holds all dispatch (binary crate can’t access `pub(crate)` items from lib)
 - Shared test helpers in `lib.rs::test_utils`: `output_of`, `empty_doc`, `default_config`, `make_stream`, `zlib_compress`, `json_config`, `build_two_page_doc`, `build_page_doc_with_content`, `make_page_with_annots`
 - `validate::collect_reachable_ids` is `pub(crate)` so `object.rs` tests can use it
 - `print_*_json()` functions are `#[cfg(test)]` only — dispatch uses `*_json_value()` directly
 - Overview encryption detection checks both trailer `/Encrypt` key and XRef stream objects (fallback for post-decryption state where lopdf strips the trailer key)
+- `--text` is font-aware (Tier 1): `text.rs` builds a per-page `FontDecoder` table, tracks the active font via `Tf`, and decodes show-strings through `/ToUnicode` (`cmap.rs`) or the WinAnsi table (`encodings.rs`); undecodable fonts fall back to byte passthrough (no regression).  It classifies each font Reliable/Degraded/Unreliable, prints a loud stderr banner + JSON `reliability` object, and exits 3 when a document is `Unreliable` (CID/Type0 without ToUnicode).  A MacRoman/Standard encoding table is the highest-value Tier 2 follow-on (apostrophes/quotes in macOS exports currently passthrough to U+FFFD).
 
 ## Rust Edition
 
