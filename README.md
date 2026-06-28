@@ -2,7 +2,7 @@
 
 A CLI tool for inspecting and debugging the internal structure of PDF files.
 
-`pdf-dump` shows you what's actually inside a PDF — objects, streams, fonts, images, form fields, bookmarks, annotations, tagged structure, and more. Useful for debugging PDF generation, understanding why a PDF looks wrong, or exploring the format.
+`pdf-dump` shows you what’s actually inside a PDF — objects, streams, fonts, images, form fields, bookmarks, annotations, tagged structure, and more.  Useful for debugging PDF generation, understanding why a PDF looks wrong, or exploring the format.
 
 ## Installation
 
@@ -53,7 +53,7 @@ These can be used together — output gets section headers automatically:
 
 | Flag | Description |
 |------|-------------|
-| `--text` | Extract readable text from content streams |
+| `--text` | Extract readable text (font-aware: decodes `/ToUnicode` CMaps and WinAnsiEncoding; flags unreliable extraction) |
 | `--operators` | Show content stream operators |
 | `--find-text "pattern"` | Case-insensitive text search with context |
 | `--fonts` | List all fonts with encoding and embedding details |
@@ -72,12 +72,16 @@ These can be used together — output gets section headers automatically:
 pdf-dump file.pdf --fonts --images --validate
 ```
 
+### Text extraction reliability
+
+`--text` is font-aware: it decodes character codes through each font’s `/ToUnicode` CMap (the fix for the classic CID/Type0 mojibake) and through a WinAnsiEncoding table for simple fonts that lack one, falling back to raw byte passthrough when a font can’t be decoded.  When extraction is not fully trustworthy it prints a loud reliability banner to **stderr** (stdout stays clean for piping) and, in `--json` mode, adds a top-level `reliability` object.  The tool exits **3** when a document is `unreliable` — a CID/Type0 font with no ToUnicode map — so scripts can detect junk text programmatically.
+
 ### Standalone modes (one at a time)
 
 | Flag | Description |
 |------|-------------|
 | `--object N` | Print object(s) by number (`5`, `1,5,12`, `3-7`) |
-| `--inspect N` | Full explanation of an object's role and relationships |
+| `--inspect N` | Full explanation of an object’s role and relationships |
 | `--search <expr>` | Find objects matching criteria (`Type=Font`, `key=MediaBox`, `stream=text`) |
 | `--extract-stream N --output file` | Extract a decoded stream to a file |
 

@@ -117,7 +117,8 @@ Exit codes:
   1   Runtime error (file not found, IO failure, invalid argument value)
   2   Argument parse error (clap; e.g. unknown flag, missing required arg)
   3   Tool ran successfully but the input had problems
-      (--validate found errors, or --page was out of range)
+      (--validate found errors, --page was out of range, or --text
+       extraction was unreliable: a CID/Type0 font without a ToUnicode map)
 ")]
 pub(crate) struct Args {
     /// Path to the PDF file
