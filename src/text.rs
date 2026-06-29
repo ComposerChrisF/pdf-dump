@@ -69,11 +69,12 @@ enum FontDecoder {
 }
 
 /// Pick the byte-table decoder for a recognized simple-font base encoding,
-/// or `None` if we have no table for it (e.g. StandardEncoding — Tier 2).
+/// or `None` if we have no table for it (e.g. MacExpertEncoding — Tier 2).
 fn simple_table_for(encoding: Option<&str>) -> Option<fn(u8) -> Option<char>> {
     match encoding {
         Some("WinAnsiEncoding") => Some(encodings::winansi),
         Some("MacRomanEncoding") => Some(encodings::macroman),
+        Some("StandardEncoding") => Some(encodings::standard),
         _ => None,
     }
 }
@@ -465,14 +466,14 @@ fn classify_passthrough(
     }
 
     let has_differences = !encoding_overridden_codes(doc, dict).is_empty();
-    // A recognized base encoding we lack a table for (Standard/MacExpert; WinAnsi
-    // and MacRoman are handled earlier with tables) still decodes the ASCII range
-    // — which dominates real content — accurately via passthrough, so it is not
-    // flagged. Only the high range (0x80..) can be off, and reserving the banner
-    // for genuinely garbled text keeps it loud.
+    // A recognized base encoding we lack a table for (MacExpert; WinAnsi,
+    // MacRoman, and Standard are handled earlier with tables) still decodes the
+    // ASCII range — which dominates real content — accurately via passthrough, so
+    // it is not flagged. Only the high range (0x80..) can be off, and reserving
+    // the banner for genuinely garbled text keeps it loud.
     let recognized_base = matches!(
         font_base_encoding(doc, dict).as_deref(),
-        Some("StandardEncoding") | Some("MacExpertEncoding")
+        Some("MacExpertEncoding")
     );
     if recognized_base {
         if has_differences {
@@ -1362,6 +1363,26 @@ mod tests {
         let result = extract_text_from_page_with_warnings(&doc, p_id);
         assert_eq!(result.text, "Mother\u{2019}s");
         // No ToUnicode codes are attempted (table decode), so it stays Reliable.
+        let fonts = dedup_font_records(result.fonts);
+        assert_eq!(
+            document_verdict(&fonts, result.total_codes, result.unmapped_codes),
+            Reliability::Reliable
+        );
+    }
+
+    #[test]
+    fn standard_simple_font_decodes_quote_and_high_byte() {
+        let mut font = Dictionary::new();
+        font.set("Type", Object::Name(b"Font".to_vec()));
+        font.set("Subtype", Object::Name(b"Type1".to_vec()));
+        font.set("BaseFont", Object::Name(b"ABCDEF+Body".to_vec()));
+        font.set("Encoding", Object::Name(b"StandardEncoding".to_vec()));
+        // 0x27 is the right single quote (apostrophe) and 0xA6 the florin in
+        // StandardEncoding; passthrough would render them as ' and U+FFFD.
+        let (doc, p_id) = doc_with_font(font, None, b"BT /F1 12 Tf (Mother\x27s \xA6) Tj ET");
+        let result = extract_text_from_page_with_warnings(&doc, p_id);
+        assert_eq!(result.text, "Mother\u{2019}s \u{0192}");
+        // Table decode attempts no ToUnicode codes, so it stays Reliable.
         let fonts = dedup_font_records(result.fonts);
         assert_eq!(
             document_verdict(&fonts, result.total_codes, result.unmapped_codes),

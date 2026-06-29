@@ -10,9 +10,13 @@
 //! - **MacRomanEncoding** = Mac OS Roman. macOS exports use this heavily; its
 //!   high range carries the apostrophe/quotes (`0xD5`/`0xD2`-`0xD4`) and dashes
 //!   (`0xD0`/`0xD1`) that otherwise extract as U+FFFD.
+//! - **StandardEncoding** = Adobe Standard. The historical default for Type1
+//!   fonts; its ASCII range differs from US-ASCII at two codes (`0x27` is the
+//!   right single quote `’`, `0x60` the left single quote `‘`), and it has a
+//!   sparse high range (ligatures, accents, dashes) that passthrough mangles.
 //!
-//! NON-GOAL (Tier 2): StandardEncoding/MacExpertEncoding tables and Adobe Glyph
-//! List glyph-name resolution for `/Differences` are not handled here.
+//! NON-GOAL (Tier 2): MacExpertEncoding tables and Adobe Glyph List glyph-name
+//! resolution for `/Differences` are not handled here.
 
 /// The CP1252 high range `0x80..=0x9F`. The five unassigned slots
 /// (`0x81`, `0x8D`, `0x8F`, `0x90`, `0x9D`) are `None`.
@@ -213,6 +217,125 @@ pub(crate) fn macroman(b: u8) -> Option<char> {
     }
 }
 
+/// Adobe StandardEncoding high range `0xA0..=0xFF`, indexed by `byte - 0xA0`.
+/// The range is sparse — many codes are unassigned (`None`). Values follow the
+/// Adobe Glyph List mapping of each glyph name (e.g. `florin` → U+0192,
+/// `fraction` → U+2044, `fi`/`fl` → the U+FB01/FB02 ligatures).
+static STANDARD_HIGH: [Option<char>; 96] = [
+    None,             // 0xA0
+    Some('\u{00A1}'), // 0xA1 ¡ exclamdown
+    Some('\u{00A2}'), // 0xA2 ¢ cent
+    Some('\u{00A3}'), // 0xA3 £ sterling
+    Some('\u{2044}'), // 0xA4 ⁄ fraction
+    Some('\u{00A5}'), // 0xA5 ¥ yen
+    Some('\u{0192}'), // 0xA6 ƒ florin
+    Some('\u{00A7}'), // 0xA7 § section
+    Some('\u{00A4}'), // 0xA8 ¤ currency
+    Some('\u{0027}'), // 0xA9 ' quotesingle
+    Some('\u{201C}'), // 0xAA “ quotedblleft
+    Some('\u{00AB}'), // 0xAB « guillemotleft
+    Some('\u{2039}'), // 0xAC ‹ guilsinglleft
+    Some('\u{203A}'), // 0xAD › guilsinglright
+    Some('\u{FB01}'), // 0xAE ﬁ fi ligature
+    Some('\u{FB02}'), // 0xAF ﬂ fl ligature
+    None,             // 0xB0
+    Some('\u{2013}'), // 0xB1 – endash
+    Some('\u{2020}'), // 0xB2 † dagger
+    Some('\u{2021}'), // 0xB3 ‡ daggerdbl
+    Some('\u{00B7}'), // 0xB4 · periodcentered
+    None,             // 0xB5
+    Some('\u{00B6}'), // 0xB6 ¶ paragraph
+    Some('\u{2022}'), // 0xB7 • bullet
+    Some('\u{201A}'), // 0xB8 ‚ quotesinglbase
+    Some('\u{201E}'), // 0xB9 „ quotedblbase
+    Some('\u{201D}'), // 0xBA ” quotedblright
+    Some('\u{00BB}'), // 0xBB » guillemotright
+    Some('\u{2026}'), // 0xBC … ellipsis
+    Some('\u{2030}'), // 0xBD ‰ perthousand
+    None,             // 0xBE
+    Some('\u{00BF}'), // 0xBF ¿ questiondown
+    None,             // 0xC0
+    Some('\u{0060}'), // 0xC1 ` grave
+    Some('\u{00B4}'), // 0xC2 ´ acute
+    Some('\u{02C6}'), // 0xC3 ˆ circumflex
+    Some('\u{02DC}'), // 0xC4 ˜ tilde
+    Some('\u{00AF}'), // 0xC5 ¯ macron
+    Some('\u{02D8}'), // 0xC6 ˘ breve
+    Some('\u{02D9}'), // 0xC7 ˙ dotaccent
+    Some('\u{00A8}'), // 0xC8 ¨ dieresis
+    None,             // 0xC9
+    Some('\u{02DA}'), // 0xCA ˚ ring
+    Some('\u{00B8}'), // 0xCB ¸ cedilla
+    None,             // 0xCC
+    Some('\u{02DD}'), // 0xCD ˝ hungarumlaut
+    Some('\u{02DB}'), // 0xCE ˛ ogonek
+    Some('\u{02C7}'), // 0xCF ˇ caron
+    Some('\u{2014}'), // 0xD0 — emdash
+    None,             // 0xD1
+    None,             // 0xD2
+    None,             // 0xD3
+    None,             // 0xD4
+    None,             // 0xD5
+    None,             // 0xD6
+    None,             // 0xD7
+    None,             // 0xD8
+    None,             // 0xD9
+    None,             // 0xDA
+    None,             // 0xDB
+    None,             // 0xDC
+    None,             // 0xDD
+    None,             // 0xDE
+    None,             // 0xDF
+    None,             // 0xE0
+    Some('\u{00C6}'), // 0xE1 Æ AE
+    None,             // 0xE2
+    Some('\u{00AA}'), // 0xE3 ª ordfeminine
+    None,             // 0xE4
+    None,             // 0xE5
+    None,             // 0xE6
+    None,             // 0xE7
+    Some('\u{0141}'), // 0xE8 Ł Lslash
+    Some('\u{00D8}'), // 0xE9 Ø Oslash
+    Some('\u{0152}'), // 0xEA Œ OE
+    Some('\u{00BA}'), // 0xEB º ordmasculine
+    None,             // 0xEC
+    None,             // 0xED
+    None,             // 0xEE
+    None,             // 0xEF
+    None,             // 0xF0
+    Some('\u{00E6}'), // 0xF1 æ ae
+    None,             // 0xF2
+    None,             // 0xF3
+    None,             // 0xF4
+    Some('\u{0131}'), // 0xF5 ı dotlessi
+    None,             // 0xF6
+    None,             // 0xF7
+    Some('\u{0142}'), // 0xF8 ł lslash
+    Some('\u{00F8}'), // 0xF9 ø oslash
+    Some('\u{0153}'), // 0xFA œ oe
+    Some('\u{00DF}'), // 0xFB ß germandbls
+    None,             // 0xFC
+    None,             // 0xFD
+    None,             // 0xFE
+    None,             // 0xFF
+];
+
+/// Map a single byte through Adobe StandardEncoding. Returns `None` for codes
+/// with no glyph (the control range, `0x7F`, `0x80..=0xA0`, and the unassigned
+/// high-range slots). Note the two ASCII-range departures from US-ASCII:
+/// `0x27` is the right single quote `’` and `0x60` the left single quote `‘`.
+pub(crate) fn standard(b: u8) -> Option<char> {
+    match b {
+        0x27 => Some('\u{2019}'), // quoteright ’ (not the ASCII apostrophe)
+        0x60 => Some('\u{2018}'), // quoteleft ‘ (not the ASCII grave)
+        // Remaining printable ASCII (0x20 SPACE through 0x7E TILDE) is identity.
+        0x20..=0x7E => Some(b as char),
+        0xA0..=0xFF => STANDARD_HIGH[(b - 0xA0) as usize],
+        // Control range (0x00..=0x1F), 0x7F, and 0x80..=0x9F have no text glyph.
+        _ => None,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -312,5 +435,58 @@ mod tests {
         for b in 0x80u8..=0xFF {
             assert!(macroman(b).is_some(), "0x{:02X} should be defined", b);
         }
+    }
+
+    #[test]
+    fn standard_ascii_is_mostly_identity() {
+        assert_eq!(standard(b'A'), Some('A'));
+        assert_eq!(standard(b' '), Some(' '));
+        assert_eq!(standard(b'~'), Some('~'));
+        assert_eq!(standard(b'1'), Some('1'));
+    }
+
+    #[test]
+    fn standard_quote_departures_from_ascii() {
+        // The headline difference: 0x27 and 0x60 are curly quotes, not ASCII.
+        assert_eq!(standard(0x27), Some('\u{2019}')); // ’ quoteright
+        assert_eq!(standard(0x60), Some('\u{2018}')); // ‘ quoteleft
+    }
+
+    #[test]
+    fn standard_high_range_glyphs() {
+        assert_eq!(standard(0xA6), Some('\u{0192}')); // ƒ florin
+        assert_eq!(standard(0xA4), Some('\u{2044}')); // ⁄ fraction
+        assert_eq!(standard(0xAE), Some('\u{FB01}')); // ﬁ ligature
+        assert_eq!(standard(0xAF), Some('\u{FB02}')); // ﬂ ligature
+        assert_eq!(standard(0xB1), Some('\u{2013}')); // – endash
+        assert_eq!(standard(0xD0), Some('\u{2014}')); // — emdash
+        assert_eq!(standard(0xB7), Some('\u{2022}')); // • bullet
+        assert_eq!(standard(0xBC), Some('\u{2026}')); // … ellipsis
+    }
+
+    #[test]
+    fn standard_high_range_letters() {
+        assert_eq!(standard(0xE1), Some('\u{00C6}')); // Æ AE
+        assert_eq!(standard(0xEA), Some('\u{0152}')); // Œ OE
+        assert_eq!(standard(0xFA), Some('\u{0153}')); // œ oe
+        assert_eq!(standard(0xFB), Some('\u{00DF}')); // ß germandbls
+        assert_eq!(standard(0xF8), Some('\u{0142}')); // ł lslash
+    }
+
+    #[test]
+    fn standard_unassigned_and_control_are_none() {
+        // Sparse high-range gaps.
+        assert_eq!(standard(0xA0), None);
+        assert_eq!(standard(0xB0), None);
+        assert_eq!(standard(0xC0), None);
+        assert_eq!(standard(0xD1), None);
+        assert_eq!(standard(0xFF), None);
+        // 0x80..=0x9F is entirely unassigned in StandardEncoding.
+        assert_eq!(standard(0x80), None);
+        assert_eq!(standard(0x9F), None);
+        // Control range and DEL.
+        assert_eq!(standard(0x00), None);
+        assert_eq!(standard(0x1F), None);
+        assert_eq!(standard(0x7F), None);
     }
 }
