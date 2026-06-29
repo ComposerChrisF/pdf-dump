@@ -115,7 +115,7 @@ Add `--json` to any mode.  All schemas below show the structure of a single mode
 **Text** (`--text --json`):
 `{pages: [{page_number, text, warnings?: [str]}], reliability: {verdict: "reliable"|"degraded"|"unreliable", total_codes, unmapped_codes, unmapped_ratio, fonts: [{name, base_font, subtype, classification, has_to_unicode, reason}]}}`
 
-Text extraction is font-aware: show-strings are decoded through each font’s `/ToUnicode` CMap (the fix for CID/Type0 mojibake) and through a WinAnsiEncoding table for simple fonts lacking ToUnicode; undecodable fonts fall back to raw byte passthrough.  A loud reliability banner prints to **stderr** (stdout stays clean for piping) when a document is not fully reliable, and `--text` exits **3** when the verdict is `unreliable` (a CID/Type0 font with no ToUnicode map).
+Text extraction is font-aware: show-strings are decoded through each font’s `/ToUnicode` CMap (the fix for CID/Type0 mojibake) and through WinAnsiEncoding/MacRomanEncoding tables for simple fonts lacking ToUnicode; undecodable fonts fall back to raw byte passthrough.  A loud reliability banner prints to **stderr** (stdout stays clean for piping) when a document is not fully reliable, and `--text` exits **3** when the verdict is `unreliable` (a CID/Type0 font with no ToUnicode map).
 
 **Operators** (`--operators --json`):
 `{pages: [{page_number, operation_count, operations: [{operator, operands: [str]}], warnings?: [str]}]}`

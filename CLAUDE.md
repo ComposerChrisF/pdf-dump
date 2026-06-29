@@ -37,7 +37,7 @@ The tool is split across ~30 source files in `src/`.  The flow is:
 | `--page` | `page_info.rs` | `print_page_info`, `page_info_json_value` |
 | `--inspect` | `inspect.rs` | `print_inspect`, `inspect_json_value` |
 | `--search` | `search.rs` | `print_search`, `search_json_value` |
-| `--text` | `text.rs` | `print_text`, `text_json_value` (font-aware: decodes via `/ToUnicode` + WinAnsi) |
+| `--text` | `text.rs` | `print_text`, `text_json_value` (font-aware: decodes via `/ToUnicode` + WinAnsi/MacRoman) |
 | `--operators` | `operators.rs` | `print_operators`, `operators_json_value` |
 | `--find-text` | `find_text.rs` | `print_find_text`, `find_text_json_value` |
 | `--fonts` | `fonts.rs` | `print_fonts`, `fonts_json_value` |
@@ -64,7 +64,7 @@ The tool is split across ~30 source files in `src/`.  The flow is:
 | `refs.rs` | Reference traversal, reverse ref lookup |
 | `resources.rs` | Page resource extraction (fonts, XObjects, ExtGState, ColorSpaces) |
 | `cmap.rs` | `ToUnicodeCMap::parse` — best-effort ToUnicode CMap parser (bfchar/bfrange, codespace byte-width) for `--text` |
-| `encodings.rs` | `winansi(b)` — WinAnsiEncoding (CP1252) → Unicode table for simple fonts lacking ToUnicode |
+| `encodings.rs` | `winansi(b)` / `macroman(b)` — WinAnsiEncoding (CP1252) and Mac OS Roman → Unicode tables for simple fonts lacking ToUnicode |
 
 ### Key patterns
 
@@ -73,7 +73,7 @@ The tool is split across ~30 source files in `src/`.  The flow is:
 - `validate::collect_reachable_ids` is `pub(crate)` so `object.rs` tests can use it
 - `print_*_json()` functions are `#[cfg(test)]` only — dispatch uses `*_json_value()` directly
 - Overview encryption detection checks both trailer `/Encrypt` key and XRef stream objects (fallback for post-decryption state where lopdf strips the trailer key)
-- `--text` is font-aware (Tier 1): `text.rs` builds a per-page `FontDecoder` table, tracks the active font via `Tf`, and decodes show-strings through `/ToUnicode` (`cmap.rs`) or the WinAnsi table (`encodings.rs`); undecodable fonts fall back to byte passthrough (no regression).  It classifies each font Reliable/Degraded/Unreliable, prints a loud stderr banner + JSON `reliability` object, and exits 3 when a document is `Unreliable` (CID/Type0 without ToUnicode).  A MacRoman/Standard encoding table is the highest-value Tier 2 follow-on (apostrophes/quotes in macOS exports currently passthrough to U+FFFD).
+- `--text` is font-aware (Tier 1): `text.rs` builds a per-page `FontDecoder` table, tracks the active font via `Tf`, and decodes show-strings through `/ToUnicode` (`cmap.rs`) or a WinAnsi/MacRoman base-encoding table (`encodings.rs`, dispatched via `simple_table_for`); undecodable fonts fall back to byte passthrough (no regression).  It classifies each font Reliable/Degraded/Unreliable, prints a loud stderr banner + JSON `reliability` object, and exits 3 when a document is `Unreliable` (CID/Type0 without ToUnicode).  StandardEncoding is the remaining Tier 2 table follow-on (`docs/ROADMAP.md`).
 
 ## Rust Edition
 

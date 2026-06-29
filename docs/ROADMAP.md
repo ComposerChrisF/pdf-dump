@@ -6,11 +6,11 @@ Remaining enhancements and upstream improvements for pdf-dump.
 
 ## `--text` improvements
 
-Text extraction is now font-aware (Tier 1, v0.13.0): show-strings are decoded through each font’s `/ToUnicode` CMap and through a WinAnsiEncoding table for simple fonts that lack one, with raw byte passthrough as a fallback.  A per-document reliability verdict (Reliable/Degraded/Unreliable) is surfaced via a loud stderr banner, a JSON `reliability` object, and exit code 3 when extraction is unreliable (CID/Type0 fonts without ToUnicode).
+Text extraction is now font-aware (Tier 1): show-strings are decoded through each font’s `/ToUnicode` CMap and through WinAnsiEncoding/MacRomanEncoding tables for simple fonts that lack one, with raw byte passthrough as a fallback.  A per-document reliability verdict (Reliable/Degraded/Unreliable) is surfaced via a loud stderr banner, a JSON `reliability` object, and exit code 3 when extraction is unreliable (CID/Type0 fonts without ToUnicode).
 
 Remaining accuracy improvements:
 
-- **More base-encoding tables** — Add MacRomanEncoding/StandardEncoding → Unicode tables (same shape as the existing WinAnsi table in `encodings.rs`).  Highest-value next step: macOS exports use MacRomanEncoding, whose high-range punctuation (curly quotes, apostrophes) currently passes through to U+FFFD.
+- **StandardEncoding table** — Add a StandardEncoding → Unicode table (same shape as the WinAnsi/MacRoman tables in `encodings.rs`).  Lower-value than MacRoman: it has a sparse high range and a few ASCII-range differences (`0x27`, `0x60`).  MacExpertEncoding remains passthrough (near-zero real-world usage).
 - **Adobe Glyph List** — Resolve `/Differences` glyph names to Unicode for simple fonts that lack a ToUnicode map.
 - **Predefined CJK CMaps** — Support the Adobe-Japan1/GB1/CNS1/Korea1 CMap resource files for CID fonts that use them without an embedded ToUnicode.
 - **Coordinate-based text ordering** — Use `Tm`/`Td`/`TD` coordinates to sort text blocks top-to-bottom, left-to-right within a page, rather than pure content-stream order.

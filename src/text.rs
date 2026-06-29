@@ -57,11 +57,25 @@ pub(crate) struct FontReliabilityRecord {
 enum FontDecoder {
     /// Decode each code through a parsed ToUnicode CMap.
     ToUnicode { cmap: Rc<ToUnicodeCMap>, width: u8 },
-    /// Single-byte WinAnsiEncoding table; `overridden` codes are remapped by
-    /// `/Differences` to glyph names we cannot resolve (emit U+FFFD).
-    WinAnsi { overridden: HashSet<u8> },
+    /// Single-byte base-encoding table (WinAnsi/MacRoman); `overridden` codes
+    /// are remapped by `/Differences` to glyph names we cannot resolve without
+    /// the Adobe Glyph List, so they emit U+FFFD.
+    SimpleTable {
+        decode: fn(u8) -> Option<char>,
+        overridden: HashSet<u8>,
+    },
     /// Raw byte passthrough (today's behavior) — used when we cannot decode.
     Passthrough,
+}
+
+/// Pick the byte-table decoder for a recognized simple-font base encoding,
+/// or `None` if we have no table for it (e.g. StandardEncoding — Tier 2).
+fn simple_table_for(encoding: Option<&str>) -> Option<fn(u8) -> Option<char>> {
+    match encoding {
+        Some("WinAnsiEncoding") => Some(encodings::winansi),
+        Some("MacRomanEncoding") => Some(encodings::macroman),
+        _ => None,
+    }
 }
 
 /// The standard-14 nonsymbolic base fonts (Symbol/ZapfDingbats excluded — they
@@ -271,12 +285,12 @@ fn emit_show_string(
                 }
             }
         }
-        Some(FontDecoder::WinAnsi { overridden }) => {
+        Some(FontDecoder::SimpleTable { decode, overridden }) => {
             for &b in bytes {
                 if overridden.contains(&b) {
                     out.push('\u{FFFD}');
                 } else {
-                    out.push(encodings::winansi(b).unwrap_or('\u{FFFD}'));
+                    out.push(decode(b).unwrap_or('\u{FFFD}'));
                 }
             }
         }
@@ -404,17 +418,18 @@ fn build_font_decoder(
         }
     }
 
-    // 2. Simple font with an explicit WinAnsiEncoding base.
-    if !is_cid && font_base_encoding(doc, dict).as_deref() == Some("WinAnsiEncoding") {
+    // 2. Simple font with a recognized base encoding we have a table for
+    //    (WinAnsiEncoding, MacRomanEncoding).
+    if !is_cid && let Some(decode) = simple_table_for(font_base_encoding(doc, dict).as_deref()) {
         let overridden = encoding_overridden_codes(doc, dict);
         if overridden.is_empty() {
             return (
-                FontDecoder::WinAnsi { overridden },
+                FontDecoder::SimpleTable { decode, overridden },
                 record(Reliability::Reliable, ""),
             );
         }
         return (
-            FontDecoder::WinAnsi { overridden },
+            FontDecoder::SimpleTable { decode, overridden },
             record(
                 Reliability::Degraded,
                 "custom /Differences glyph names without a ToUnicode map (no Adobe Glyph List)",
@@ -450,13 +465,14 @@ fn classify_passthrough(
     }
 
     let has_differences = !encoding_overridden_codes(doc, dict).is_empty();
-    // A recognized base encoding (besides WinAnsi, handled earlier with a table)
-    // decodes the ASCII range — which dominates real content — accurately via
-    // passthrough, so it is not flagged. Only the high range (0x80..) can be
-    // off, and reserving the banner for genuinely garbled text keeps it loud.
+    // A recognized base encoding we lack a table for (Standard/MacExpert; WinAnsi
+    // and MacRoman are handled earlier with tables) still decodes the ASCII range
+    // — which dominates real content — accurately via passthrough, so it is not
+    // flagged. Only the high range (0x80..) can be off, and reserving the banner
+    // for genuinely garbled text keeps it loud.
     let recognized_base = matches!(
         font_base_encoding(doc, dict).as_deref(),
-        Some("MacRomanEncoding") | Some("StandardEncoding") | Some("MacExpertEncoding")
+        Some("StandardEncoding") | Some("MacExpertEncoding")
     );
     if recognized_base {
         if has_differences {
@@ -1331,6 +1347,26 @@ mod tests {
         let (doc, p_id) = doc_with_font(font, None, b"BT /F1 12 Tf (\x96) Tj ET");
         let result = extract_text_from_page_with_warnings(&doc, p_id);
         assert!(result.text.contains('\u{2013}'), "got: {:?}", result.text);
+    }
+
+    #[test]
+    fn macroman_simple_font_decodes_apostrophe() {
+        let mut font = Dictionary::new();
+        font.set("Type", Object::Name(b"Font".to_vec()));
+        font.set("Subtype", Object::Name(b"TrueType".to_vec()));
+        font.set("BaseFont", Object::Name(b"ABCDEF+Body".to_vec()));
+        font.set("Encoding", Object::Name(b"MacRomanEncoding".to_vec()));
+        // 0xD5 is the right single quote (apostrophe) in MacRoman; the macOS
+        // export case that passthrough turns into U+FFFD.
+        let (doc, p_id) = doc_with_font(font, None, b"BT /F1 12 Tf (Mother\xD5s) Tj ET");
+        let result = extract_text_from_page_with_warnings(&doc, p_id);
+        assert_eq!(result.text, "Mother\u{2019}s");
+        // No ToUnicode codes are attempted (table decode), so it stays Reliable.
+        let fonts = dedup_font_records(result.fonts);
+        assert_eq!(
+            document_verdict(&fonts, result.total_codes, result.unmapped_codes),
+            Reliability::Reliable
+        );
     }
 
     #[test]

@@ -53,7 +53,7 @@ These can be used together — output gets section headers automatically:
 
 | Flag | Description |
 |------|-------------|
-| `--text` | Extract readable text (font-aware: decodes `/ToUnicode` CMaps and WinAnsiEncoding; flags unreliable extraction) |
+| `--text` | Extract readable text (font-aware: decodes `/ToUnicode` CMaps and WinAnsi/MacRoman encodings; flags unreliable extraction) |
 | `--operators` | Show content stream operators |
 | `--find-text "pattern"` | Case-insensitive text search with context |
 | `--fonts` | List all fonts with encoding and embedding details |
@@ -74,7 +74,7 @@ pdf-dump file.pdf --fonts --images --validate
 
 ### Text extraction reliability
 
-`--text` is font-aware: it decodes character codes through each font’s `/ToUnicode` CMap (the fix for the classic CID/Type0 mojibake) and through a WinAnsiEncoding table for simple fonts that lack one, falling back to raw byte passthrough when a font can’t be decoded.  When extraction is not fully trustworthy it prints a loud reliability banner to **stderr** (stdout stays clean for piping) and, in `--json` mode, adds a top-level `reliability` object.  The tool exits **3** when a document is `unreliable` — a CID/Type0 font with no ToUnicode map — so scripts can detect junk text programmatically.
+`--text` is font-aware: it decodes character codes through each font’s `/ToUnicode` CMap (the fix for the classic CID/Type0 mojibake) and through WinAnsiEncoding/MacRomanEncoding tables for simple fonts that lack one, falling back to raw byte passthrough when a font can’t be decoded.  When extraction is not fully trustworthy it prints a loud reliability banner to **stderr** (stdout stays clean for piping) and, in `--json` mode, adds a top-level `reliability` object.  The tool exits **3** when a document is `unreliable` — a CID/Type0 font with no ToUnicode map — so scripts can detect junk text programmatically.
 
 ### Standalone modes (one at a time)
 
