@@ -19,6 +19,10 @@ The per-font Reliable/Degraded/Unreliable verdict is assigned **statically**, fr
 
 The one residual is benign and optional: a base-less `/Differences` font reported Reliable that never actually shows its undecodable codes — the output is correct in that case, so a dedicated static fix is left as an optional refinement (`feature-plan-usage-aware-reliability.md`, Phase 3).
 
+## Dependencies: coordinate a cross-project lopdf bump
+
+pdf-dump is now on lopdf 0.39.0 (bumped from 0.36.0 to match pdf-maker, which fixed encrypted-PDF interop between the two tools).  The latest crate is 0.42.0.  **TODO:** at some point bump every `~/Chris/App/Rust/Pdf/*` project (pdf-dump, pdf-maker, font-dump, medpdf, pdf-orchestrator, …) to the same latest lopdf in one coordinated pass, rather than letting versions drift apart again — a shared lopdf version keeps parse/encrypt behavior consistent across the toolchain.  Re-run each project’s test suite (pdf-dump’s `tests/lopdf_canary.rs` is the tripwire for behavior changes in the encryption/xref workarounds) when doing so.
+
 ## lopdf upstream: preserve encrypt dict
 
 When lopdf loads an encrypted PDF, it removes the `/Encrypt` entry from the trailer and deletes the encrypt dictionary object from `doc.objects`, leaving dangling references in XRef stream objects.  This forces downstream tools to use workarounds to detect encryption after loading.
