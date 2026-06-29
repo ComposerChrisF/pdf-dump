@@ -109,6 +109,52 @@ const STANDARD_14_TEXT: &[&str] = &[
     "Times-Italic",
 ];
 
+/// Maximum form-XObject nesting depth that `--text`'s `Do` recursion follows.
+/// Deep enough for any legitimate document; a hard backstop against pathological
+/// or adversarial nesting (e.g. balanced diamonds) that the visited-set cycle
+/// guard alone would not bound.
+const MAX_FORM_DEPTH: u32 = 15;
+
+/// Mutable accumulators threaded through `process_content` as it walks a page's
+/// content stream and recurses into the form XObjects that stream invokes via
+/// `Do`. Bundling them keeps the recursive signature manageable.
+struct ExtractState {
+    text: String,
+    warnings: Vec<String>,
+    /// Character codes we attempted to decode (every decode path counts).
+    total_codes: u64,
+    /// Of `total_codes`, how many rendered as U+FFFD (nothing decoded).
+    unmapped_codes: u64,
+    /// One reliability record per font seen, across the page and any forms.
+    fonts: Vec<FontReliabilityRecord>,
+    /// Whether the next `BT` is the first one seen (no leading newline). Shared
+    /// across the recursion so form text joins page text consistently.
+    first_bt: bool,
+}
+
+impl ExtractState {
+    fn new() -> Self {
+        ExtractState {
+            text: String::new(),
+            warnings: Vec::new(),
+            total_codes: 0,
+            unmapped_codes: 0,
+            fonts: Vec::new(),
+            first_bt: true,
+        }
+    }
+
+    fn into_result(self) -> TextResult {
+        TextResult {
+            text: self.text,
+            warnings: self.warnings,
+            total_codes: self.total_codes,
+            unmapped_codes: self.unmapped_codes,
+            fonts: self.fonts,
+        }
+    }
+}
+
 #[cfg(test)]
 fn extract_text_from_page(doc: &Document, page_id: ObjectId) -> String {
     extract_text_from_page_with_warnings(doc, page_id).text
@@ -118,68 +164,91 @@ pub(crate) fn extract_text_from_page_with_warnings(
     doc: &Document,
     page_id: ObjectId,
 ) -> TextResult {
-    let mut text = String::new();
-    let mut warnings = Vec::new();
-    let mut total_codes: u64 = 0;
-    let mut unmapped_codes: u64 = 0;
+    let mut state = ExtractState::new();
 
     // Check font encodings for this page (legacy per-page warning strings,
     // retained for the JSON `warnings` field and page_info's garbled heuristic).
     if let Ok(Object::Dictionary(page_dict)) = doc.get_object(page_id) {
-        let font_warnings = check_page_font_encodings(doc, page_dict);
-        warnings.extend(font_warnings);
+        state
+            .warnings
+            .extend(check_page_font_encodings(doc, page_dict));
     }
 
-    // Build the font-aware decoder table + reliability records for this page.
-    let (font_table, fonts) = build_page_font_table(doc, page_id);
+    // The page's (possibly inherited) resources resolve both its fonts and the
+    // form XObjects its content invokes via `Do`.
+    let resources = crate::resources::resolve_page_resources(doc, page_id);
 
-    let stream_data = match helpers::read_content_streams(doc, page_id) {
-        Some(data) => data,
-        None => {
-            return TextResult {
-                text,
-                warnings,
-                total_codes,
-                unmapped_codes,
-                fonts,
-            };
+    match helpers::read_content_streams(doc, page_id) {
+        Some(stream_data) => {
+            state.warnings.extend(stream_data.warnings);
+            // `visited` is the active form-recursion stack for cycle detection;
+            // depth 0 is the page's own content stream.
+            let mut visited = HashSet::new();
+            process_content(
+                doc,
+                &stream_data.bytes,
+                resources,
+                &mut state,
+                &mut visited,
+                0,
+            );
         }
-    };
-    warnings.extend(stream_data.warnings);
-
-    if stream_data.bytes.is_empty() {
-        return TextResult {
-            text,
-            warnings,
-            total_codes,
-            unmapped_codes,
-            fonts,
-        };
+        None => {
+            // No `/Contents`: still report the page's declared fonts so the
+            // reliability verdict accounts for them (pre-recursion behavior).
+            if let Some(res) = resources {
+                let (_table, mut fonts) = build_font_table(doc, res);
+                state.fonts.append(&mut fonts);
+            }
+        }
     }
 
-    let operations = match Content::decode(&stream_data.bytes) {
+    state.into_result()
+}
+
+/// Walk one decoded content stream's operations, appending decoded text and
+/// reliability data to `state`. Recurses into form XObjects invoked via `Do`,
+/// resolving each form's own `/Resources` (or inheriting the caller's) and
+/// guarding against cycles (`visited`) and runaway nesting (`depth`).
+fn process_content(
+    doc: &Document,
+    bytes: &[u8],
+    resources: Option<&lopdf::Dictionary>,
+    state: &mut ExtractState,
+    visited: &mut HashSet<ObjectId>,
+    depth: u32,
+) {
+    // Build this content's font decoder table + reliability records from its
+    // resources (the page's, or a form XObject's own). Records always flow into
+    // the document-wide verdict, even when the stream draws no text.
+    let (font_table, mut fonts) = match resources {
+        Some(res) => build_font_table(doc, res),
+        None => (std::collections::HashMap::new(), Vec::new()),
+    };
+    state.fonts.append(&mut fonts);
+
+    if bytes.is_empty() {
+        return;
+    }
+
+    let operations = match Content::decode(bytes) {
         Ok(content) => content.operations,
         Err(_) => {
-            warnings.push("Content stream has syntax errors".to_string());
-            return TextResult {
-                text,
-                warnings,
-                total_codes,
-                unmapped_codes,
-                fonts,
-            };
+            state
+                .warnings
+                .push("Content stream has syntax errors".to_string());
+            return;
         }
     };
 
-    let mut first_bt = true;
     let mut current_font: Option<&FontDecoder> = None;
     for op in &operations {
         match op.operator.as_str() {
             "BT" => {
-                if !first_bt && !text.ends_with('\n') {
-                    text.push('\n');
+                if !state.first_bt && !state.text.ends_with('\n') {
+                    state.text.push('\n');
                 }
-                first_bt = false;
+                state.first_bt = false;
             }
             "Tf" => {
                 // Select the active font by resource name (e.g. /F1 12 Tf).
@@ -192,25 +261,25 @@ pub(crate) fn extract_text_from_page_with_warnings(
                 // Check ty (second operand) for line break — negative y means downward movement
                 if let Object::Integer(ty) = &op.operands[1] {
                     if *ty < 0 {
-                        text.push('\n');
+                        state.text.push('\n');
                     }
                 } else if let Object::Real(ty) = &op.operands[1]
                     && *ty < 0.0
                 {
-                    text.push('\n');
+                    state.text.push('\n');
                 }
             }
             "T*" => {
-                text.push('\n');
+                state.text.push('\n');
             }
             "Tj" => {
                 if let Some(Object::String(bytes, _)) = op.operands.first() {
                     emit_show_string(
-                        &mut text,
+                        &mut state.text,
                         bytes,
                         current_font,
-                        &mut total_codes,
-                        &mut unmapped_codes,
+                        &mut state.total_codes,
+                        &mut state.unmapped_codes,
                     );
                 }
             }
@@ -220,18 +289,18 @@ pub(crate) fn extract_text_from_page_with_warnings(
                         match item {
                             Object::String(bytes, _) => {
                                 emit_show_string(
-                                    &mut text,
+                                    &mut state.text,
                                     bytes,
                                     current_font,
-                                    &mut total_codes,
-                                    &mut unmapped_codes,
+                                    &mut state.total_codes,
+                                    &mut state.unmapped_codes,
                                 );
                             }
                             Object::Integer(n) if *n < -100 => {
-                                text.push(' ');
+                                state.text.push(' ');
                             }
                             Object::Real(n) if *n < -100.0 => {
-                                text.push(' ');
+                                state.text.push(' ');
                             }
                             _ => {}
                         }
@@ -239,41 +308,135 @@ pub(crate) fn extract_text_from_page_with_warnings(
                 }
             }
             "'" => {
-                text.push('\n');
+                state.text.push('\n');
                 if let Some(Object::String(bytes, _)) = op.operands.first() {
                     emit_show_string(
-                        &mut text,
+                        &mut state.text,
                         bytes,
                         current_font,
-                        &mut total_codes,
-                        &mut unmapped_codes,
+                        &mut state.total_codes,
+                        &mut state.unmapped_codes,
                     );
                 }
             }
             "\"" => {
-                text.push('\n');
+                state.text.push('\n');
                 // Third operand is the string
                 if let Some(Object::String(bytes, _)) = op.operands.get(2) {
                     emit_show_string(
-                        &mut text,
+                        &mut state.text,
                         bytes,
                         current_font,
-                        &mut total_codes,
-                        &mut unmapped_codes,
+                        &mut state.total_codes,
+                        &mut state.unmapped_codes,
                     );
+                }
+            }
+            "Do" => {
+                // Recurse into a form XObject so text drawn inside it is
+                // captured; image XObjects and broken refs are skipped.
+                if let Some(Object::Name(n)) = op.operands.first() {
+                    let name = String::from_utf8_lossy(n).into_owned();
+                    process_form_xobject(doc, resources, &name, state, visited, depth);
                 }
             }
             _ => {}
         }
     }
+}
 
-    TextResult {
-        text,
-        warnings,
-        total_codes,
-        unmapped_codes,
-        fonts,
+/// Resolve `/<name> Do` to a form XObject and recurse into its content stream.
+/// Skips missing resources/references, over-deep nesting, and cycles; pushes the
+/// form's id onto `visited` for the duration of the recursion and pops it after.
+fn process_form_xobject(
+    doc: &Document,
+    parent_resources: Option<&lopdf::Dictionary>,
+    name: &str,
+    state: &mut ExtractState,
+    visited: &mut HashSet<ObjectId>,
+    depth: u32,
+) {
+    let Some(res) = parent_resources else {
+        return;
+    };
+    let Some(xobj_id) = resolve_xobject_id(doc, res, name) else {
+        return;
+    };
+    if depth + 1 > MAX_FORM_DEPTH {
+        state.warnings.push(format!(
+            "Form XObject nesting exceeds depth {}; some text may be omitted",
+            MAX_FORM_DEPTH
+        ));
+        return;
     }
+    // `visited` is the active recursion stack: a form already on it would close
+    // a cycle, so skip it. A form drawn more than once at sibling positions
+    // still extracts each time, since we pop its id on the way back out.
+    if !visited.insert(xobj_id) {
+        return;
+    }
+    recurse_into_form(doc, xobj_id, parent_resources, state, visited, depth);
+    visited.remove(&xobj_id);
+}
+
+/// Decode a resolved form XObject's content and recurse, after the caller has
+/// pushed its id onto `visited`. Split out so the visited-set pop in
+/// `process_form_xobject` always runs regardless of how this returns.
+fn recurse_into_form(
+    doc: &Document,
+    xobj_id: ObjectId,
+    parent_resources: Option<&lopdf::Dictionary>,
+    state: &mut ExtractState,
+    visited: &mut HashSet<ObjectId>,
+    depth: u32,
+) {
+    let Ok(Object::Stream(stream)) = doc.get_object(xobj_id) else {
+        return;
+    };
+    // Only form XObjects carry a content stream to recurse into; image XObjects
+    // and the like draw no text.
+    let subtype = stream
+        .dict
+        .get(b"Subtype")
+        .ok()
+        .and_then(|v| v.as_name().ok())
+        .map(|n| String::from_utf8_lossy(n).into_owned())
+        .unwrap_or_default();
+    if subtype != "Form" {
+        return;
+    }
+
+    let (decoded, warn) = crate::stream::decode_stream(stream);
+    if let Some(w) = warn {
+        state
+            .warnings
+            .push(format!("Form XObject {} {}: {}", xobj_id.0, xobj_id.1, w));
+    }
+
+    // A form XObject normally carries its own `/Resources`; when absent it
+    // inherits the resources of the content stream that invoked it
+    // (PDF 32000-1 §7.8.3).
+    let form_resources = stream
+        .dict
+        .get(b"Resources")
+        .ok()
+        .and_then(|r| helpers::resolve_dict(doc, r))
+        .or(parent_resources);
+
+    process_content(doc, &decoded, form_resources, state, visited, depth + 1);
+}
+
+/// Resolve a named XObject resource (e.g. `Fm0` from `/Fm0 Do`) to its id.
+fn resolve_xobject_id(
+    doc: &Document,
+    resources: &lopdf::Dictionary,
+    name: &str,
+) -> Option<ObjectId> {
+    let xobj_dict = resources
+        .get(b"XObject")
+        .ok()
+        .and_then(|o| helpers::resolve_dict(doc, o))?;
+    xobj_dict.get(name.as_bytes()).ok()?.as_reference().ok()
 }
 
 /// Append one decoded source code to `out` and update the coverage counters:
@@ -378,11 +541,12 @@ fn split_codes(bytes: &[u8], width: u8) -> Vec<u32> {
         .collect()
 }
 
-/// Build the per-page font decoder table (keyed by resource name, e.g. "F1")
-/// plus one reliability record per font in the page's resources.
-fn build_page_font_table(
+/// Build a font decoder table (keyed by resource name, e.g. "F1") plus one
+/// reliability record per font, from a resolved resources dictionary — a page's
+/// or a form XObject's.
+fn build_font_table(
     doc: &Document,
-    page_id: ObjectId,
+    resources: &lopdf::Dictionary,
 ) -> (
     std::collections::HashMap<String, FontDecoder>,
     Vec<FontReliabilityRecord>,
@@ -390,9 +554,6 @@ fn build_page_font_table(
     let mut table = std::collections::HashMap::new();
     let mut records = Vec::new();
 
-    let Some(resources) = crate::resources::resolve_page_resources(doc, page_id) else {
-        return (table, records);
-    };
     let font_dict = match resources.get(b"Font") {
         Ok(obj) => match helpers::resolve_dict(doc, obj) {
             Some(d) => d,
@@ -1897,5 +2058,334 @@ mod tests {
         assert_eq!(result.text, "AB");
         assert_eq!(result.total_codes, 2);
         assert_eq!(result.unmapped_codes, 0);
+    }
+
+    // --- Form XObject `Do` recursion ---------------------------------------
+
+    /// Build a one-page doc whose page content is `page_content`, carrying a
+    /// single form XObject registered as `/Fm0` with `form_content`. A page-level
+    /// font is registered as `/F1` when `page_font` is Some; a form-level font
+    /// (in the form's own `/Resources`) when `form_font` is Some — when None the
+    /// form has no `/Resources` and inherits the page's. A catalog/Pages tree is
+    /// built so the helper works with both `extract_text_from_page_with_warnings`
+    /// and the page-enumerating `print_text`/`text_json_value`.
+    fn doc_with_form(
+        page_content: &[u8],
+        form_content: &[u8],
+        page_font: Option<Dictionary>,
+        form_font: Option<Dictionary>,
+    ) -> (Document, ObjectId) {
+        let mut doc = Document::new();
+
+        // Form XObject stream (+ optional own Resources with /F1).
+        let mut form_dict = Dictionary::new();
+        form_dict.set("Type", Object::Name(b"XObject".to_vec()));
+        form_dict.set("Subtype", Object::Name(b"Form".to_vec()));
+        if let Some(ff) = form_font {
+            let ff_id = doc.add_object(Object::Dictionary(ff));
+            let mut f1 = Dictionary::new();
+            f1.set("F1", Object::Reference(ff_id));
+            let mut res = Dictionary::new();
+            res.set("Font", Object::Dictionary(f1));
+            form_dict.set("Resources", Object::Dictionary(res));
+        }
+        let form_id = doc.add_object(Object::Stream(Stream::new(
+            form_dict,
+            form_content.to_vec(),
+        )));
+
+        // Page resources: /XObject /Fm0 -> form, plus optional page font /F1.
+        let mut xobj = Dictionary::new();
+        xobj.set("Fm0", Object::Reference(form_id));
+        let mut resources = Dictionary::new();
+        resources.set("XObject", Object::Dictionary(xobj));
+        if let Some(pf) = page_font {
+            let pf_id = doc.add_object(Object::Dictionary(pf));
+            let mut f1 = Dictionary::new();
+            f1.set("F1", Object::Reference(pf_id));
+            resources.set("Font", Object::Dictionary(f1));
+        }
+
+        let c_id = doc.add_object(Object::Stream(Stream::new(
+            Dictionary::new(),
+            page_content.to_vec(),
+        )));
+        let mut page = Dictionary::new();
+        page.set("Type", Object::Name(b"Page".to_vec()));
+        page.set("Contents", Object::Reference(c_id));
+        page.set("Resources", Object::Dictionary(resources));
+        let p_id = doc.add_object(Object::Dictionary(page));
+
+        let mut pages = Dictionary::new();
+        pages.set("Type", Object::Name(b"Pages".to_vec()));
+        pages.set("Kids", Object::Array(vec![Object::Reference(p_id)]));
+        pages.set("Count", Object::Integer(1));
+        let pages_id = doc.add_object(Object::Dictionary(pages));
+        if let Ok(Object::Dictionary(d)) = doc.get_object_mut(p_id) {
+            d.set("Parent", Object::Reference(pages_id));
+        }
+        let mut catalog = Dictionary::new();
+        catalog.set("Type", Object::Name(b"Catalog".to_vec()));
+        catalog.set("Pages", Object::Reference(pages_id));
+        let catalog_id = doc.add_object(Object::Dictionary(catalog));
+        doc.trailer.set("Root", Object::Reference(catalog_id));
+        (doc, p_id)
+    }
+
+    #[test]
+    fn form_xobject_text_is_extracted() {
+        // The core fix: a page whose only content is `/Fm0 Do` previously
+        // extracted nothing; now the form's text is captured.
+        let (doc, p_id) = doc_with_form(b"/Fm0 Do", b"BT (InsideForm) Tj ET", None, None);
+        let result = extract_text_from_page_with_warnings(&doc, p_id);
+        assert!(
+            result.text.contains("InsideForm"),
+            "form text should be extracted, got: {:?}",
+            result.text
+        );
+    }
+
+    #[test]
+    fn page_and_form_text_both_appear() {
+        // Page draws its own text, then invokes a form that draws more.
+        let (doc, p_id) = doc_with_form(
+            b"BT (PageText) Tj ET /Fm0 Do",
+            b"BT (FormText) Tj ET",
+            None,
+            None,
+        );
+        let result = extract_text_from_page_with_warnings(&doc, p_id);
+        assert!(result.text.contains("PageText"), "got: {:?}", result.text);
+        assert!(result.text.contains("FormText"), "got: {:?}", result.text);
+    }
+
+    #[test]
+    fn form_with_own_resources_decodes_via_its_font() {
+        // The form carries its own WinAnsi font; 0x96 (en dash) must decode
+        // through that font, proving the form's /Resources drive decoding.
+        let (doc, p_id) = doc_with_form(
+            b"/Fm0 Do",
+            b"BT /F1 12 Tf (\x96) Tj ET",
+            None,
+            Some(winansi_font()),
+        );
+        let result = extract_text_from_page_with_warnings(&doc, p_id);
+        assert!(
+            result.text.contains('\u{2013}'),
+            "form font should decode the en dash, got: {:?}",
+            result.text
+        );
+    }
+
+    #[test]
+    fn form_without_resources_inherits_page_fonts() {
+        // The form has no /Resources, so its `/F1 Tf` resolves against the
+        // page's WinAnsi font (PDF 32000-1 §7.8.3 inheritance).
+        let (doc, p_id) = doc_with_form(
+            b"/Fm0 Do",
+            b"BT /F1 12 Tf (\x96) Tj ET",
+            Some(winansi_font()),
+            None,
+        );
+        let result = extract_text_from_page_with_warnings(&doc, p_id);
+        assert!(
+            result.text.contains('\u{2013}'),
+            "form should inherit the page font, got: {:?}",
+            result.text
+        );
+    }
+
+    #[test]
+    fn form_fonts_contribute_to_reliability_verdict() {
+        // A CID-without-ToUnicode font lives only inside the form. The page's
+        // own content is reliable, but the form font must still drive the
+        // document verdict to Unreliable — text silently lived in the form.
+        let (doc, p_id) = doc_with_form(
+            b"/Fm0 Do",
+            b"BT /F1 12 Tf <0041> Tj ET",
+            None,
+            Some(type0_font()),
+        );
+        let result = extract_text_from_page_with_warnings(&doc, p_id);
+        let rec = result
+            .fonts
+            .iter()
+            .find(|f| f.name == "/F1")
+            .expect("form font record");
+        assert_eq!(rec.classification, Reliability::Unreliable);
+        let fonts = dedup_font_records(result.fonts.clone());
+        assert_eq!(
+            document_verdict(&fonts, result.total_codes, result.unmapped_codes),
+            Reliability::Unreliable
+        );
+    }
+
+    #[test]
+    fn image_xobject_do_is_ignored() {
+        // `Do` on a non-form (image) XObject must not recurse or crash.
+        let mut doc = Document::new();
+        let mut img_dict = Dictionary::new();
+        img_dict.set("Type", Object::Name(b"XObject".to_vec()));
+        img_dict.set("Subtype", Object::Name(b"Image".to_vec()));
+        img_dict.set("Width", Object::Integer(1));
+        img_dict.set("Height", Object::Integer(1));
+        let img_id = doc.add_object(Object::Stream(Stream::new(img_dict, vec![0u8; 4])));
+        let mut xobj = Dictionary::new();
+        xobj.set("Im0", Object::Reference(img_id));
+        let mut resources = Dictionary::new();
+        resources.set("XObject", Object::Dictionary(xobj));
+        let c_id = doc.add_object(Object::Stream(Stream::new(
+            Dictionary::new(),
+            b"BT (Page) Tj ET /Im0 Do".to_vec(),
+        )));
+        let mut page = Dictionary::new();
+        page.set("Type", Object::Name(b"Page".to_vec()));
+        page.set("Contents", Object::Reference(c_id));
+        page.set("Resources", Object::Dictionary(resources));
+        let p_id = doc.add_object(Object::Dictionary(page));
+        let result = extract_text_from_page_with_warnings(&doc, p_id);
+        assert_eq!(result.text, "Page");
+    }
+
+    #[test]
+    fn unknown_xobject_name_is_ignored() {
+        // `Do` naming an XObject absent from /Resources is a no-op.
+        let (doc, p_id) = doc_with_form(
+            b"BT (Page) Tj ET /Missing Do",
+            b"BT (Form) Tj ET",
+            None,
+            None,
+        );
+        let result = extract_text_from_page_with_warnings(&doc, p_id);
+        assert!(result.text.contains("Page"));
+        assert!(
+            !result.text.contains("Form"),
+            "unknown name must not pull in Fm0, got: {:?}",
+            result.text
+        );
+    }
+
+    #[test]
+    fn self_referential_form_does_not_loop() {
+        // A form that invokes itself via `Do` must terminate (cycle guard) and
+        // still extract its text exactly once.
+        let mut doc = Document::new();
+        let mut form_dict = Dictionary::new();
+        form_dict.set("Type", Object::Name(b"XObject".to_vec()));
+        form_dict.set("Subtype", Object::Name(b"Form".to_vec()));
+        let form_id = doc.add_object(Object::Stream(Stream::new(form_dict, Vec::new())));
+        // Now give the form a /Resources whose /Self points back at itself, and
+        // content that draws once then re-invokes itself.
+        if let Ok(Object::Stream(s)) = doc.get_object_mut(form_id) {
+            let mut self_xobj = Dictionary::new();
+            self_xobj.set("Self", Object::Reference(form_id));
+            let mut res = Dictionary::new();
+            res.set("XObject", Object::Dictionary(self_xobj));
+            s.dict.set("Resources", Object::Dictionary(res));
+            s.set_content(b"BT (Loop) Tj ET /Self Do".to_vec());
+        }
+        let mut xobj = Dictionary::new();
+        xobj.set("Fm0", Object::Reference(form_id));
+        let mut resources = Dictionary::new();
+        resources.set("XObject", Object::Dictionary(xobj));
+        let c_id = doc.add_object(Object::Stream(Stream::new(
+            Dictionary::new(),
+            b"/Fm0 Do".to_vec(),
+        )));
+        let mut page = Dictionary::new();
+        page.set("Type", Object::Name(b"Page".to_vec()));
+        page.set("Contents", Object::Reference(c_id));
+        page.set("Resources", Object::Dictionary(resources));
+        let p_id = doc.add_object(Object::Dictionary(page));
+        let result = extract_text_from_page_with_warnings(&doc, p_id);
+        assert_eq!(
+            result.text.matches("Loop").count(),
+            1,
+            "got: {:?}",
+            result.text
+        );
+    }
+
+    /// Build a one-page doc whose page invokes a chain of `n` nested form
+    /// XObjects: form 0 (drawn by the page) invokes form 1 via `/Next Do`, and so
+    /// on. Form `i` draws the literal `L{i}`. Returns (doc, page_id).
+    fn doc_with_form_chain(n: usize) -> (Document, ObjectId) {
+        let mut doc = Document::new();
+        let mut next_id: Option<ObjectId> = None;
+        for i in (0..n).rev() {
+            let mut form_dict = Dictionary::new();
+            form_dict.set("Type", Object::Name(b"XObject".to_vec()));
+            form_dict.set("Subtype", Object::Name(b"Form".to_vec()));
+            let content = if let Some(nid) = next_id {
+                let mut x = Dictionary::new();
+                x.set("Next", Object::Reference(nid));
+                let mut res = Dictionary::new();
+                res.set("XObject", Object::Dictionary(x));
+                form_dict.set("Resources", Object::Dictionary(res));
+                format!("BT (L{}) Tj ET /Next Do", i)
+            } else {
+                format!("BT (L{}) Tj ET", i)
+            };
+            next_id =
+                Some(doc.add_object(Object::Stream(Stream::new(form_dict, content.into_bytes()))));
+        }
+        let head = next_id.expect("at least one form");
+        let mut xobj = Dictionary::new();
+        xobj.set("Fm0", Object::Reference(head));
+        let mut resources = Dictionary::new();
+        resources.set("XObject", Object::Dictionary(xobj));
+        let c_id = doc.add_object(Object::Stream(Stream::new(
+            Dictionary::new(),
+            b"/Fm0 Do".to_vec(),
+        )));
+        let mut page = Dictionary::new();
+        page.set("Type", Object::Name(b"Page".to_vec()));
+        page.set("Contents", Object::Reference(c_id));
+        page.set("Resources", Object::Dictionary(resources));
+        let p_id = doc.add_object(Object::Dictionary(page));
+        (doc, p_id)
+    }
+
+    #[test]
+    fn nested_forms_within_depth_limit_all_extract() {
+        // A 3-deep chain (well under MAX_FORM_DEPTH) extracts every level.
+        let (doc, p_id) = doc_with_form_chain(3);
+        let result = extract_text_from_page_with_warnings(&doc, p_id);
+        assert!(result.text.contains("L0"));
+        assert!(result.text.contains("L1"));
+        assert!(result.text.contains("L2"));
+        assert!(
+            !result.warnings.iter().any(|w| w.contains("nesting")),
+            "no depth warning expected, got: {:?}",
+            result.warnings
+        );
+    }
+
+    #[test]
+    fn over_deep_form_nesting_is_capped_with_warning() {
+        // A chain deeper than MAX_FORM_DEPTH stops recursing: forms processed at
+        // depth 1..=MAX_FORM_DEPTH (forms 0..MAX_FORM_DEPTH-1) extract; deeper
+        // ones are omitted and a depth warning is surfaced.
+        let n = (MAX_FORM_DEPTH as usize) + 3;
+        let (doc, p_id) = doc_with_form_chain(n);
+        let result = extract_text_from_page_with_warnings(&doc, p_id);
+        let last_ok = MAX_FORM_DEPTH - 1;
+        assert!(
+            result.text.contains(&format!("L{}", last_ok)),
+            "deepest allowed form L{} should extract, got: {:?}",
+            last_ok,
+            result.text
+        );
+        assert!(
+            !result.text.contains(&format!("L{}", MAX_FORM_DEPTH)),
+            "form past the depth cap (L{}) must be omitted, got: {:?}",
+            MAX_FORM_DEPTH,
+            result.text
+        );
+        assert!(
+            result.warnings.iter().any(|w| w.contains("nesting")),
+            "a depth-cap warning is expected, got: {:?}",
+            result.warnings
+        );
     }
 }

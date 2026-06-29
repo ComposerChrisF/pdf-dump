@@ -12,7 +12,6 @@ Remaining accuracy improvements:
 
 - **Predefined CJK CMaps** — Support the Adobe-Japan1/GB1/CNS1/Korea1 CMap resource files for CID fonts that use them without an embedded ToUnicode.
 - **Coordinate-based text ordering** — Use `Tm`/`Td`/`TD` coordinates to sort text blocks top-to-bottom, left-to-right within a page, rather than pure content-stream order.
-- **Form XObject recursion** — Follow `Do` into form XObjects so text drawn inside forms is captured (currently only page-level content streams are read).
 
 ### Known limitations: the reliability verdict is static
 
@@ -29,6 +28,8 @@ When lopdf loads an encrypted PDF, it removes the `/Encrypt` entry from the trai
 ---
 
 ## Completed
+
+`--text` now follows `Do` into form XObjects, so text drawn inside a form is extracted instead of silently dropped — a page whose body lives entirely in a form previously extracted empty under a Reliable verdict.  `process_content` walks each form’s content stream recursively, builds a decoder table from the form’s own `/Resources` (inheriting the caller’s when the form has none, per PDF 32000-1 §7.8.3), and feeds the form’s fonts into the same reliability counters as the page.  A visited-set cycle guard (the active recursion stack) plus a `MAX_FORM_DEPTH` cap make self-referential and pathologically nested forms terminate; an over-deep chain emits a warning and stops.
 
 Font-aware `--text` now also resolves `/Encoding /Differences` glyph names to Unicode through the embedded Adobe Glyph List (plus the algorithmic `uniXXXX`/`uXXXXXX` forms, `.suffix` stripping, and underscore-joined ligature names), so simple fonts that remap codes without a `/ToUnicode` map decode correctly and classify Reliable.
 
