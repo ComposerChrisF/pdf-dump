@@ -270,9 +270,24 @@ pub(crate) fn extract_text_from_page_with_warnings(
     }
 }
 
+/// Append one decoded source code to `out` and update the coverage counters:
+/// every code counts toward `total`, and a code that renders as U+FFFD (the
+/// replacement character — nothing could be decoded for it) counts toward
+/// `unmapped`. Centralizing this keeps all decode paths counting identically so
+/// the `document_verdict` low-coverage downgrade is a usage-aware safety net for
+/// every font type, not just ToUnicode (see that function's note).
+fn push_code(out: &mut String, s: &str, total: &mut u64, unmapped: &mut u64) {
+    *total += 1;
+    if s == "\u{FFFD}" {
+        *unmapped += 1;
+    }
+    out.push_str(s);
+}
+
 /// Append a show-string to `out`, decoding it through the active font.
-/// Falls back to today's UTF-8-lossy passthrough when there is no decodable
-/// font, so already-working PDFs produce byte-identical output.
+/// Falls back to UTF-8-lossy passthrough when there is no decodable font, so
+/// already-working PDFs produce byte-identical output. Every path now feeds the
+/// `total`/`unmapped` coverage counters via `push_code`.
 fn emit_show_string(
     out: &mut String,
     bytes: &[u8],
@@ -283,14 +298,13 @@ fn emit_show_string(
     match font {
         Some(FontDecoder::ToUnicode { cmap, width }) => {
             for code in split_codes(bytes, *width) {
-                *total += 1;
-                match cmap.map_code(code) {
-                    Some(s) => out.push_str(&s),
-                    None => {
-                        out.push('\u{FFFD}');
-                        *unmapped += 1;
-                    }
-                }
+                let mapped = cmap.map_code(code);
+                push_code(
+                    out,
+                    mapped.as_deref().unwrap_or("\u{FFFD}"),
+                    total,
+                    unmapped,
+                );
             }
         }
         Some(FontDecoder::SimpleTable { decode, overrides }) => {
@@ -298,18 +312,28 @@ fn emit_show_string(
                 if let Some(s) = overrides.get(&b) {
                     // `/Differences` override (AGL-resolved, or U+FFFD if the
                     // glyph name was unresolvable).
-                    out.push_str(s);
+                    push_code(out, s, total, unmapped);
                 } else if let Some(f) = decode {
-                    out.push_str(f(b).unwrap_or("\u{FFFD}"));
+                    push_code(out, f(b).unwrap_or("\u{FFFD}"), total, unmapped);
                 } else {
                     // No recognized base table: single-byte UTF-8 passthrough,
                     // matching prior behavior for unrecognized-encoding fonts.
-                    out.push_str(&String::from_utf8_lossy(&[b]));
+                    push_code(out, &String::from_utf8_lossy(&[b]), total, unmapped);
                 }
             }
         }
-        // No active font, unknown font, or undecodable font: passthrough.
-        _ => out.push_str(&String::from_utf8_lossy(bytes)),
+        // No active font, unknown font, or undecodable font: passthrough. Count
+        // per emitted scalar (U+FFFD for each byte the lossy decode could not
+        // render) while preserving byte-identical output.
+        _ => {
+            for ch in String::from_utf8_lossy(bytes).chars() {
+                *total += 1;
+                if ch == '\u{FFFD}' {
+                    *unmapped += 1;
+                }
+                out.push(ch);
+            }
+        }
     }
 }
 
@@ -875,17 +899,16 @@ fn dedup_font_records(records: Vec<FontReliabilityRecord>) -> Vec<FontReliabilit
     out
 }
 
-/// Worst per-font classification, bumped to `Degraded` if too many codes went
-/// unmapped during ToUnicode decoding.
+/// Worst per-font classification, bumped to `Degraded` when too many of the
+/// codes the content actually showed went unmapped (rendered as U+FFFD).
 ///
-/// KNOWN LIMITATION (the coverage net only watches ToUnicode): `total`/`unmapped`
-/// are incremented solely in the ToUnicode branch of `emit_show_string`. The
-/// U+FFFD that a base-table miss or a byte passthrough emits is invisible here,
-/// so a WinAnsi/MacRoman/Standard simple font (or a passthrough font) can emit a
-/// flood of replacement characters and never trip this >20% downgrade — the
-/// dynamic safety net that protects ToUnicode fonts has no equivalent for
-/// table/passthrough fonts, leaving only the coarser static per-font verdict.
-/// See docs/ROADMAP.md ("Known limitations").
+/// The `total`/`unmapped` counters are fed by every decode path in
+/// `emit_show_string` (ToUnicode, base-table `SimpleTable`, `/Differences`
+/// overrides, and passthrough), so this is a usage-aware safety net for all font
+/// types: a statically-`Reliable` font that nonetheless emits a flood of
+/// replacement characters on the bytes the document really uses is downgraded
+/// here. The net only ever lowers `Reliable` to `Degraded`; it never reaches
+/// `Unreliable` and never upgrades.
 fn document_verdict(fonts: &[FontReliabilityRecord], total: u64, unmapped: u64) -> Reliability {
     let mut verdict = Reliability::Reliable;
     for f in fonts {
@@ -1603,7 +1626,9 @@ mod tests {
         let p_id = doc.add_object(Object::Dictionary(page));
         let result = extract_text_from_page_with_warnings(&doc, p_id);
         assert_eq!(result.text, "Plain");
-        assert_eq!(result.total_codes, 0);
+        // Passthrough now feeds the coverage counters: 5 ASCII bytes, all mapped.
+        assert_eq!(result.total_codes, 5);
+        assert_eq!(result.unmapped_codes, 0);
     }
 
     #[test]
@@ -1724,5 +1749,103 @@ mod tests {
         assert_eq!(value["reliability"]["verdict"], "unreliable");
         assert!(value["reliability"]["fonts"].is_array());
         assert!(had_issues, "unreliable extraction should flag had_issues");
+    }
+
+    // --- Universal decode coverage (Phase 1) -------------------------------
+
+    /// Build a single-byte WinAnsi simple font (statically Reliable: recognized
+    /// base encoding, no /Differences).
+    fn winansi_font() -> Dictionary {
+        let mut font = Dictionary::new();
+        font.set("Type", Object::Name(b"Font".to_vec()));
+        font.set("Subtype", Object::Name(b"Type1".to_vec()));
+        font.set("BaseFont", Object::Name(b"ABCDEF+Body".to_vec()));
+        font.set("Encoding", Object::Name(b"WinAnsiEncoding".to_vec()));
+        font
+    }
+
+    #[test]
+    fn simple_table_unmapped_codes_feed_coverage() {
+        // 0x81 is an unassigned CP1252 slot (winansi -> None), so it emits
+        // U+FFFD and now counts toward total/unmapped — previously invisible.
+        let (doc, p_id) = doc_with_font(winansi_font(), None, b"BT /F1 12 Tf (A\x81) Tj ET");
+        let result = extract_text_from_page_with_warnings(&doc, p_id);
+        assert_eq!(result.text, "A\u{FFFD}");
+        assert_eq!(result.total_codes, 2);
+        assert_eq!(result.unmapped_codes, 1);
+    }
+
+    #[test]
+    fn passthrough_invalid_utf8_counts_as_unmapped() {
+        // No font resources: passthrough. 0xFF is invalid UTF-8 -> U+FFFD, and
+        // now contributes to the coverage counters.
+        let mut doc = Document::new();
+        let c = Stream::new(Dictionary::new(), b"BT (A\xFFB) Tj ET".to_vec());
+        let c_id = doc.add_object(Object::Stream(c));
+        let mut page = Dictionary::new();
+        page.set("Type", Object::Name(b"Page".to_vec()));
+        page.set("Contents", Object::Reference(c_id));
+        let p_id = doc.add_object(Object::Dictionary(page));
+        let result = extract_text_from_page_with_warnings(&doc, p_id);
+        assert_eq!(result.text, "A\u{FFFD}B");
+        assert_eq!(result.total_codes, 3);
+        assert_eq!(result.unmapped_codes, 1);
+    }
+
+    #[test]
+    fn simple_table_high_unmapped_ratio_downgrades_to_degraded() {
+        // A statically-Reliable WinAnsi font whose shown codes are mostly
+        // undecodable (4 of 5 -> 80% > 20%) is downgraded to Degraded by the
+        // now-universal coverage net.
+        let (doc, p_id) = doc_with_font(
+            winansi_font(),
+            None,
+            b"BT /F1 12 Tf (A\x81\x81\x81\x81) Tj ET",
+        );
+        let result = extract_text_from_page_with_warnings(&doc, p_id);
+        // The font itself is statically Reliable...
+        let rec = result.fonts.iter().find(|f| f.name == "/F1").expect("F1");
+        assert_eq!(rec.classification, Reliability::Reliable);
+        // ...but the document verdict drops on coverage.
+        let fonts = dedup_font_records(result.fonts.clone());
+        assert!(result.unmapped_codes * 5 > result.total_codes); // >20%
+        assert_eq!(
+            document_verdict(&fonts, result.total_codes, result.unmapped_codes),
+            Reliability::Degraded
+        );
+    }
+
+    #[test]
+    fn base_less_differences_self_corrects_via_coverage() {
+        // Limitation #1: a /Differences font whose names all resolve (statically
+        // Reliable) but with NO recognized base encoding. When the content shows
+        // non-overridden high bytes, they passthrough to U+FFFD and the coverage
+        // net now downgrades the document to Degraded.
+        let diffs = vec![Object::Integer(0x80), Object::Name(b"bullet".to_vec())];
+        let font = type1_font_with_differences(None, diffs);
+        let (doc, p_id) = doc_with_font(font, None, b"BT /F1 12 Tf (\x81\x82\x83\x84) Tj ET");
+        let result = extract_text_from_page_with_warnings(&doc, p_id);
+        let rec = result.fonts.iter().find(|f| f.name == "/F1").expect("F1");
+        assert_eq!(rec.classification, Reliability::Reliable);
+        let fonts = dedup_font_records(result.fonts.clone());
+        assert_eq!(result.unmapped_codes, 4);
+        assert_eq!(
+            document_verdict(&fonts, result.total_codes, result.unmapped_codes),
+            Reliability::Degraded
+        );
+    }
+
+    #[test]
+    fn mostly_ascii_table_font_stays_reliable() {
+        // Guard against false downgrades: ordinary ASCII text through a table
+        // font has a 0% unmapped ratio and stays Reliable.
+        let (doc, p_id) = doc_with_font(winansi_font(), None, b"BT /F1 12 Tf (Hello World) Tj ET");
+        let result = extract_text_from_page_with_warnings(&doc, p_id);
+        assert_eq!(result.unmapped_codes, 0);
+        let fonts = dedup_font_records(result.fonts.clone());
+        assert_eq!(
+            document_verdict(&fonts, result.total_codes, result.unmapped_codes),
+            Reliability::Reliable
+        );
     }
 }
