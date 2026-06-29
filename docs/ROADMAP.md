@@ -14,6 +14,12 @@ Remaining accuracy improvements:
 - **Coordinate-based text ordering** — Use `Tm`/`Td`/`TD` coordinates to sort text blocks top-to-bottom, left-to-right within a page, rather than pure content-stream order.
 - **Form XObject recursion** — Follow `Do` into form XObjects so text drawn inside forms is captured (currently only page-level content streams are read).
 
+### Known limitation: usage-aware reliability for base-less `/Differences` fonts
+
+The `/Differences` reliability verdict is **static** — it weighs only whether the glyph _names_ resolved through the Adobe Glyph List, not which character codes the content actually shows.  When a `/Differences` font has no recognized base `/Encoding` (so non-overridden codes fall to single-byte passthrough, accurate only for ASCII), it is still reported **Reliable** on the strength of its resolved names alone.  A non-ASCII, non-overridden byte in such a font would then extract as U+FFFD under a “reliable” banner.
+
+This is a deliberate trade-off: the common real case is a recognized base encoding _plus_ `/Differences`, where the verdict is genuinely correct, and the base-less case is rare.  Revisiting would mean a _usage-aware_ verdict that downgrades a base-less font to Degraded once the content shows a code outside its override map.  The decision is anchored in `build_font_decoder` in `src/text.rs` (search `KNOWN LIMITATION`).
+
 ## lopdf upstream: preserve encrypt dict
 
 When lopdf loads an encrypted PDF, it removes the `/Encrypt` entry from the trailer and deletes the encrypt dictionary object from `doc.objects`, leaving dangling references in XRef stream objects.  This forces downstream tools to use workarounds to detect encryption after loading.

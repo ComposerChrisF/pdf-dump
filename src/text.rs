@@ -441,6 +441,20 @@ fn build_font_decoder(
             // Overridden codes decode via AGL; the rest via `base` (or, when no
             // base is recognized, byte passthrough). All names resolving is
             // Reliable; any unresolved name degrades the verdict.
+            //
+            // KNOWN LIMITATION (verdict can over-claim): the classification is
+            // static — it considers only whether the /Differences *names*
+            // resolved, not which codes the content actually shows. When
+            // `base` is `None` (a /Differences font with no recognized base
+            // encoding), every *non*-overridden code falls to single-byte
+            // passthrough, which is correct only for ASCII. Such a font is
+            // still reported Reliable on the strength of its /Differences names
+            // alone, so a non-ASCII non-overridden byte would extract as U+FFFD
+            // under a "reliable" banner. This is the documented trade-off (the
+            // common real case is a recognized base + /Differences, where it is
+            // genuinely reliable); revisiting would mean a usage-aware verdict
+            // that downgrades when a base-less font shows codes outside its
+            // override map. See docs/ROADMAP.md and the project memory note.
             let (classification, reason) = if diff.unresolved == 0 {
                 (Reliability::Reliable, String::new())
             } else {
