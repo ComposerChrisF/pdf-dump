@@ -123,8 +123,9 @@ Exit codes:
   2   Argument parse error (clap; e.g. unknown flag, missing required arg)
   3   Tool ran successfully but the input had problems
       (--validate found errors, --page was out of range, --text extraction
-       was unreliable: a CID/Type0 font without a ToUnicode map, or --strict
-       detected a malformed stream /Length)
+       was unreliable: a CID/Type0 font without a ToUnicode map, --strict
+       detected a malformed stream /Length, or the PDF is encrypted and could
+       not be decrypted — supply --password to read it)
 ")]
 pub(crate) struct Args {
     /// Path to the PDF file
@@ -223,6 +224,10 @@ pub(crate) struct Args {
     /// instead report them and exit 3, as a spec-conformant reader would
     #[arg(long, help_heading = "Modifiers")]
     pub strict: bool,
+
+    /// Password to decrypt an encrypted PDF (the user or owner password)
+    #[arg(long, help_heading = "Modifiers")]
+    pub password: Option<String>,
 
     /// Decode and print the content of streams (also enables decoded byte counts in overview)
     #[arg(long, help_heading = "Modifiers")]

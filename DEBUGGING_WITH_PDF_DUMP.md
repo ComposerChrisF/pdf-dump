@@ -96,7 +96,9 @@ Add `--json` to any mode.  All schemas below show the structure of a single mode
 ### Mode-specific schemas
 
 **Overview** (`pdf-dump f.pdf --json`):
-`{version, object_count, page_count, encrypted, info: {Title, Author, ...}, catalog: {PageLayout, ...}, object_types: {dictionaries: N, streams: N, ...}, validation: {error_count, warning_count, info_count, issues: [{level, message}]}, streams: {count, total_bytes, total_decoded_bytes, filters: {name: N}, largest: [{object_number, bytes}]}, features: {bookmark_count, form_field_count, layer_count, embedded_file_count, page_labels: bool, tagged_structure: bool}}`
+`{version, object_count, page_count, encrypted, decrypted?, info: {Title, Author, ...}, catalog: {PageLayout, ...}, object_types: {dictionaries: N, streams: N, ...}, validation: {error_count, warning_count, info_count, issues: [{level, message}]}, streams: {count, total_bytes, total_decoded_bytes, filters: {name: N}, largest: [{object_number, bytes}]}, features: {bookmark_count, form_field_count, layer_count, embedded_file_count, page_labels: bool, tagged_structure: bool}}`
+
+`encrypted` is authoritative (set from the trailer `/Encrypt` as well as lopdf’s decryption state).  `decrypted` is present only when `encrypted` is true: `false` means the file is password-protected and was not decrypted — `object_count`/`page_count`/`streams` are then incomplete, a validation warning is recorded, a loud banner prints to **stderr**, and the tool exits **3**.  Supply `--password <PASSWORD>` (user or owner password) to decrypt and read it fully; a wrong password exits **1**.
 
 **Page info** (`--page N --json`):
 `{pages: [{page_number, object_number, generation, media_box, crop_box, rotate, fonts: [str], image_count, ext_gstate_count, annotation_count, annotation_subtypes: [{subtype, count}], content_stream_count, content_stream_bytes, text, resources: {fonts, xobjects, ext_gstate, color_spaces}, text_extractable?}]}`

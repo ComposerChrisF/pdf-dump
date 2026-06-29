@@ -90,11 +90,22 @@ pub fn run() {
         }
     }
 
-    let mut doc = match Document::load(&args.file) {
+    // `Document::load` auto-decrypts only with the empty password. When the user
+    // supplies one, route through the password-aware loader so encrypted PDFs can
+    // actually be read; a wrong password makes lopdf return an error (exit 1).
+    let load_result = match &args.password {
+        Some(pw) => Document::load_with_password(&args.file, pw),
+        None => Document::load(&args.file),
+    };
+    let mut doc = match load_result {
         Ok(doc) => doc,
         Err(e) => {
             eprintln!("Error: Failed to load PDF file '{}'.", args.file.display());
-            eprintln!("Reason: {}", e);
+            if args.password.is_some() {
+                eprintln!("Reason: {} (the supplied --password may be incorrect)", e);
+            } else {
+                eprintln!("Reason: {}", e);
+            }
             std::process::exit(1);
         }
     };
@@ -131,6 +142,22 @@ pub fn run() {
                 recovery_json = Some(recover::recovery_json_value(&recoveries, true, false));
             }
         }
+    }
+
+    // Encrypted-but-undecrypted: when a PDF needs a password we didn't supply (or
+    // supplied wrong), lopdf returns Ok with a DEGRADED document — only the
+    // /Encrypt dict is parsed, `encryption_state` stays None, and /Encrypt stays in
+    // the trailer (lopdf's `is_encrypted()` is true only while that survives, i.e.
+    // before a successful decrypt). Detect it so we never present the collapsed
+    // object graph (object_count/page_count/streams) as authoritative: warn loudly
+    // on stderr for every mode and force exit 3. A correct --password decrypts the
+    // document, so this stays false and the run exits 0.
+    let encrypted_undecrypted = doc.is_encrypted() && doc.encryption_state.is_none();
+    if encrypted_undecrypted {
+        eprint!(
+            "{}",
+            security::encryption_warning_banner(&doc, Some(&args.file))
+        );
     }
 
     let config = DumpConfig {
@@ -172,7 +199,7 @@ pub fn run() {
         ),
     };
 
-    if had_issues || strict_malformed {
+    if had_issues || strict_malformed || encrypted_undecrypted {
         std::process::exit(3);
     }
 }

@@ -41,6 +41,45 @@ fn decode_permissions(p: i64) -> BTreeMap<String, bool> {
     perms
 }
 
+/// Build the loud stderr banner for an encrypted PDF that could not be
+/// decrypted (no/incorrect password). Reuses `collect_security` to name the
+/// algorithm/version and the `/Encrypt` object — the same data `--detail
+/// security` reports correctly even when the overview's object graph collapsed.
+pub(crate) fn encryption_warning_banner(doc: &Document, file_path: Option<&Path>) -> String {
+    let info = collect_security(doc, file_path);
+    let bar = "=".repeat(60);
+    let rule = "-".repeat(60);
+    let detail = if info.encrypted {
+        let obj = info
+            .encrypt_object
+            .map(|n| format!("; /Encrypt is object {}", n))
+            .unwrap_or_default();
+        format!(
+            "{}, V{} R{}{}",
+            info.algorithm, info.version, info.revision, obj
+        )
+    } else {
+        "standard security handler".to_string()
+    };
+    let mut s = String::new();
+    s.push_str(&bar);
+    s.push('\n');
+    s.push_str("[WARN] ENCRYPTED PDF — NOT DECRYPTED\n");
+    s.push_str(&rule);
+    s.push('\n');
+    s.push_str(&format!(
+        "  This document is encrypted ({}) and pdf-dump could not\n",
+        detail
+    ));
+    s.push_str("  decrypt it: no password, or an incorrect one, was supplied.\n");
+    s.push_str("  Only the /Encrypt dictionary could be read, so object, page,\n");
+    s.push_str("  and stream counts are INCOMPLETE and must not be trusted.\n");
+    s.push_str("  Re-run with --password <PASSWORD> to read this file. Exit code: 3.\n");
+    s.push_str(&bar);
+    s.push('\n');
+    s
+}
+
 pub(crate) fn collect_security(doc: &Document, file_path: Option<&Path>) -> SecurityInfo {
     // Try trailer first (works for traditional xref tables)
     let encrypt_ref = doc.trailer.get(b"Encrypt").ok().and_then(|v| match v {

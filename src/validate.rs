@@ -48,6 +48,23 @@ pub(crate) fn validate_pdf(
     cached_pages: Option<&BTreeMap<u32, ObjectId>>,
 ) -> ValidationReport {
     let mut issues = Vec::new();
+
+    // Encrypted-but-undecrypted: lopdf returns a degraded document (only the
+    // /Encrypt dict is parsed) when a password-protected PDF is opened without a
+    // correct password. Surface it as a warning so both --validate and the
+    // overview's validation block flag that counts and structural checks are
+    // incomplete — otherwise the degraded read looks clean. lopdf's is_encrypted()
+    // is true only while /Encrypt survives in the trailer, i.e. before a
+    // successful decrypt.
+    if doc.is_encrypted() {
+        issues.push(ValidationIssue {
+            level: ValidationLevel::Warn,
+            message: "Document is encrypted and was not decrypted; object/page/stream \
+                      counts and structural checks are incomplete (supply --password)."
+                .to_string(),
+        });
+    }
+
     let xref_ids = collect_xref_stream_ids(doc);
     let owned_pages;
     let pages = match cached_pages {

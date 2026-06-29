@@ -2786,3 +2786,217 @@ fn strict_on_clean_pdf_exits_0() {
         String::from_utf8_lossy(&output.stderr)
     );
 }
+
+// ── Encrypted PDFs: overview correctness + --password ────────────────
+
+/// Build a single-page PDF encrypted with V1 (RC4) and a NON-empty user
+/// password, written to a temp file. Opened without the password it reproduces
+/// the degraded-load bug; with `--password` it should read fully.
+fn create_encrypted_pdf(user_password: &str) -> tempfile::NamedTempFile {
+    use lopdf::{EncryptionState, EncryptionVersion, Permissions, StringFormat};
+
+    let mut doc = Document::new();
+
+    let content = Stream::new(
+        Dictionary::new(),
+        b"BT\n/F1 12 Tf\n(Secret) Tj\nET".to_vec(),
+    );
+    let content_id = doc.add_object(Object::Stream(content));
+
+    let mut font = Dictionary::new();
+    font.set("Type", Object::Name(b"Font".to_vec()));
+    font.set("Subtype", Object::Name(b"Type1".to_vec()));
+    font.set("BaseFont", Object::Name(b"Helvetica".to_vec()));
+    let font_id = doc.add_object(Object::Dictionary(font));
+
+    let mut f1 = Dictionary::new();
+    f1.set("F1", Object::Reference(font_id));
+    let mut resources = Dictionary::new();
+    resources.set("Font", Object::Dictionary(f1));
+
+    let mut page = Dictionary::new();
+    page.set("Type", Object::Name(b"Page".to_vec()));
+    page.set("Contents", Object::Reference(content_id));
+    page.set("Resources", Object::Dictionary(resources));
+    page.set(
+        "MediaBox",
+        Object::Array(vec![
+            Object::Integer(0),
+            Object::Integer(0),
+            Object::Integer(612),
+            Object::Integer(792),
+        ]),
+    );
+    let page_id = doc.add_object(Object::Dictionary(page));
+
+    let mut pages = Dictionary::new();
+    pages.set("Type", Object::Name(b"Pages".to_vec()));
+    pages.set("Kids", Object::Array(vec![Object::Reference(page_id)]));
+    pages.set("Count", Object::Integer(1));
+    let pages_id = doc.add_object(Object::Dictionary(pages));
+
+    if let Ok(Object::Dictionary(d)) = doc.get_object_mut(page_id) {
+        d.set("Parent", Object::Reference(pages_id));
+    }
+
+    let mut catalog = Dictionary::new();
+    catalog.set("Type", Object::Name(b"Catalog".to_vec()));
+    catalog.set("Pages", Object::Reference(pages_id));
+    let catalog_id = doc.add_object(Object::Dictionary(catalog));
+    doc.trailer.set("Root", Object::Reference(catalog_id));
+
+    // File ID is required for encryption.
+    doc.trailer.set(
+        "ID",
+        Object::Array(vec![
+            Object::String(vec![1u8; 16], StringFormat::Hexadecimal),
+            Object::String(vec![1u8; 16], StringFormat::Hexadecimal),
+        ]),
+    );
+
+    let state = EncryptionState::try_from(EncryptionVersion::V1 {
+        document: &doc,
+        owner_password: "owner",
+        user_password,
+        permissions: Permissions::all(),
+    })
+    .expect("failed to build encryption state");
+    doc.encrypt(&state).expect("failed to encrypt document");
+
+    let mut tmp = tempfile::NamedTempFile::new().unwrap();
+    doc.save_to(&mut tmp).unwrap();
+    tmp.flush().unwrap();
+    tmp
+}
+
+#[test]
+fn encrypted_pdf_overview_reports_encrypted_and_exits_3() {
+    let pdf = create_encrypted_pdf("secret");
+    let output = Command::new(binary_path())
+        .arg(pdf.path())
+        .arg("--json")
+        .output()
+        .expect("failed to execute binary");
+
+    assert_eq!(
+        output.status.code(),
+        Some(3),
+        "encrypted-but-undecrypted overview must exit 3"
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("ENCRYPTED PDF") && stderr.contains("NOT DECRYPTED"),
+        "loud encryption banner expected on stderr: {}",
+        stderr
+    );
+    let parsed: serde_json::Value =
+        serde_json::from_str(&String::from_utf8_lossy(&output.stdout)).expect("valid json");
+    assert_eq!(parsed["encrypted"], serde_json::json!(true));
+    assert_eq!(parsed["decrypted"], serde_json::json!(false));
+    assert!(parsed["validation"]["warning_count"].as_u64().unwrap() >= 1);
+}
+
+#[test]
+fn encrypted_overview_agrees_with_detail_security() {
+    // Regression tie (bug report test plan #2): json.encrypted must equal what
+    // --detail security reports — the two paths must never contradict.
+    let pdf = create_encrypted_pdf("secret");
+
+    let json_out = Command::new(binary_path())
+        .arg(pdf.path())
+        .arg("--json")
+        .output()
+        .expect("failed to execute binary");
+    let parsed: serde_json::Value =
+        serde_json::from_str(&String::from_utf8_lossy(&json_out.stdout)).expect("valid json");
+
+    let sec_out = Command::new(binary_path())
+        .arg(pdf.path())
+        .arg("--detail")
+        .arg("security")
+        .output()
+        .expect("failed to execute binary");
+    let security_says_encrypted =
+        String::from_utf8_lossy(&sec_out.stdout).contains("Encryption: Yes");
+
+    assert_eq!(
+        parsed["encrypted"],
+        serde_json::json!(security_says_encrypted)
+    );
+    assert!(
+        security_says_encrypted,
+        "security detail should report this fixture as encrypted"
+    );
+}
+
+#[test]
+fn encrypted_pdf_with_correct_password_reads_fully() {
+    let pdf = create_encrypted_pdf("secret");
+    let output = Command::new(binary_path())
+        .arg(pdf.path())
+        .arg("--password")
+        .arg("secret")
+        .arg("--json")
+        .output()
+        .expect("failed to execute binary");
+
+    assert!(
+        output.status.success(),
+        "the correct --password should exit 0: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let parsed: serde_json::Value =
+        serde_json::from_str(&String::from_utf8_lossy(&output.stdout)).expect("valid json");
+    assert_eq!(parsed["encrypted"], serde_json::json!(true));
+    assert_eq!(parsed["decrypted"], serde_json::json!(true));
+    assert!(
+        parsed["object_count"].as_u64().unwrap() > 1,
+        "full object set expected after decrypt"
+    );
+    assert_eq!(parsed["page_count"], serde_json::json!(1));
+}
+
+#[test]
+fn encrypted_pdf_with_wrong_password_exits_1() {
+    let pdf = create_encrypted_pdf("secret");
+    let output = Command::new(binary_path())
+        .arg(pdf.path())
+        .arg("--password")
+        .arg("nope")
+        .arg("--json")
+        .output()
+        .expect("failed to execute binary");
+
+    assert_eq!(
+        output.status.code(),
+        Some(1),
+        "a wrong --password must exit 1, not silently degrade"
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.to_lowercase().contains("password"),
+        "the error should mention the password: {}",
+        stderr
+    );
+}
+
+#[test]
+fn plain_pdf_overview_has_no_decrypted_key() {
+    // Control: a non-encrypted file is unchanged — encrypted:false, no decrypted
+    // key, exit 0.
+    let pdf = create_minimal_pdf();
+    let output = Command::new(binary_path())
+        .arg(pdf.path())
+        .arg("--json")
+        .output()
+        .expect("failed to execute binary");
+
+    assert!(output.status.success());
+    let parsed: serde_json::Value =
+        serde_json::from_str(&String::from_utf8_lossy(&output.stdout)).expect("valid json");
+    assert_eq!(parsed["encrypted"], serde_json::json!(false));
+    assert!(
+        parsed.get("decrypted").is_none(),
+        "a non-encrypted PDF must not add a decrypted key"
+    );
+}

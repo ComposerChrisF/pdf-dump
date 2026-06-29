@@ -82,6 +82,10 @@ pdf-dump is a tolerant reader by default.  When a content stream declares a wron
 
 Pass `--strict` to invert this: pdf-dump detects the malformation, refuses to repair it (so the affected content stays missing, exactly as a spec-conformant reader would see it), still emits the `recovery` object with `repaired: false`, and exits **3** — a hard gate for CI or any caller that must treat a malformed PDF as a failure.
 
+### Encrypted PDFs (and `--password`)
+
+pdf-dump reads PDFs encrypted with the empty password automatically.  For a PDF protected by a non-empty password, supply it with `--password <PASSWORD>` (the user or owner password); pdf-dump then decrypts and reports everything normally.  Without the correct password it cannot read the body, so it never presents the collapsed counts of a locked file as authoritative: the overview reports `encrypted: true`, adds `decrypted: false`, prints a loud stderr banner naming the algorithm, records a validation warning, and exits **3**.  A wrong `--password` exits **1**.
+
 ### Standalone modes (one at a time)
 
 | Flag | Description |

@@ -189,7 +189,13 @@ pub(crate) fn metadata_info(
 // ── Shared helpers for overview ──────────────────────────────────────
 
 fn is_encrypted(doc: &Document) -> bool {
-    doc.encryption_state.is_some()
+    // Authoritative across all states. `encryption_state` is Some only after a
+    // successful decrypt — which also removes /Encrypt from the trailer, so
+    // lopdf's `is_encrypted()` is then false. The trailer /Encrypt (what
+    // `is_encrypted()` checks) survives when the document is encrypted but NOT
+    // decrypted (e.g. a password-protected file with no/incorrect password).
+    // Either signal alone misses one of those states.
+    doc.encryption_state.is_some() || doc.is_encrypted()
 }
 
 fn count_object_types(doc: &Document) -> BTreeMap<&str, usize> {
@@ -269,11 +275,20 @@ pub(crate) fn print_overview(writer: &mut impl Write, doc: &Document, decode: bo
     wln!(writer, "Pages:       {}", pages.len());
 
     let encrypted = is_encrypted(doc);
-    wln!(
-        writer,
-        "Encrypted:   {}",
-        if encrypted { "yes" } else { "no" }
-    );
+    if encrypted && doc.is_encrypted() {
+        // Encrypted but not decrypted (no/incorrect password): the Objects/Pages
+        // counts above are incomplete — only the /Encrypt dict was read.
+        wln!(
+            writer,
+            "Encrypted:   yes (NOT decrypted — supply --password; counts above are incomplete)"
+        );
+    } else {
+        wln!(
+            writer,
+            "Encrypted:   {}",
+            if encrypted { "yes" } else { "no" }
+        );
+    }
 
     // /Info fields and catalog properties
     let (info, catalog) = metadata_info(doc);
@@ -444,7 +459,7 @@ pub(crate) fn overview_json_value(doc: &Document, decode: bool) -> Value {
     let has_page_labels = !collect_page_labels(doc).is_empty();
     let (has_tags, _) = collect_structure_tree(doc);
 
-    let output = json!({
+    let mut output = json!({
         "version": doc.version,
         "object_count": doc.objects.len(),
         "page_count": pages.len(),
@@ -475,6 +490,13 @@ pub(crate) fn overview_json_value(doc: &Document, decode: bool) -> Value {
             "tagged_structure": has_tags,
         },
     });
+    // When encrypted, expose whether it was actually decrypted. A degraded
+    // (encrypted-but-undecrypted) load leaves lopdf's is_encrypted() true, so the
+    // object/page/stream counts above are incomplete; consumers can gate on
+    // `encrypted && !decrypted`. Omitted entirely for non-encrypted files.
+    if encrypted && let Some(map) = output.as_object_mut() {
+        map.insert("decrypted".to_string(), json!(!doc.is_encrypted()));
+    }
     output
 }
 
@@ -486,6 +508,40 @@ mod tests {
     use lopdf::{Dictionary, Stream, StringFormat};
     use pretty_assertions::assert_eq;
     use serde_json::Value;
+
+    #[test]
+    fn overview_flags_encrypted_but_undecrypted() {
+        // Synthetic degraded state: trailer /Encrypt resolves to an Encrypt dict,
+        // but encryption_state is None (decryption never happened). The overview
+        // must report encrypted:true and decrypted:false rather than trusting the
+        // collapsed object graph.
+        let mut doc = Document::new();
+        let mut enc = Dictionary::new();
+        enc.set("Filter", Object::Name(b"Standard".to_vec()));
+        enc.set("V", Object::Integer(4));
+        enc.set("R", Object::Integer(4));
+        enc.set("Length", Object::Integer(128));
+        enc.set("P", Object::Integer(-4));
+        let enc_id = doc.add_object(Object::Dictionary(enc));
+        doc.trailer.set("Encrypt", Object::Reference(enc_id));
+
+        assert!(doc.encryption_state.is_none());
+        let v = overview_json_value(&doc, false);
+        assert_eq!(v["encrypted"], true);
+        assert_eq!(v["decrypted"], false);
+    }
+
+    #[test]
+    fn overview_plain_doc_is_not_encrypted_and_omits_decrypted() {
+        let mut doc = Document::new();
+        doc.objects.insert((1, 0), Object::Integer(42));
+        let v = overview_json_value(&doc, false);
+        assert_eq!(v["encrypted"], false);
+        assert!(
+            v.get("decrypted").is_none(),
+            "non-encrypted overview must omit the decrypted key"
+        );
+    }
 
     #[test]
     fn print_list_shows_version_and_count() {

@@ -260,3 +260,92 @@ fn lopdf_puts_xref_streams_in_objects_for_external_pdfs() {
          The collect_xref_stream_ids() workaround in validate.rs may be removable."
     );
 }
+
+// ── Canary: encrypted PDF with a NON-empty password (the degraded load) ──────
+//
+// These guard the encrypted-overview fix (v0.23.0). lopdf's `load` auto-decrypts
+// only with the empty password; a password-protected file opened without the
+// password returns a DEGRADED Ok document. pdf-dump depends on that exact
+// signature in `lib.rs` (encrypted_undecrypted detection → exit 3) and
+// `summary.rs::is_encrypted` (= encryption_state.is_some() || doc.is_encrypted()).
+
+/// Encrypt `doc` with V1 (RC4 40-bit) and a NON-empty user password, returning
+/// the serialized bytes (not reloaded) so the caller chooses how to reopen it.
+fn encrypt_to_bytes(mut doc: Document, user_password: &str) -> Vec<u8> {
+    let state = EncryptionState::try_from(EncryptionVersion::V1 {
+        document: &doc,
+        owner_password: "owner",
+        user_password,
+        permissions: Permissions::all(),
+    })
+    .expect("failed to create encryption state");
+    doc.encrypt(&state).expect("failed to encrypt document");
+    let mut buf = Vec::new();
+    doc.save_to(&mut buf)
+        .expect("failed to save encrypted document");
+    buf
+}
+
+#[test]
+fn lopdf_degrades_on_missing_password() {
+    // A non-empty user password with none supplied: lopdf returns Ok with only
+    // the /Encrypt dict parsed, encryption_state None, and /Encrypt still in the
+    // trailer (is_encrypted() true). If this changes, revisit the encryption
+    // detection in summary.rs/lib.rs.
+    let bytes = encrypt_to_bytes(build_minimal_doc(), "secret");
+    let loaded =
+        Document::load_mem(&bytes).expect("load without a password should still return Ok");
+
+    assert_eq!(
+        loaded.objects.len(),
+        1,
+        "lopdf changed: a password-required PDF loaded without a password no longer \
+         collapses to just the /Encrypt dict."
+    );
+    assert!(
+        loaded.encryption_state.is_none(),
+        "lopdf changed: encryption_state is now Some after a FAILED decrypt."
+    );
+    assert!(
+        loaded.trailer.get(b"Encrypt").is_ok(),
+        "lopdf changed: /Encrypt no longer survives in the trailer after a failed decrypt."
+    );
+    assert!(
+        loaded.is_encrypted(),
+        "lopdf changed: is_encrypted() is no longer true for an undecrypted document."
+    );
+}
+
+#[test]
+fn lopdf_loads_fully_with_correct_password() {
+    // The --password fix path: the correct password runs the full decrypt — all
+    // objects present, encryption_state Some, and /Encrypt removed from the
+    // trailer (is_encrypted() false).
+    let bytes = encrypt_to_bytes(build_minimal_doc(), "secret");
+    let loaded = Document::load_mem_with_password(&bytes, "secret")
+        .expect("load_mem_with_password with the correct password should succeed");
+
+    assert!(
+        loaded.objects.len() > 1,
+        "expected the full object set after a successful decrypt, got {}",
+        loaded.objects.len()
+    );
+    assert!(
+        loaded.encryption_state.is_some(),
+        "encryption_state should be Some after a successful decrypt."
+    );
+    assert!(
+        !loaded.is_encrypted(),
+        "lopdf removes /Encrypt from the trailer after a successful decrypt."
+    );
+}
+
+#[test]
+fn lopdf_load_with_wrong_password_errors() {
+    // A wrong password must error (so pdf-dump can exit 1), not silently degrade.
+    let bytes = encrypt_to_bytes(build_minimal_doc(), "secret");
+    assert!(
+        Document::load_mem_with_password(&bytes, "wrong").is_err(),
+        "lopdf changed: a wrong password no longer errors."
+    );
+}
