@@ -412,6 +412,13 @@ fn build_font_decoder(
         let (bytes, _warn) = crate::stream::decode_stream(stream);
         let cmap = ToUnicodeCMap::parse(&bytes);
         if !cmap.is_empty() {
+            // KNOWN LIMITATION (verdict can over-claim): a Variable/Unknown
+            // codespace is forced to a single fixed width (2 for CID, else 1).
+            // A genuinely variable-width CMap can then mis-split multi-byte
+            // codes — wrong characters or U+FFFD — while the font is still
+            // reported Reliable on the strength of having a ToUnicode map.
+            // Revisiting would honor per-range codespace widths in `split_codes`.
+            // See docs/ROADMAP.md ("Known limitations").
             let width = match cmap.byte_width() {
                 CodeWidth::Fixed(w) => w,
                 CodeWidth::Variable(..) | CodeWidth::Unknown => {
@@ -519,6 +526,15 @@ fn classify_passthrough(
     // recognized encoding and no `/Differences`.
 
     // Standard-14 text fonts with no/unknown encoding decode accurately as ASCII.
+    //
+    // KNOWN LIMITATION (verdict can over-claim — same class as the base-less
+    // `/Differences` case in `build_font_decoder`): these fonts decode by raw
+    // byte passthrough, which is correct only for ASCII, yet are reported
+    // Reliable. A bare Helvetica/Times/Courier whose builtin encoding is
+    // StandardEncoding extracts `0x27`/`0x60` as the ASCII `'`/`` ` `` rather
+    // than the curly quotes ’/‘, and any high byte as U+FFFD, under a
+    // "reliable" banner. Revisiting would route these through the `standard`
+    // table instead of passthrough. See docs/ROADMAP.md ("Known limitations").
     if STANDARD_14_TEXT.contains(&base_font) {
         return (Reliability::Reliable, "");
     }
@@ -862,6 +878,15 @@ fn dedup_font_records(records: Vec<FontReliabilityRecord>) -> Vec<FontReliabilit
 
 /// Worst per-font classification, bumped to `Degraded` if too many codes went
 /// unmapped during ToUnicode decoding.
+///
+/// KNOWN LIMITATION (the coverage net only watches ToUnicode): `total`/`unmapped`
+/// are incremented solely in the ToUnicode branch of `emit_show_string`. The
+/// U+FFFD that a base-table miss or a byte passthrough emits is invisible here,
+/// so a WinAnsi/MacRoman/Standard simple font (or a passthrough font) can emit a
+/// flood of replacement characters and never trip this >20% downgrade — the
+/// dynamic safety net that protects ToUnicode fonts has no equivalent for
+/// table/passthrough fonts, leaving only the coarser static per-font verdict.
+/// See docs/ROADMAP.md ("Known limitations").
 fn document_verdict(fonts: &[FontReliabilityRecord], total: u64, unmapped: u64) -> Reliability {
     let mut verdict = Reliability::Reliable;
     for f in fonts {
