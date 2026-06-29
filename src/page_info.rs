@@ -395,6 +395,7 @@ pub(crate) fn page_info_json_value_with_status(doc: &Document, spec: &PageSpec) 
 }
 
 /// Returns `true` when the requested page was out of range (exit-3 signal).
+#[cfg(test)]
 pub(crate) fn print_page_info_json(
     writer: &mut impl Write,
     doc: &Document,

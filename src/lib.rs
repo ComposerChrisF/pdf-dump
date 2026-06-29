@@ -61,7 +61,7 @@ pub(crate) mod validate;
 
 use clap::Parser;
 use lopdf::{Document, Object};
-use serde_json::Value;
+use serde_json::{Value, json};
 use std::io::{self, Write};
 
 use helpers::json_pretty;
@@ -102,13 +102,34 @@ pub fn run() {
     // Lenient read: lopdf drops a content stream to a bare dictionary when the
     // PDF declares a wrong /Length (silent body loss). When any such object is
     // present, re-read the raw file and recover the true stream bodies, with a
-    // loud stderr banner spelling out exactly what was malformed.
+    // loud stderr banner spelling out exactly what was malformed. `--strict`
+    // inverts this: detect the malformation, refuse to repair it, surface it,
+    // and exit 3 — a spec-conformant reader for callers who want a hard gate.
+    // Either way, `recovery_json` carries a machine-readable record into every
+    // `--json` mode so consumers never mistake (un)repaired output for the
+    // original document.
+    let mut recovery_json: Option<Value> = None;
+    let mut strict_malformed = false;
     if recover::has_candidates(&doc)
         && let Ok(raw) = std::fs::read(&args.file)
     {
-        let recoveries = recover::recover_malformed_streams(&mut doc, &raw);
-        if let Some(banner) = recover::recovery_banner(&recoveries) {
-            eprint!("{}", banner);
+        if args.strict {
+            let found = recover::detect_malformed_streams(&doc, &raw);
+            if !found.is_empty() {
+                if let Some(banner) = recover::strict_banner(&found) {
+                    eprint!("{}", banner);
+                }
+                recovery_json = Some(recover::recovery_json_value(&found, false, true));
+                strict_malformed = true;
+            }
+        } else {
+            let recoveries = recover::recover_malformed_streams(&mut doc, &raw);
+            if !recoveries.is_empty() {
+                if let Some(banner) = recover::recovery_banner(&recoveries) {
+                    eprint!("{}", banner);
+                }
+                recovery_json = Some(recover::recovery_json_value(&recoveries, true, false));
+            }
         }
     }
 
@@ -131,20 +152,49 @@ pub fn run() {
 
     let mut out = io::stdout().lock();
 
+    let recovery = recovery_json.as_ref();
     let had_issues = match resolved {
-        ResolvedMode::Default => dispatch_default(&mut out, &doc, &config, page_spec.as_ref()),
+        ResolvedMode::Default => {
+            dispatch_default(&mut out, &doc, &config, page_spec.as_ref(), recovery)
+        }
         ResolvedMode::Standalone(mode) => {
-            dispatch_standalone(&mut out, &doc, &config, mode);
+            dispatch_standalone(&mut out, &doc, &config, mode, recovery);
             false
         }
-        ResolvedMode::Combined(modes) => {
-            dispatch_combined(&mut out, &doc, &config, page_spec.as_ref(), &args, &modes)
-        }
+        ResolvedMode::Combined(modes) => dispatch_combined(
+            &mut out,
+            &doc,
+            &config,
+            page_spec.as_ref(),
+            &args,
+            &modes,
+            recovery,
+        ),
     };
 
-    if had_issues {
+    if had_issues || strict_malformed {
         std::process::exit(3);
     }
+}
+
+/// Print a JSON root, first merging an optional top-level `recovery` diagnostic
+/// into it. When a malformed `/Length` was recovered (or, under `--strict`,
+/// detected and refused), every `--json` mode carries the same `recovery`
+/// object so machine consumers never mistake the output for the original
+/// document. A no-op (prints the root unchanged) when `recovery` is `None`.
+fn print_json_with_recovery(out: &mut impl Write, root: Value, recovery: Option<&Value>) {
+    let value = match recovery {
+        Some(rec) => match root {
+            Value::Object(mut map) => {
+                map.insert("recovery".to_string(), rec.clone());
+                Value::Object(map)
+            }
+            // A non-object root (e.g. a bare array) can't take a key, so nest it.
+            other => json!({ "recovery": rec, "data": other }),
+        },
+        None => root,
+    };
+    wln!(out, "{}", json_pretty(&value));
 }
 
 fn dispatch_default(
@@ -152,16 +202,23 @@ fn dispatch_default(
     doc: &Document,
     config: &DumpConfig,
     page_spec: Option<&PageSpec>,
+    recovery: Option<&Value>,
 ) -> bool {
     if let Some(spec) = page_spec {
         if config.json {
-            page_info::print_page_info_json(out, doc, spec)
+            let (value, had) = page_info::page_info_json_value_with_status(doc, spec);
+            print_json_with_recovery(out, value, recovery);
+            had
         } else {
             page_info::print_page_info(out, doc, spec)
         }
     } else {
         if config.json {
-            summary::print_overview_json(out, doc, config.decode);
+            print_json_with_recovery(
+                out,
+                summary::overview_json_value(doc, config.decode),
+                recovery,
+            );
         } else {
             summary::print_overview(out, doc, config.decode);
         }
@@ -174,6 +231,7 @@ fn dispatch_standalone(
     doc: &Document,
     config: &DumpConfig,
     mode: StandaloneMode,
+    recovery: Option<&Value>,
 ) {
     match mode {
         StandaloneMode::ExtractStream {
@@ -213,14 +271,22 @@ fn dispatch_standalone(
         }
         StandaloneMode::Object { ref nums } => {
             if config.json {
-                object::print_objects_json(out, doc, nums, config);
+                print_json_with_recovery(
+                    out,
+                    object::objects_json_value(doc, nums, config),
+                    recovery,
+                );
             } else {
                 object::print_objects(out, doc, nums, config);
             }
         }
         StandaloneMode::Inspect { obj_num } => {
             if config.json {
-                inspect::print_info_json(out, doc, obj_num, config);
+                print_json_with_recovery(
+                    out,
+                    inspect::inspect_json_value(doc, obj_num, config),
+                    recovery,
+                );
             } else {
                 inspect::print_info(out, doc, obj_num);
             }
@@ -237,7 +303,11 @@ fn dispatch_standalone(
                 }
             };
             if config.json {
-                search::search_objects_json(out, doc, expr, &conditions, config);
+                print_json_with_recovery(
+                    out,
+                    search::search_json_value(doc, expr, &conditions, config),
+                    recovery,
+                );
             } else {
                 search::search_objects(out, doc, &conditions, config, list_modifier);
             }
@@ -252,6 +322,7 @@ fn dispatch_combined(
     page_spec: Option<&PageSpec>,
     args: &Args,
     modes: &[DocMode],
+    recovery: Option<&Value>,
 ) -> bool {
     let multi = modes.len() > 1;
     let mut had_issues = false;
@@ -265,13 +336,12 @@ fn dispatch_combined(
                 had_issues |= had;
                 map.insert(mode.json_key().to_string(), value);
             }
-            let output = Value::Object(map);
-            wln!(out, "{}", json_pretty(&output));
+            print_json_with_recovery(out, Value::Object(map), recovery);
         } else {
             // Single mode: output directly (unchanged schema)
             let (value, had) = build_mode_json_value(&modes[0], doc, config, page_spec, args);
             had_issues |= had;
-            wln!(out, "{}", json_pretty(&value));
+            print_json_with_recovery(out, value, recovery);
         }
     } else {
         for (i, mode) in modes.iter().enumerate() {
@@ -396,6 +466,39 @@ fn dispatch_mode_text(
             }
             false
         }
+    }
+}
+
+#[cfg(test)]
+mod recovery_merge_tests {
+    use super::*;
+    use crate::test_utils::output_of;
+
+    #[test]
+    fn merge_inserts_recovery_into_object_root() {
+        let rec = json!({"repaired": true, "count": 1});
+        let out = output_of(|w| print_json_with_recovery(w, json!({"pages": []}), Some(&rec)));
+        let v: Value = serde_json::from_str(&out).unwrap();
+        assert_eq!(v["recovery"]["repaired"], json!(true));
+        assert!(v["pages"].is_array());
+    }
+
+    #[test]
+    fn merge_wraps_non_object_root() {
+        // Defensive branch: a bare-array root can't take a key, so it nests.
+        let rec = json!({"repaired": false});
+        let out = output_of(|w| print_json_with_recovery(w, json!([1, 2, 3]), Some(&rec)));
+        let v: Value = serde_json::from_str(&out).unwrap();
+        assert_eq!(v["recovery"]["repaired"], json!(false));
+        assert_eq!(v["data"], json!([1, 2, 3]));
+    }
+
+    #[test]
+    fn merge_is_noop_without_recovery() {
+        let out = output_of(|w| print_json_with_recovery(w, json!({"x": 1}), None));
+        let v: Value = serde_json::from_str(&out).unwrap();
+        assert!(v.get("recovery").is_none());
+        assert_eq!(v["x"], json!(1));
     }
 }
 

@@ -76,6 +76,12 @@ pdf-dump file.pdf --fonts --images --validate
 
 `--text` is font-aware: it decodes character codes through each font’s `/ToUnicode` CMap (the fix for the classic CID/Type0 mojibake) and through WinAnsiEncoding/MacRomanEncoding tables for simple fonts that lack one, falling back to raw byte passthrough when a font can’t be decoded.  When extraction is not fully trustworthy it prints a loud reliability banner to **stderr** (stdout stays clean for piping) and, in `--json` mode, adds a top-level `reliability` object.  The tool exits **3** when a document is `unreliable` — a CID/Type0 font with no ToUnicode map — so scripts can detect junk text programmatically.
 
+### Lenient stream recovery (and `--strict`)
+
+pdf-dump is a tolerant reader by default.  When a content stream declares a wrong `/Length`, a strict parser fails to find `endstream`, drops the body, and the page text silently vanishes; pdf-dump instead re-reads the raw file, recovers the true body by scanning to `endstream`, and carries on.  Every recovery is announced loudly on **stderr** and, in `--json` mode, surfaced as a top-level `recovery` object — `{repaired, strict, count, streams: [{object, generation, file_offset, declared_length, actual_length}]}` — so machine consumers never mistake repaired output for the original document.  The key is absent for well-formed PDFs, and recovery keeps the default exit code **0**.
+
+Pass `--strict` to invert this: pdf-dump detects the malformation, refuses to repair it (so the affected content stays missing, exactly as a spec-conformant reader would see it), still emits the `recovery` object with `repaired: false`, and exits **3** — a hard gate for CI or any caller that must treat a malformed PDF as a failure.
+
 ### Standalone modes (one at a time)
 
 | Flag | Description |

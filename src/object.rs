@@ -3,7 +3,9 @@ use serde_json::{Value, json};
 use std::collections::BTreeSet;
 use std::io::Write;
 
-use crate::helpers::{format_dict_value, format_operation, json_pretty, object_type_label};
+#[cfg(test)]
+use crate::helpers::json_pretty;
+use crate::helpers::{format_dict_value, format_operation, object_type_label};
 use crate::stream::{decode_stream, format_hex_dump, get_filter_names, is_binary_stream};
 use crate::types::DumpConfig;
 
@@ -342,14 +344,34 @@ pub(crate) fn print_objects(
     }
 }
 
+#[cfg(test)]
 pub(crate) fn print_objects_json(
     writer: &mut impl Write,
     doc: &Document,
     nums: &[u32],
     config: &DumpConfig,
 ) {
+    wln!(
+        writer,
+        "{}",
+        json_pretty(&objects_json_value(doc, nums, config))
+    );
+}
+
+/// Build the `--object --json` root value. A single object number yields the
+/// object schema directly (or an `error` object when not found); multiple
+/// numbers yield `{"objects": [...]}` with a per-item `error` for any missing.
+pub(crate) fn objects_json_value(doc: &Document, nums: &[u32], config: &DumpConfig) -> Value {
     if nums.len() == 1 {
-        print_single_object_json(writer, doc, nums[0], config);
+        let obj_num = nums[0];
+        match doc.get_object((obj_num, 0)) {
+            Ok(object) => json!({
+                "object_number": obj_num,
+                "generation": 0,
+                "object": object_to_json(object, doc, config),
+            }),
+            Err(_) => json!({"error": format!("Object {} not found.", obj_num)}),
+        }
     } else {
         let mut items = Vec::new();
         for &obj_num in nums {
@@ -371,8 +393,7 @@ pub(crate) fn print_objects_json(
                 }
             }
         }
-        let output = json!({"objects": items});
-        wln!(writer, "{}", json_pretty(&output));
+        json!({"objects": items})
     }
 }
 
@@ -469,27 +490,18 @@ pub(crate) fn object_to_json(obj: &Object, doc: &Document, config: &DumpConfig) 
     }
 }
 
+#[cfg(test)]
 pub(crate) fn print_single_object_json(
     writer: &mut impl Write,
     doc: &Document,
     obj_num: u32,
     config: &DumpConfig,
 ) {
-    let obj_id = (obj_num, 0);
-    match doc.get_object(obj_id) {
-        Ok(object) => {
-            let output = json!({
-                "object_number": obj_num,
-                "generation": 0,
-                "object": object_to_json(object, doc, config),
-            });
-            wln!(writer, "{}", json_pretty(&output));
-        }
-        Err(_) => {
-            let output = json!({"error": format!("Object {} not found.", obj_num)});
-            wln!(writer, "{}", json_pretty(&output));
-        }
-    }
+    wln!(
+        writer,
+        "{}",
+        json_pretty(&objects_json_value(doc, &[obj_num], config))
+    );
 }
 
 #[cfg(test)]

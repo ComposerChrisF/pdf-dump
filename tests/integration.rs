@@ -2552,3 +2552,237 @@ fn text_cid_without_tounicode_json_reliability_object() {
     assert!(parsed["reliability"]["fonts"].is_array());
     assert!(parsed["pages"].is_array());
 }
+
+// ── Lenient /Length recovery + --strict (recovery surfacing) ─────────
+
+/// Build a single-page PDF whose content stream declares a deliberately wrong
+/// `/Length` (so a strict reader drops its body and the page text vanishes),
+/// while preserving byte offsets so lopdf's xref stays valid. Returns the temp
+/// file and the content stream's object number. The page draws the literal
+/// token `HelloRecovery`, present only when the stream body is recovered.
+fn create_malformed_length_pdf() -> (tempfile::NamedTempFile, u32) {
+    let mut doc = Document::new();
+
+    let content_bytes = b"BT\n/F1 24 Tf\n72 700 Td\n(HelloRecovery) Tj\nET";
+    let content_stream = Stream::new(Dictionary::new(), content_bytes.to_vec());
+    let content_id = doc.add_object(Object::Stream(content_stream));
+
+    let mut font_dict = Dictionary::new();
+    font_dict.set("Type", Object::Name(b"Font".to_vec()));
+    font_dict.set("Subtype", Object::Name(b"Type1".to_vec()));
+    font_dict.set("BaseFont", Object::Name(b"Helvetica".to_vec()));
+    let font_id = doc.add_object(Object::Dictionary(font_dict));
+
+    let mut f1_dict = Dictionary::new();
+    f1_dict.set("F1", Object::Reference(font_id));
+    let mut resources = Dictionary::new();
+    resources.set("Font", Object::Dictionary(f1_dict));
+
+    let mut page_dict = Dictionary::new();
+    page_dict.set("Type", Object::Name(b"Page".to_vec()));
+    page_dict.set("Contents", Object::Reference(content_id));
+    page_dict.set("Resources", Object::Dictionary(resources));
+    page_dict.set(
+        "MediaBox",
+        Object::Array(vec![
+            Object::Integer(0),
+            Object::Integer(0),
+            Object::Integer(612),
+            Object::Integer(792),
+        ]),
+    );
+    let page_id = doc.add_object(Object::Dictionary(page_dict));
+
+    let mut pages_dict = Dictionary::new();
+    pages_dict.set("Type", Object::Name(b"Pages".to_vec()));
+    pages_dict.set("Kids", Object::Array(vec![Object::Reference(page_id)]));
+    pages_dict.set("Count", Object::Integer(1));
+    let pages_id = doc.add_object(Object::Dictionary(pages_dict));
+
+    if let Ok(Object::Dictionary(d)) = doc.get_object_mut(page_id) {
+        d.set("Parent", Object::Reference(pages_id));
+    }
+
+    let mut catalog = Dictionary::new();
+    catalog.set("Type", Object::Name(b"Catalog".to_vec()));
+    catalog.set("Pages", Object::Reference(pages_id));
+    let catalog_id = doc.add_object(Object::Dictionary(catalog));
+    doc.trailer.set("Root", Object::Reference(catalog_id));
+
+    // Serialize, then corrupt the content stream's /Length in place. Keeping the
+    // same digit width leaves every xref offset valid, so lopdf still locates
+    // the object (and then drops its body, which recovery puts back).
+    let mut buf = Vec::new();
+    doc.save_to(&mut buf).unwrap();
+    corrupt_first_length(&mut buf);
+
+    let mut tmp = tempfile::NamedTempFile::new().unwrap();
+    tmp.write_all(&buf).unwrap();
+    tmp.flush().unwrap();
+    (tmp, content_id.0)
+}
+
+/// Replace the first `/Length <n>` value with a same-width wrong value (all 9s,
+/// which over-reads past the real body so no `endstream` is found where the
+/// length claims) so the declared length no longer matches the stream body.
+fn corrupt_first_length(bytes: &mut [u8]) {
+    let needle = b"/Length ";
+    let pos = bytes
+        .windows(needle.len())
+        .position(|w| w == needle)
+        .expect("content stream should have a /Length");
+    let start = pos + needle.len();
+    let mut end = start;
+    while end < bytes.len() && bytes[end].is_ascii_digit() {
+        end += 1;
+    }
+    assert!(end > start, "expected digits after /Length");
+    let replacement = if bytes[start..end].iter().all(|&d| d == b'9') {
+        b'1'
+    } else {
+        b'9'
+    };
+    for b in &mut bytes[start..end] {
+        *b = replacement;
+    }
+}
+
+#[test]
+fn malformed_length_recovered_in_text_json() {
+    let (pdf, _content) = create_malformed_length_pdf();
+    let output = Command::new(binary_path())
+        .arg(pdf.path())
+        .arg("--text")
+        .arg("--json")
+        .output()
+        .expect("failed to execute binary");
+
+    assert!(
+        output.status.success(),
+        "default (tolerant) mode should exit 0: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("MALFORMED PDF") && stderr.contains("recovered"),
+        "loud recovery banner expected on stderr: {}",
+        stderr
+    );
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let parsed: serde_json::Value = serde_json::from_str(&stdout).expect("valid json");
+    assert_eq!(parsed["recovery"]["repaired"], serde_json::json!(true));
+    assert_eq!(parsed["recovery"]["strict"], serde_json::json!(false));
+    assert!(parsed["recovery"]["count"].as_u64().unwrap() >= 1);
+    assert!(
+        stdout.contains("HelloRecovery"),
+        "recovered page text should appear: {}",
+        stdout
+    );
+}
+
+#[test]
+fn malformed_length_recovery_key_in_object_json() {
+    let (pdf, content) = create_malformed_length_pdf();
+    let output = Command::new(binary_path())
+        .arg(pdf.path())
+        .arg("--object")
+        .arg(content.to_string())
+        .arg("--json")
+        .output()
+        .expect("failed to execute binary");
+
+    assert!(output.status.success());
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let parsed: serde_json::Value = serde_json::from_str(&stdout).expect("valid json");
+    // The standalone --object path carries the same recovery diagnostic.
+    assert_eq!(parsed["recovery"]["repaired"], serde_json::json!(true));
+    assert_eq!(
+        parsed["recovery"]["streams"][0]["object"],
+        serde_json::json!(content)
+    );
+}
+
+#[test]
+fn wellformed_pdf_has_no_recovery_key() {
+    let pdf = create_minimal_pdf();
+    let output = Command::new(binary_path())
+        .arg(pdf.path())
+        .arg("--text")
+        .arg("--json")
+        .output()
+        .expect("failed to execute binary");
+
+    assert!(output.status.success());
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let parsed: serde_json::Value = serde_json::from_str(&stdout).expect("valid json");
+    assert!(
+        parsed.get("recovery").is_none(),
+        "a clean PDF must not add a recovery key: {}",
+        stdout
+    );
+}
+
+#[test]
+fn strict_refuses_repair_and_exits_3() {
+    let (pdf, _content) = create_malformed_length_pdf();
+    let output = Command::new(binary_path())
+        .arg(pdf.path())
+        .arg("--text")
+        .arg("--strict")
+        .output()
+        .expect("failed to execute binary");
+
+    assert_eq!(
+        output.status.code(),
+        Some(3),
+        "strict mode must exit 3 on malformed input"
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("--strict") && stderr.contains("did NOT repair"),
+        "strict banner expected: {}",
+        stderr
+    );
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        !stdout.contains("HelloRecovery"),
+        "strict mode must NOT recover the dropped text: {}",
+        stdout
+    );
+}
+
+#[test]
+fn strict_json_marks_unrepaired() {
+    let (pdf, _content) = create_malformed_length_pdf();
+    let output = Command::new(binary_path())
+        .arg(pdf.path())
+        .arg("--text")
+        .arg("--json")
+        .arg("--strict")
+        .output()
+        .expect("failed to execute binary");
+
+    assert_eq!(output.status.code(), Some(3));
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let parsed: serde_json::Value = serde_json::from_str(&stdout).expect("valid json");
+    assert_eq!(parsed["recovery"]["repaired"], serde_json::json!(false));
+    assert_eq!(parsed["recovery"]["strict"], serde_json::json!(true));
+    assert!(parsed["recovery"]["count"].as_u64().unwrap() >= 1);
+}
+
+#[test]
+fn strict_on_clean_pdf_exits_0() {
+    let pdf = create_minimal_pdf();
+    let output = Command::new(binary_path())
+        .arg(pdf.path())
+        .arg("--text")
+        .arg("--strict")
+        .output()
+        .expect("failed to execute binary");
+
+    assert!(
+        output.status.success(),
+        "strict on a clean PDF should pass: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+}

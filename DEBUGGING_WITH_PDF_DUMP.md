@@ -117,6 +117,11 @@ Add `--json` to any mode.  All schemas below show the structure of a single mode
 
 Text extraction is font-aware: show-strings are decoded through each font’s `/ToUnicode` CMap (the fix for CID/Type0 mojibake) and through WinAnsiEncoding/MacRomanEncoding tables for simple fonts lacking ToUnicode; undecodable fonts fall back to raw byte passthrough.  A loud reliability banner prints to **stderr** (stdout stays clean for piping) when a document is not fully reliable, and `--text` exits **3** when the verdict is `unreliable` (a CID/Type0 font with no ToUnicode map).
 
+**Recovery** (any mode, `--json`, present only when a malformed stream was found):
+`{repaired: bool, strict: bool, count: N, streams: [{object, generation, file_offset, declared_length: int|null, actual_length}]}`
+
+When a content stream declares a wrong `/Length`, a strict parser drops its body and the page content silently vanishes.  By default pdf-dump recovers the body (scanning to `endstream`), warns loudly on **stderr**, adds this `recovery` object to every `--json` mode, and keeps exit code **0**.  The key is absent for well-formed PDFs.  Pass `--strict` to refuse the repair instead: the affected content stays missing (as a spec-conformant reader would see it), `recovery.repaired` is `false`, and the tool exits **3** — a hard gate for CI.
+
 **Operators** (`--operators --json`):
 `{pages: [{page_number, operation_count, operations: [{operator, operands: [str]}], warnings?: [str]}]}`
 

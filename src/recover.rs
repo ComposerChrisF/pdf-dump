@@ -20,6 +20,7 @@
 
 use lopdf::xref::XrefEntry;
 use lopdf::{Document, Object, ObjectId, Stream};
+use serde_json::{Value, json};
 
 /// One recovered stream — enough to explain (loudly) what was malformed.
 pub(crate) struct StreamRecovery {
@@ -43,10 +44,12 @@ fn is_candidate_dict(obj: &Object) -> bool {
     matches!(obj, Object::Dictionary(d) if d.has(b"Length"))
 }
 
-/// Scan `raw` (the original file bytes) for streams lopdf dropped to bare
-/// dictionaries because of a wrong `/Length`, promote each back to
-/// `Object::Stream` in `doc`, and return one record per recovery.
-pub(crate) fn recover_malformed_streams(doc: &mut Document, raw: &[u8]) -> Vec<StreamRecovery> {
+/// Read-only scan: find every stream lopdf dropped to a bare dictionary
+/// because of a wrong `/Length`, returning one record per recoverable stream
+/// paired with its true body bytes. Does NOT mutate `doc` — both the repairing
+/// path (`recover_malformed_streams`) and the strict detect-only path
+/// (`detect_malformed_streams`) share this scan.
+fn scan_malformed_streams(doc: &Document, raw: &[u8]) -> Vec<(StreamRecovery, Vec<u8>)> {
     let candidates: Vec<ObjectId> = doc
         .objects
         .iter()
@@ -54,7 +57,7 @@ pub(crate) fn recover_malformed_streams(doc: &mut Document, raw: &[u8]) -> Vec<S
         .map(|(id, _)| *id)
         .collect();
 
-    let mut recoveries = Vec::new();
+    let mut found = Vec::new();
     for id in candidates {
         // Only regular (uncompressed) objects have a file offset we can scan to;
         // objects packed into an object stream can't be recovered from raw bytes.
@@ -72,22 +75,79 @@ pub(crate) fn recover_malformed_streams(doc: &mut Document, raw: &[u8]) -> Vec<S
         };
         let declared_length = dict.get(b"Length").ok().and_then(|v| v.as_i64().ok());
         let recovered_length = body.len();
-        let dict = dict.clone();
+        found.push((
+            StreamRecovery {
+                id,
+                offset,
+                declared_length,
+                recovered_length,
+            },
+            body,
+        ));
+    }
+    found
+}
 
-        // `Stream::new` resets `/Length` to the real body length, so every
-        // downstream consumer (text, --list, --object, extract-stream, …) sees
-        // a correct stream. Any `/Filter` in the dict is preserved, so the
-        // recovered (still-encoded) body decodes normally later.
-        doc.objects
-            .insert(id, Object::Stream(Stream::new(dict, body)));
-        recoveries.push(StreamRecovery {
-            id,
-            offset,
-            declared_length,
-            recovered_length,
-        });
+/// Scan `raw` (the original file bytes) for streams lopdf dropped to bare
+/// dictionaries because of a wrong `/Length`, promote each back to
+/// `Object::Stream` in `doc`, and return one record per recovery.
+pub(crate) fn recover_malformed_streams(doc: &mut Document, raw: &[u8]) -> Vec<StreamRecovery> {
+    let found = scan_malformed_streams(doc, raw);
+    let mut recoveries = Vec::with_capacity(found.len());
+    for (rec, body) in found {
+        // The dict is still present (the scan only read it). Clone it and
+        // rebuild as a stream: `Stream::new` resets `/Length` to the real body
+        // length, so every downstream consumer (text, --list, --object,
+        // extract-stream, …) sees a correct stream. Any `/Filter` in the dict
+        // is preserved, so the recovered (still-encoded) body decodes later.
+        if let Some(Object::Dictionary(dict)) = doc.objects.get(&rec.id) {
+            let dict = dict.clone();
+            doc.objects
+                .insert(rec.id, Object::Stream(Stream::new(dict, body)));
+            recoveries.push(rec);
+        }
     }
     recoveries
+}
+
+/// Detect-only counterpart of [`recover_malformed_streams`]: find the same
+/// malformed streams but leave `doc` untouched. Used by `--strict`, where a
+/// spec-conformant reader reports the malformation and refuses to silently
+/// repair it.
+pub(crate) fn detect_malformed_streams(doc: &Document, raw: &[u8]) -> Vec<StreamRecovery> {
+    scan_malformed_streams(doc, raw)
+        .into_iter()
+        .map(|(rec, _)| rec)
+        .collect()
+}
+
+/// Machine-readable record of what was recovered (or, under `--strict`,
+/// detected-but-not-recovered), surfaced as a top-level `recovery` object in
+/// `--json` output so consumers never mistake repaired output for the original
+/// document. `repaired` is true on the default path and false under `--strict`.
+pub(crate) fn recovery_json_value(
+    recoveries: &[StreamRecovery],
+    repaired: bool,
+    strict: bool,
+) -> Value {
+    let streams: Vec<Value> = recoveries
+        .iter()
+        .map(|r| {
+            json!({
+                "object": r.id.0,
+                "generation": r.id.1,
+                "file_offset": r.offset,
+                "declared_length": r.declared_length,
+                "actual_length": r.recovered_length,
+            })
+        })
+        .collect();
+    json!({
+        "repaired": repaired,
+        "strict": strict,
+        "count": recoveries.len(),
+        "streams": streams,
+    })
 }
 
 /// Extract a stream body from `raw` starting at an object's file `offset`.
@@ -145,8 +205,27 @@ fn find_subslice(haystack: &[u8], needle: &[u8]) -> Option<usize> {
     haystack.windows(needle.len()).position(|w| w == needle)
 }
 
-/// Build the loud stderr banner describing the recovered streams, or `None`
-/// when nothing was recovered (the silent happy path).
+/// One indented detail line per recovered/detected stream, shared by both
+/// banners: declared vs. actual `/Length` and the file offset.
+fn detail_lines(recoveries: &[StreamRecovery]) -> String {
+    let mut s = String::new();
+    for r in recoveries {
+        let declared = match r.declared_length {
+            Some(n) => n.to_string(),
+            None => "absent".to_string(),
+        };
+        s.push_str(&format!(
+            "    - object {} {} (file offset {}): declared /Length {}, \
+             actual body {} bytes\n",
+            r.id.0, r.id.1, r.offset, declared, r.recovered_length
+        ));
+    }
+    s
+}
+
+/// Build the loud stderr banner describing the recovered streams (default,
+/// repairing path), or `None` when nothing was recovered (the silent happy
+/// path).
 pub(crate) fn recovery_banner(recoveries: &[StreamRecovery]) -> Option<String> {
     if recoveries.is_empty() {
         return None;
@@ -168,17 +247,38 @@ pub(crate) fn recovery_banner(recoveries: &[StreamRecovery]) -> Option<String> {
     s.push_str("  stream body — so the affected content (e.g. page text) silently\n");
     s.push_str("  disappears. The writer that produced this PDF emitted a wrong\n");
     s.push_str("  /Length. pdf-dump recovered each body by scanning to `endstream`:\n");
-    for r in recoveries {
-        let declared = match r.declared_length {
-            Some(n) => n.to_string(),
-            None => "absent".to_string(),
-        };
-        s.push_str(&format!(
-            "    - object {} {} (file offset {}): declared /Length {}, \
-             actual body {} bytes\n",
-            r.id.0, r.id.1, r.offset, declared, r.recovered_length
-        ));
+    s.push_str(&detail_lines(recoveries));
+    s.push_str(&bar);
+    s.push('\n');
+    Some(s)
+}
+
+/// Build the loud stderr banner for `--strict`: the same malformation was
+/// detected, but pdf-dump refused to repair it, so the affected content is
+/// missing from the output and the tool will exit 3. `None` when nothing was
+/// detected.
+pub(crate) fn strict_banner(recoveries: &[StreamRecovery]) -> Option<String> {
+    if recoveries.is_empty() {
+        return None;
     }
+    let bar = "=".repeat(60);
+    let rule = "-".repeat(60);
+    let mut s = String::new();
+    s.push_str(&bar);
+    s.push('\n');
+    s.push_str("[ERROR] MALFORMED PDF: incorrect stream /Length(s) detected (--strict)\n");
+    s.push_str(&rule);
+    s.push('\n');
+    s.push_str(&format!(
+        "  {} content stream(s) declared a /Length that does not match the\n",
+        recoveries.len()
+    ));
+    s.push_str("  bytes between their `stream` and `endstream` keywords. Because\n");
+    s.push_str("  --strict is set, pdf-dump did NOT repair them: the affected content\n");
+    s.push_str("  (e.g. page text) is MISSING from this output, exactly as a strict\n");
+    s.push_str("  spec-conformant reader would see it. Re-run without --strict to\n");
+    s.push_str("  recover each body by scanning to `endstream`. Exit code: 3.\n");
+    s.push_str(&detail_lines(recoveries));
     s.push_str(&bar);
     s.push('\n');
     Some(s)
@@ -328,6 +428,83 @@ mod tests {
         assert!(banner.contains("declared /Length 54"));
         assert!(banner.contains("actual body 58 bytes"));
         assert!(banner.contains("file offset 808"));
+    }
+
+    #[test]
+    fn detect_finds_without_mutating() {
+        // Same malformed input as `recovers_stream_with_wrong_length`, but
+        // detect-only must leave the object a Dictionary.
+        let raw = b"3 0 obj\n<</Length 2>>stream\nHELLO WORLD\nendstream\nendobj\n";
+        let mut doc = doc_with_misparsed(0, 2);
+
+        let recs = detect_malformed_streams(&doc, raw);
+
+        assert_eq!(recs.len(), 1);
+        assert_eq!(recs[0].id, (3, 0));
+        assert_eq!(recs[0].recovered_length, 11);
+        // Crucially: the document was NOT repaired.
+        assert!(matches!(
+            doc.objects.get(&(3, 0)),
+            Some(Object::Dictionary(_))
+        ));
+        // And a follow-up repair on the same (untouched) doc still works.
+        let applied = recover_malformed_streams(&mut doc, raw);
+        assert_eq!(applied.len(), 1);
+        assert!(matches!(doc.objects.get(&(3, 0)), Some(Object::Stream(_))));
+    }
+
+    #[test]
+    fn recovery_json_value_repaired_shape() {
+        let recs = vec![StreamRecovery {
+            id: (10, 0),
+            offset: 808,
+            declared_length: Some(54),
+            recovered_length: 58,
+        }];
+        let v = recovery_json_value(&recs, true, false);
+        assert_eq!(v["repaired"], json!(true));
+        assert_eq!(v["strict"], json!(false));
+        assert_eq!(v["count"], json!(1));
+        assert_eq!(v["streams"][0]["object"], json!(10));
+        assert_eq!(v["streams"][0]["generation"], json!(0));
+        assert_eq!(v["streams"][0]["file_offset"], json!(808));
+        assert_eq!(v["streams"][0]["declared_length"], json!(54));
+        assert_eq!(v["streams"][0]["actual_length"], json!(58));
+    }
+
+    #[test]
+    fn recovery_json_value_strict_and_absent_length() {
+        let recs = vec![StreamRecovery {
+            id: (5, 0),
+            offset: 100,
+            declared_length: None,
+            recovered_length: 12,
+        }];
+        let v = recovery_json_value(&recs, false, true);
+        assert_eq!(v["repaired"], json!(false));
+        assert_eq!(v["strict"], json!(true));
+        // An absent declared /Length is surfaced as JSON null, not omitted.
+        assert_eq!(v["streams"][0]["declared_length"], Value::Null);
+    }
+
+    #[test]
+    fn strict_banner_states_refusal_and_exit() {
+        let recs = vec![StreamRecovery {
+            id: (10, 0),
+            offset: 808,
+            declared_length: Some(54),
+            recovered_length: 58,
+        }];
+        let banner = strict_banner(&recs).expect("banner");
+        assert!(banner.contains("--strict"));
+        assert!(banner.contains("did NOT repair"));
+        assert!(banner.contains("Exit code: 3"));
+        assert!(banner.contains("object 10 0"));
+    }
+
+    #[test]
+    fn strict_banner_is_none_when_nothing_detected() {
+        assert!(strict_banner(&[]).is_none());
     }
 
     #[test]

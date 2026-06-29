@@ -7,7 +7,9 @@ use std::collections::BTreeMap;
 use crate::bookmarks::count_bookmarks;
 use crate::embedded::collect_embedded_files;
 use crate::forms::collect_form_fields;
-use crate::helpers::{json_pretty, object_type_label};
+#[cfg(test)]
+use crate::helpers::json_pretty;
+use crate::helpers::object_type_label;
 use crate::layers::collect_layers;
 use crate::page_labels::collect_page_labels;
 use crate::stream::{decode_stream, get_filter_names};
@@ -391,7 +393,12 @@ pub(crate) fn print_overview(writer: &mut impl Write, doc: &Document, decode: bo
     wln!(writer, "\nTip: Use --json for machine-readable output.");
 }
 
+#[cfg(test)]
 pub(crate) fn print_overview_json(writer: &mut impl Write, doc: &Document, decode: bool) {
+    wln!(writer, "{}", json_pretty(&overview_json_value(doc, decode)));
+}
+
+pub(crate) fn overview_json_value(doc: &Document, decode: bool) -> Value {
     let pages = doc.get_pages();
     let (info, catalog) = metadata_info(doc);
     let report = validate_pdf(doc, Some(&pages));
@@ -468,7 +475,7 @@ pub(crate) fn print_overview_json(writer: &mut impl Write, doc: &Document, decod
             "tagged_structure": has_tags,
         },
     });
-    wln!(writer, "{}", json_pretty(&output));
+    output
 }
 
 #[cfg(test)]

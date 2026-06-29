@@ -3,7 +3,9 @@ use serde_json::{Value, json};
 use std::collections::{BTreeMap, BTreeSet};
 use std::io::Write;
 
-use crate::helpers::{format_color_space, format_dict_value, format_filter, json_pretty};
+#[cfg(test)]
+use crate::helpers::json_pretty;
+use crate::helpers::{format_color_space, format_dict_value, format_filter};
 use crate::object::{deref_summary, object_header_label, object_to_json, print_object};
 use crate::refs::{
     collect_forward_refs_json, collect_references_in_object, collect_refs_with_paths,
@@ -621,22 +623,29 @@ pub(crate) fn print_info(writer: &mut impl Write, doc: &Document, obj_num: u32) 
     }
 }
 
+#[cfg(test)]
 pub(crate) fn print_info_json(
     writer: &mut impl Write,
     doc: &Document,
     obj_num: u32,
     config: &DumpConfig,
 ) {
+    wln!(
+        writer,
+        "{}",
+        json_pretty(&inspect_json_value(doc, obj_num, config))
+    );
+}
+
+pub(crate) fn inspect_json_value(doc: &Document, obj_num: u32, config: &DumpConfig) -> Value {
     let obj_id = (obj_num, 0); // Generation 0 assumed — tool convention
     let object = match doc.get_object(obj_id) {
         Ok(obj) => obj,
         Err(_) => {
-            let output = json!({
+            return json!({
                 "object_number": obj_num,
                 "error": "not found",
             });
-            wln!(writer, "{}", json_pretty(&output));
-            return;
         }
     };
 
@@ -674,7 +683,7 @@ pub(crate) fn print_info_json(
         "references": refs_to,
         "referenced_by": referenced_by,
     });
-    wln!(writer, "{}", json_pretty(&output));
+    output
 }
 
 #[cfg(test)]

@@ -112,13 +112,19 @@ Search expression syntax (--search):
   stream=<text>       Decoded stream content contains <text> (case-insensitive)
   regex=<pattern>     Any key, Name, or String value matches the regex
 
+Tolerant by default: when a stream declares a wrong /Length (so a strict reader
+would drop its body and silently lose page content), pdf-dump recovers the body,
+warns loudly on stderr, and—in --json mode—adds a top-level \"recovery\" object.
+Use --strict to refuse the repair and exit 3 instead (a hard gate for CI).
+
 Exit codes:
   0   Success (or validation passed with no errors)
   1   Runtime error (file not found, IO failure, invalid argument value)
   2   Argument parse error (clap; e.g. unknown flag, missing required arg)
   3   Tool ran successfully but the input had problems
-      (--validate found errors, --page was out of range, or --text
-       extraction was unreliable: a CID/Type0 font without a ToUnicode map)
+      (--validate found errors, --page was out of range, --text extraction
+       was unreliable: a CID/Type0 font without a ToUnicode map, or --strict
+       detected a malformed stream /Length)
 ")]
 pub(crate) struct Args {
     /// Path to the PDF file
@@ -212,6 +218,11 @@ pub(crate) struct Args {
     /// Output as structured JSON
     #[arg(long, help_heading = "Modifiers")]
     pub json: bool,
+
+    /// Strict reader: do not silently repair malformed streams (wrong /Length);
+    /// instead report them and exit 3, as a spec-conformant reader would
+    #[arg(long, help_heading = "Modifiers")]
+    pub strict: bool,
 
     /// Decode and print the content of streams (also enables decoded byte counts in overview)
     #[arg(long, help_heading = "Modifiers")]

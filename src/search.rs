@@ -1,10 +1,12 @@
 use lopdf::{Document, Object};
 use regex::Regex;
-use serde_json::json;
+use serde_json::{Value, json};
 use std::collections::BTreeSet;
 use std::io::Write;
 
-use crate::helpers::{json_pretty, object_type_label};
+#[cfg(test)]
+use crate::helpers::json_pretty;
+use crate::helpers::object_type_label;
 use crate::object::{object_header_label, object_to_json, print_object};
 use crate::stream::decode_stream;
 use crate::summary::summary_detail;
@@ -217,6 +219,7 @@ pub(crate) fn search_objects(
     wln!(writer, "Found {} matching objects.", count);
 }
 
+#[cfg(test)]
 pub(crate) fn search_objects_json(
     writer: &mut impl Write,
     doc: &Document,
@@ -224,6 +227,19 @@ pub(crate) fn search_objects_json(
     conditions: &[SearchCondition],
     config: &DumpConfig,
 ) {
+    wln!(
+        writer,
+        "{}",
+        json_pretty(&search_json_value(doc, expr, conditions, config))
+    );
+}
+
+pub(crate) fn search_json_value(
+    doc: &Document,
+    expr: &str,
+    conditions: &[SearchCondition],
+    config: &DumpConfig,
+) -> Value {
     let mut matches = Vec::new();
     for (&(obj_num, generation), object) in &doc.objects {
         if object_matches(object, conditions) {
@@ -234,12 +250,11 @@ pub(crate) fn search_objects_json(
             }));
         }
     }
-    let output = json!({
+    json!({
         "query": expr,
         "match_count": matches.len(),
         "matches": matches,
-    });
-    wln!(writer, "{}", json_pretty(&output));
+    })
 }
 
 #[cfg(test)]
