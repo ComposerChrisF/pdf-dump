@@ -37,6 +37,7 @@ pub(crate) mod encodings;
 pub(crate) mod find_text;
 pub(crate) mod fonts;
 pub(crate) mod forms;
+pub(crate) mod glyphlist;
 pub(crate) mod helpers;
 pub(crate) mod images;
 pub(crate) mod inspect;

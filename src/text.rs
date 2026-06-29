@@ -57,14 +57,17 @@ pub(crate) struct FontReliabilityRecord {
 enum FontDecoder {
     /// Decode each code through a parsed ToUnicode CMap.
     ToUnicode { cmap: Rc<ToUnicodeCMap>, width: u8 },
-    /// Single-byte base-encoding table (WinAnsi/MacRoman/Standard/MacExpert).
-    /// `decode` returns `&'static str` so a code can yield more than one
-    /// character (e.g. a decomposed ligature). `overridden` codes are remapped
-    /// by `/Differences` to glyph names we cannot resolve without the Adobe
-    /// Glyph List, so they emit U+FFFD.
+    /// Single-byte simple font. `overrides` holds per-code strings resolved from
+    /// an `/Encoding /Differences` array via the Adobe Glyph List (a code with
+    /// no resolvable name maps to U+FFFD); it is consulted first. Codes not
+    /// overridden fall through to `decode`, a base-encoding table
+    /// (WinAnsi/MacRoman/Standard/MacExpert) returning `&'static str` so a code
+    /// can yield more than one character (e.g. a decomposed ligature). `decode`
+    /// is `None` when the font has `/Differences` but no recognized base
+    /// encoding, in which case non-overridden bytes pass through as UTF-8.
     SimpleTable {
-        decode: fn(u8) -> Option<&'static str>,
-        overridden: HashSet<u8>,
+        decode: Option<fn(u8) -> Option<&'static str>>,
+        overrides: std::collections::HashMap<u8, String>,
     },
     /// Raw byte passthrough (today's behavior) — used when we cannot decode.
     Passthrough,
@@ -290,12 +293,18 @@ fn emit_show_string(
                 }
             }
         }
-        Some(FontDecoder::SimpleTable { decode, overridden }) => {
+        Some(FontDecoder::SimpleTable { decode, overrides }) => {
             for &b in bytes {
-                if overridden.contains(&b) {
-                    out.push('\u{FFFD}');
+                if let Some(s) = overrides.get(&b) {
+                    // `/Differences` override (AGL-resolved, or U+FFFD if the
+                    // glyph name was unresolvable).
+                    out.push_str(s);
+                } else if let Some(f) = decode {
+                    out.push_str(f(b).unwrap_or("\u{FFFD}"));
                 } else {
-                    out.push_str(decode(b).unwrap_or("\u{FFFD}"));
+                    // No recognized base table: single-byte UTF-8 passthrough,
+                    // matching prior behavior for unrecognized-encoding fonts.
+                    out.push_str(&String::from_utf8_lossy(&[b]));
                 }
             }
         }
@@ -423,23 +432,43 @@ fn build_font_decoder(
         }
     }
 
-    // 2. Simple font with a recognized base encoding we have a table for
-    //    (WinAnsiEncoding, MacRomanEncoding).
-    if !is_cid && let Some(decode) = simple_table_for(font_base_encoding(doc, dict).as_deref()) {
-        let overridden = encoding_overridden_codes(doc, dict);
-        if overridden.is_empty() {
+    // 2. Simple font: a recognized base-encoding table and/or `/Encoding
+    //    /Differences` glyph names resolved through the Adobe Glyph List.
+    if !is_cid {
+        let base = simple_table_for(font_base_encoding(doc, dict).as_deref());
+        let diff = build_differences_overrides(doc, dict);
+        if !diff.map.is_empty() {
+            // Overridden codes decode via AGL; the rest via `base` (or, when no
+            // base is recognized, byte passthrough). All names resolving is
+            // Reliable; any unresolved name degrades the verdict.
+            let (classification, reason) = if diff.unresolved == 0 {
+                (Reliability::Reliable, String::new())
+            } else {
+                (
+                    Reliability::Degraded,
+                    format!(
+                        "{} of {} /Differences glyph name(s) unresolved by the Adobe Glyph List",
+                        diff.unresolved, diff.total
+                    ),
+                )
+            };
             return (
-                FontDecoder::SimpleTable { decode, overridden },
+                FontDecoder::SimpleTable {
+                    decode: base,
+                    overrides: diff.map,
+                },
+                record(classification, &reason),
+            );
+        }
+        if let Some(decode) = base {
+            return (
+                FontDecoder::SimpleTable {
+                    decode: Some(decode),
+                    overrides: std::collections::HashMap::new(),
+                },
                 record(Reliability::Reliable, ""),
             );
         }
-        return (
-            FontDecoder::SimpleTable { decode, overridden },
-            record(
-                Reliability::Degraded,
-                "custom /Differences glyph names without a ToUnicode map (no Adobe Glyph List)",
-            ),
-        );
     }
 
     // 3. Passthrough — classify how trustworthy the raw bytes are.
@@ -469,16 +498,17 @@ fn classify_passthrough(
         );
     }
 
-    let has_differences = !encoding_overridden_codes(doc, dict).is_empty();
     // Every named single-byte base encoding (WinAnsi, MacRoman, Standard,
-    // MacExpert) now has a table and is handled earlier in `build_font_decoder`,
-    // so passthrough is only reached for fonts with no recognized encoding.
+    // MacExpert) now has a table, and any font with a `/Differences` array is
+    // routed through `SimpleTable` (with AGL resolution) earlier in
+    // `build_font_decoder`, so passthrough is only reached for fonts with no
+    // recognized encoding and no `/Differences`.
 
     // Standard-14 text fonts with no/unknown encoding decode accurately as ASCII.
     if STANDARD_14_TEXT.contains(&base_font) {
         return (Reliability::Reliable, "");
     }
-    if has_differences {
+    if has_differences(doc, dict) {
         return (
             Reliability::Degraded,
             "custom /Differences encoding without a ToUnicode map",
@@ -513,39 +543,79 @@ fn font_base_encoding(doc: &Document, dict: &lopdf::Dictionary) -> Option<String
     }
 }
 
-/// Codes remapped by an `/Encoding /Differences` array. We can detect which
-/// codes are overridden, but resolving the glyph names to Unicode needs the
-/// Adobe Glyph List (Tier 2), so callers emit U+FFFD for these codes.
-fn encoding_overridden_codes(doc: &Document, dict: &lopdf::Dictionary) -> HashSet<u8> {
-    let mut set = HashSet::new();
+/// Per-code overrides resolved from an `/Encoding /Differences` array.
+struct DifferencesOverrides {
+    /// Code → decoded string. Unresolvable glyph names map to U+FFFD so the
+    /// override still suppresses the base-table decode for that code.
+    map: std::collections::HashMap<u8, String>,
+    /// Total glyph-name assignments seen in the `/Differences` array.
+    total: usize,
+    /// Of `total`, how many names the Adobe Glyph List could not resolve.
+    unresolved: usize,
+}
+
+/// Walk an `/Encoding /Differences` array, resolving each glyph name to Unicode
+/// via the Adobe Glyph List. Integers set the current code; each subsequent name
+/// is assigned to the current code, which then increments. Returns an empty
+/// result when the font has no `/Differences`.
+fn build_differences_overrides(doc: &Document, dict: &lopdf::Dictionary) -> DifferencesOverrides {
+    let mut out = DifferencesOverrides {
+        map: std::collections::HashMap::new(),
+        total: 0,
+        unresolved: 0,
+    };
     let Some(enc) = dict.get(b"Encoding").ok() else {
-        return set;
+        return out;
     };
     let Some(enc_dict) = helpers::resolve_dict(doc, enc) else {
-        return set;
+        return out;
     };
     let Some(diffs) = enc_dict
         .get(b"Differences")
         .ok()
         .and_then(|v| helpers::resolve_array(doc, v))
     else {
-        return set;
+        return out;
     };
     let mut code: i64 = 0;
     for item in diffs {
         match item {
             Object::Integer(n) => code = *n,
             Object::Real(n) => code = *n as i64,
-            Object::Name(_) => {
+            Object::Name(name) => {
                 if (0..=255).contains(&code) {
-                    set.insert(code as u8);
+                    out.total += 1;
+                    let glyph = String::from_utf8_lossy(name);
+                    match crate::glyphlist::glyph_name_to_string(&glyph) {
+                        Some(s) => {
+                            out.map.insert(code as u8, s);
+                        }
+                        None => {
+                            out.map.insert(code as u8, "\u{FFFD}".to_string());
+                            out.unresolved += 1;
+                        }
+                    }
                 }
                 code += 1;
             }
             _ => {}
         }
     }
-    set
+    out
+}
+
+/// Whether a font's `/Encoding` carries a `/Differences` array (any glyph-name
+/// assignments). Used only on the passthrough classification path.
+fn has_differences(doc: &Document, dict: &lopdf::Dictionary) -> bool {
+    dict.get(b"Encoding")
+        .ok()
+        .and_then(|enc| helpers::resolve_dict(doc, enc))
+        .and_then(|ed| {
+            ed.get(b"Differences")
+                .ok()
+                .and_then(|v| helpers::resolve_array(doc, v))
+        })
+        .is_some_and(|diffs| diffs.iter().any(|o| matches!(o, Object::Name(_))))
 }
 
 /// Check whether fonts on a page have known encodings.
@@ -1477,6 +1547,97 @@ mod tests {
             document_verdict(&fonts, result.total_codes, result.unmapped_codes),
             Reliability::Degraded
         );
+    }
+
+    /// Build a Type1 simple font with an inline `/Encoding` dictionary carrying
+    /// the given `/BaseEncoding` (optional) and `/Differences` array.
+    fn type1_font_with_differences(
+        base_encoding: Option<&[u8]>,
+        differences: Vec<Object>,
+    ) -> Dictionary {
+        let mut enc = Dictionary::new();
+        enc.set("Type", Object::Name(b"Encoding".to_vec()));
+        if let Some(be) = base_encoding {
+            enc.set("BaseEncoding", Object::Name(be.to_vec()));
+        }
+        enc.set("Differences", Object::Array(differences));
+
+        let mut font = Dictionary::new();
+        font.set("Type", Object::Name(b"Font".to_vec()));
+        font.set("Subtype", Object::Name(b"Type1".to_vec()));
+        font.set("BaseFont", Object::Name(b"ABCDEF+Custom".to_vec()));
+        font.set("Encoding", Object::Dictionary(enc));
+        font
+    }
+
+    #[test]
+    fn differences_glyph_names_resolve_via_agl_and_are_reliable() {
+        // Codes 0x41/0x42/0x43 are remapped by /Differences to glyph names that
+        // all resolve through the Adobe Glyph List:
+        //   Lcommaaccent -> U+013B (Ļ), uni00E9 -> é, f_f_i -> "ffi".
+        let diffs = vec![
+            Object::Integer(0x41),
+            Object::Name(b"Lcommaaccent".to_vec()),
+            Object::Name(b"uni00E9".to_vec()),
+            Object::Name(b"f_f_i".to_vec()),
+        ];
+        let font = type1_font_with_differences(Some(b"WinAnsiEncoding"), diffs);
+        let (doc, p_id) = doc_with_font(font, None, b"BT /F1 12 Tf (\x41\x42\x43) Tj ET");
+        let result = extract_text_from_page_with_warnings(&doc, p_id);
+        assert_eq!(result.text, "\u{013B}\u{00E9}ffi");
+
+        // Every /Differences name resolved, so the font (and document) is Reliable.
+        let rec = result.fonts.iter().find(|f| f.name == "/F1").expect("F1");
+        assert_eq!(rec.classification, Reliability::Reliable);
+        let fonts = dedup_font_records(result.fonts);
+        assert_eq!(
+            document_verdict(&fonts, result.total_codes, result.unmapped_codes),
+            Reliability::Reliable
+        );
+    }
+
+    #[test]
+    fn differences_falls_through_to_base_table_for_unoverridden_codes() {
+        // Only code 0x80 is overridden (to a bullet); 0x41 ('A') and the WinAnsi
+        // en dash 0x96 still decode through the WinAnsi base table.
+        let diffs = vec![Object::Integer(0x80), Object::Name(b"bullet".to_vec())];
+        let font = type1_font_with_differences(Some(b"WinAnsiEncoding"), diffs);
+        let (doc, p_id) = doc_with_font(font, None, b"BT /F1 12 Tf (\x41\x80\x96) Tj ET");
+        let result = extract_text_from_page_with_warnings(&doc, p_id);
+        assert_eq!(result.text, "A\u{2022}\u{2013}");
+    }
+
+    #[test]
+    fn partially_resolving_differences_is_degraded_and_emits_replacement() {
+        // 0x41 resolves (Aacute); 0x42 is a private glyph name AGL cannot map.
+        let diffs = vec![
+            Object::Integer(0x41),
+            Object::Name(b"Aacute".to_vec()),
+            Object::Name(b"g42".to_vec()),
+        ];
+        let font = type1_font_with_differences(Some(b"WinAnsiEncoding"), diffs);
+        let (doc, p_id) = doc_with_font(font, None, b"BT /F1 12 Tf (\x41\x42) Tj ET");
+        let result = extract_text_from_page_with_warnings(&doc, p_id);
+        assert_eq!(result.text, "\u{00C1}\u{FFFD}");
+
+        let rec = result.fonts.iter().find(|f| f.name == "/F1").expect("F1");
+        assert_eq!(rec.classification, Reliability::Degraded);
+        assert!(
+            rec.reason.contains("1 of 2") && rec.reason.contains("Adobe Glyph List"),
+            "reason: {}",
+            rec.reason
+        );
+    }
+
+    #[test]
+    fn differences_without_base_encoding_resolves_overrides_passthrough_rest() {
+        // No /BaseEncoding: overridden code 0x80 -> AGL (emdash); the ASCII byte
+        // 0x41 passes through unchanged since there is no recognized base table.
+        let diffs = vec![Object::Integer(0x80), Object::Name(b"emdash".to_vec())];
+        let font = type1_font_with_differences(None, diffs);
+        let (doc, p_id) = doc_with_font(font, None, b"BT /F1 12 Tf (\x41\x80) Tj ET");
+        let result = extract_text_from_page_with_warnings(&doc, p_id);
+        assert_eq!(result.text, "A\u{2014}");
     }
 
     #[test]

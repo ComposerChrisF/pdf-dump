@@ -27,8 +27,9 @@
 //! searchable (a precomposed `U+FB01` would not match a plain-text search for
 //! `fi`), and a few MacExpert glyphs expand likewise (`rupiah` → `Rp`).
 //!
-//! NON-GOAL (Tier 2): Adobe Glyph List glyph-name resolution for `/Differences`
-//! is not handled here.
+//! `/Differences` glyph-name resolution (via the Adobe Glyph List) layers *on
+//! top of* these tables: see `crate::glyphlist`, which `text.rs` consults for
+//! overridden codes before falling through to the base table here.
 
 /// Printable ASCII `0x20..=0x7E` packed in order. Each byte is single-byte
 /// UTF-8, so a one-byte slice is a valid `&'static str` for any code in range —
