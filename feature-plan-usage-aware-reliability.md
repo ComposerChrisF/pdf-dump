@@ -154,6 +154,15 @@ reliability-verdict tests for intended changes.
 
 ## Phase 2 — Variable-width ToUnicode codespace (fixes #3)
 
+> **Status: IMPLEMENTED.**  `cmap.rs` now stores each codespace entry’s `lo`/`hi`
+> bounds (a `Codespace` struct) and exposes `next_code`, which extracts the next
+> code by honoring the ranges (shortest match wins).  `FontDecoder::ToUnicode`
+> carries a `CodeWidth`: the `Fixed` fast path (`split_codes`) is untouched, and
+> `Variable`/`Unknown` decode per range in `emit_show_string`; `build_font_decoder`
+> collapses only `Unknown` to the CID-vs-simple heuristic.  Four `cmap.rs`
+> `next_code` tests plus two end-to-end `text.rs` tests (with an Identity-H
+> regression guard) added.  Phase 3 remains optional/open.
+
 ### Goal
 
 Split show-string bytes into codes by honoring the CMap’s codespace ranges instead of

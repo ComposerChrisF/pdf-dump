@@ -34,15 +34,24 @@ enum BfDst {
 pub(crate) enum CodeWidth {
     /// All codespace ranges agree on a single byte width (1..=4).
     Fixed(u8),
-    /// Ranges disagree; caller should fall back to a font-subtype heuristic.
+    /// Ranges disagree on width; codes must be extracted per-range via
+    /// [`ToUnicodeCMap::next_code`] rather than chunked at one fixed width.
     Variable(u8, u8),
-    /// No codespace ranges were parsed.
+    /// No codespace ranges were parsed (caller falls back to a subtype heuristic).
     Unknown,
 }
 
+/// One parsed `begincodespacerange` entry: codes whose `i`-th byte lies in
+/// `lo[i]..=hi[i]` for every `i` belong to this range. `lo.len() == hi.len()`
+/// is the range's byte width (1..=4).
+struct Codespace {
+    lo: Vec<u8>,
+    hi: Vec<u8>,
+}
+
 pub(crate) struct ToUnicodeCMap {
-    /// Byte width of each parsed `begincodespacerange` entry.
-    codespace_widths: Vec<u8>,
+    /// Parsed `begincodespacerange` bounds (width == each entry's `lo.len()`).
+    codespaces: Vec<Codespace>,
     /// `bfchar` single-code mappings.
     single: BTreeMap<u32, String>,
     /// `bfrange` spans, searched after `single` misses.
@@ -54,7 +63,7 @@ impl ToUnicodeCMap {
     pub(crate) fn parse(bytes: &[u8]) -> ToUnicodeCMap {
         let tokens = tokenize(bytes);
         let mut cmap = ToUnicodeCMap {
-            codespace_widths: Vec::new(),
+            codespaces: Vec::new(),
             single: BTreeMap::new(),
             ranges: Vec::new(),
         };
@@ -102,14 +111,46 @@ impl ToUnicodeCMap {
 
     /// Byte width to consume per code, derived from the codespace ranges.
     pub(crate) fn byte_width(&self) -> CodeWidth {
-        match (
-            self.codespace_widths.iter().min(),
-            self.codespace_widths.iter().max(),
-        ) {
-            (Some(&min), Some(&max)) if min == max => CodeWidth::Fixed(min),
-            (Some(&min), Some(&max)) => CodeWidth::Variable(min, max),
+        let widths = || self.codespaces.iter().map(|c| c.lo.len() as u8);
+        match (widths().min(), widths().max()) {
+            (Some(min), Some(max)) if min == max => CodeWidth::Fixed(min),
+            (Some(min), Some(max)) => CodeWidth::Variable(min, max),
             _ => CodeWidth::Unknown,
         }
+    }
+
+    /// Extract the next character code from `bytes`, honoring the codespace
+    /// ranges. Returns the code value and the number of bytes consumed (always
+    /// `1..=bytes.len()`). A best-effort form of the PDF 32000-1 §9.7.6.2
+    /// code-extraction rule: the shortest-width codespace range whose every byte
+    /// falls within `[lo_i, hi_i]` wins. When no range matches, the shortest
+    /// codespace width is consumed as an undefined code (which `map_code` then
+    /// misses, yielding U+FFFD). Only meaningful for `Variable`/`Unknown`
+    /// codespaces; `Fixed` callers chunk directly. Caller must ensure `!bytes.is_empty()`.
+    pub(crate) fn next_code(&self, bytes: &[u8]) -> (u32, usize) {
+        // Prefer the shortest matching range so a 1-byte code (e.g. ASCII) is
+        // not swallowed by a 2-byte range that also nominally fits.
+        for w in 1..=4usize {
+            if w > bytes.len() {
+                break;
+            }
+            for cs in self.codespaces.iter().filter(|c| c.lo.len() == w) {
+                if (0..w).all(|k| bytes[k] >= cs.lo[k] && bytes[k] <= cs.hi[k]) {
+                    return (be_to_u32(&bytes[..w]), w);
+                }
+            }
+        }
+        // No range matched: consume the shortest codespace width (or one byte if
+        // none is known / the string is shorter) as an undefined code.
+        let min_w = self
+            .codespaces
+            .iter()
+            .map(|c| c.lo.len())
+            .min()
+            .unwrap_or(1)
+            .clamp(1, 4);
+        let take = min_w.min(bytes.len()).max(1);
+        (be_to_u32(&bytes[..take]), take)
     }
 
     /// True if no mappings were parsed (CMap is unusable for decoding).
@@ -127,8 +168,17 @@ fn parse_codespace(tokens: &[Token], mut i: usize, cmap: &mut ToUnicodeCMap) -> 
         match &tokens[i] {
             Token::Word(w) if w == b"endcodespacerange" => return i + 1,
             Token::Hex(lo) => {
-                // Pair: <lo> <hi>. Width comes from the low token's byte length.
-                cmap.codespace_widths.push(lo.len().clamp(1, 4) as u8);
+                // Pair: <lo> <hi>. Store both bounds; width is the low token's
+                // byte length (clamped to 1..=4). `resize` normalizes a stray
+                // odd-length token, padding lo with 0x00 and hi with 0xFF.
+                if let Some(Token::Hex(hi)) = tokens.get(i + 1) {
+                    let w = lo.len().clamp(1, 4);
+                    let mut lo_b = lo.clone();
+                    let mut hi_b = hi.clone();
+                    lo_b.resize(w, 0x00);
+                    hi_b.resize(w, 0xFF);
+                    cmap.codespaces.push(Codespace { lo: lo_b, hi: hi_b });
+                }
                 i += 2; // skip lo and hi
             }
             _ => i += 1,
@@ -504,5 +554,41 @@ mod tests {
         let cmap = ToUnicodeCMap::parse(b"");
         assert!(cmap.is_empty());
         assert_eq!(cmap.byte_width(), CodeWidth::Unknown);
+    }
+
+    #[test]
+    fn next_code_mixed_width_prefers_matching_range() {
+        // A 1-byte range <00>-<80> plus a 2-byte range <8140>-<FEFE>: a leading
+        // ASCII byte is taken as one code, a high lead byte as a two-byte code.
+        let cmap =
+            ToUnicodeCMap::parse(b"begincodespacerange <00> <80> <8140> <FEFE> endcodespacerange");
+        assert_eq!(cmap.byte_width(), CodeWidth::Variable(1, 2));
+        assert_eq!(cmap.next_code(&[0x41, 0x81, 0x40]), (0x41, 1));
+        assert_eq!(cmap.next_code(&[0x81, 0x40]), (0x8140, 2));
+    }
+
+    #[test]
+    fn next_code_no_match_consumes_min_width() {
+        // Only a 2-byte codespace; a non-matching prefix consumes the minimum
+        // width (2) as an undefined code rather than desyncing on a single byte.
+        let cmap = ToUnicodeCMap::parse(b"begincodespacerange <8140> <FEFE> endcodespacerange");
+        assert_eq!(cmap.next_code(&[0x20, 0x21]), (0x2021, 2));
+    }
+
+    #[test]
+    fn next_code_fixed_width_consumes_full_width() {
+        // The common Identity-style <0000>-<FFFF> codespace: every code is two
+        // bytes, and next_code agrees with the fixed fast path.
+        let cmap = ToUnicodeCMap::parse(b"begincodespacerange <0000> <FFFF> endcodespacerange");
+        assert_eq!(cmap.byte_width(), CodeWidth::Fixed(2));
+        assert_eq!(cmap.next_code(&[0x12, 0x34, 0x56]), (0x1234, 2));
+    }
+
+    #[test]
+    fn next_code_short_tail_consumes_remainder() {
+        // A trailing byte shorter than the 2-byte codespace width is consumed as
+        // one (short) undefined code; no panic.
+        let cmap = ToUnicodeCMap::parse(b"begincodespacerange <8140> <FEFE> endcodespacerange");
+        assert_eq!(cmap.next_code(&[0x90]), (0x90, 1));
     }
 }

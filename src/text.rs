@@ -55,8 +55,14 @@ pub(crate) struct FontReliabilityRecord {
 
 /// How a font's show-string bytes are turned into Unicode.
 enum FontDecoder {
-    /// Decode each code through a parsed ToUnicode CMap.
-    ToUnicode { cmap: Rc<ToUnicodeCMap>, width: u8 },
+    /// Decode each code through a parsed ToUnicode CMap. `width` carries the
+    /// codespace decision: `Fixed(w)` chunks the bytes at a constant width (the
+    /// common Identity case), while `Variable`/`Unknown` extracts codes one at a
+    /// time via `ToUnicodeCMap::next_code`, honoring per-range widths.
+    ToUnicode {
+        cmap: Rc<ToUnicodeCMap>,
+        width: CodeWidth,
+    },
     /// Single-byte simple font. `overrides` holds per-code strings resolved from
     /// an `/Encoding /Differences` array via the Adobe Glyph List (a code with
     /// no resolvable name maps to U+FFFD); it is consulted first. Codes not
@@ -296,17 +302,37 @@ fn emit_show_string(
     unmapped: &mut u64,
 ) {
     match font {
-        Some(FontDecoder::ToUnicode { cmap, width }) => {
-            for code in split_codes(bytes, *width) {
-                let mapped = cmap.map_code(code);
-                push_code(
-                    out,
-                    mapped.as_deref().unwrap_or("\u{FFFD}"),
-                    total,
-                    unmapped,
-                );
+        Some(FontDecoder::ToUnicode { cmap, width }) => match *width {
+            CodeWidth::Fixed(w) => {
+                // Fast path: chunk at a constant byte width (Identity-H et al.).
+                for code in split_codes(bytes, w) {
+                    let mapped = cmap.map_code(code);
+                    push_code(
+                        out,
+                        mapped.as_deref().unwrap_or("\u{FFFD}"),
+                        total,
+                        unmapped,
+                    );
+                }
             }
-        }
+            CodeWidth::Variable(..) | CodeWidth::Unknown => {
+                // Variable-width codespace: extract codes per range so a mixed
+                // 1-byte/2-byte CJK CMap is split correctly instead of forced to
+                // one width.
+                let mut rest = bytes;
+                while !rest.is_empty() {
+                    let (code, consumed) = cmap.next_code(rest);
+                    let mapped = cmap.map_code(code);
+                    push_code(
+                        out,
+                        mapped.as_deref().unwrap_or("\u{FFFD}"),
+                        total,
+                        unmapped,
+                    );
+                    rest = &rest[consumed.max(1)..];
+                }
+            }
+        },
         Some(FontDecoder::SimpleTable { decode, overrides }) => {
             for &b in bytes {
                 if let Some(s) = overrides.get(&b) {
@@ -436,22 +462,15 @@ fn build_font_decoder(
         let (bytes, _warn) = crate::stream::decode_stream(stream);
         let cmap = ToUnicodeCMap::parse(&bytes);
         if !cmap.is_empty() {
-            // KNOWN LIMITATION (verdict can over-claim): a Variable/Unknown
-            // codespace is forced to a single fixed width (2 for CID, else 1).
-            // A genuinely variable-width CMap can then mis-split multi-byte
-            // codes — wrong characters or U+FFFD — while the font is still
-            // reported Reliable on the strength of having a ToUnicode map.
-            // Revisiting would honor per-range codespace widths in `split_codes`.
-            // See docs/ROADMAP.md ("Known limitations").
+            // Carry the codespace decision into the decoder. A `Variable`
+            // codespace is decoded per range (honoring mixed 1-byte/2-byte CJK
+            // widths) by `emit_show_string` via `next_code`; only `Unknown` (no
+            // codespace parsed at all) still collapses to the subtype heuristic
+            // (2 bytes for CID, else 1), since there are no ranges to split by.
             let width = match cmap.byte_width() {
-                CodeWidth::Fixed(w) => w,
-                CodeWidth::Variable(..) | CodeWidth::Unknown => {
-                    if is_cid {
-                        2
-                    } else {
-                        1
-                    }
-                }
+                fixed @ CodeWidth::Fixed(_) => fixed,
+                var @ CodeWidth::Variable(..) => var,
+                CodeWidth::Unknown => CodeWidth::Fixed(if is_cid { 2 } else { 1 }),
             };
             return (
                 FontDecoder::ToUnicode {
@@ -1847,5 +1866,36 @@ mod tests {
             document_verdict(&fonts, result.total_codes, result.unmapped_codes),
             Reliability::Reliable
         );
+    }
+
+    // --- Variable-width ToUnicode codespace (Phase 2) ----------------------
+
+    #[test]
+    fn variable_width_cmap_decodes_mixed_one_and_two_byte() {
+        // A ToUnicode codespace mixing a 1-byte range (<00>-<80>) and a 2-byte
+        // range (<8140>-<FEFE>): the show-string <41 8140> must split into the
+        // 1-byte code 0x41 ('A') and the 2-byte code 0x8140 (U+4E00), not be
+        // forced to a single width that mis-splits it.
+        let cmap = b"begincodespacerange <00> <80> <8140> <FEFE> endcodespacerange \
+                     beginbfchar <41> <0041> <8140> <4E00> endbfchar";
+        let (doc, p_id) = doc_with_font(type0_font(), Some(cmap), b"BT /F1 12 Tf <418140> Tj ET");
+        let result = extract_text_from_page_with_warnings(&doc, p_id);
+        assert_eq!(result.text, "A\u{4E00}");
+        assert_eq!(result.total_codes, 2);
+        assert_eq!(result.unmapped_codes, 0);
+    }
+
+    #[test]
+    fn identity_h_fixed_width_unchanged() {
+        // Regression guard: the overwhelmingly common Identity-H case (a single
+        // <0000>-<FFFF> codespace) stays on the fixed 2-byte fast path and is
+        // unaffected by the variable-width support.
+        let cmap = b"begincodespacerange <0000> <FFFF> endcodespacerange \
+                     beginbfchar <0041> <0041> <0042> <0042> endbfchar";
+        let (doc, p_id) = doc_with_font(type0_font(), Some(cmap), b"BT /F1 12 Tf <00410042> Tj ET");
+        let result = extract_text_from_page_with_warnings(&doc, p_id);
+        assert_eq!(result.text, "AB");
+        assert_eq!(result.total_codes, 2);
+        assert_eq!(result.unmapped_codes, 0);
     }
 }

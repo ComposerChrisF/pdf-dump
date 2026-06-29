@@ -63,7 +63,7 @@ The tool is split across ~30 source files in `src/`.  The flow is:
 | `helpers.rs` | Shared formatting utilities |
 | `refs.rs` | Reference traversal, reverse ref lookup |
 | `resources.rs` | Page resource extraction (fonts, XObjects, ExtGState, ColorSpaces) |
-| `cmap.rs` | `ToUnicodeCMap::parse` — best-effort ToUnicode CMap parser (bfchar/bfrange, codespace byte-width) for `--text` |
+| `cmap.rs` | `ToUnicodeCMap::parse` — best-effort ToUnicode CMap parser (bfchar/bfrange, codespace `lo`/`hi` bounds) for `--text`; `byte_width`/`next_code` split show-string bytes into codes, honoring variable-width codespaces (mixed 1-byte/2-byte CJK) |
 | `encodings.rs` | `winansi(b)` / `macroman(b)` / `standard(b)` / `macexpert(b)` — WinAnsiEncoding (CP1252), Mac OS Roman, Adobe StandardEncoding, and MacExpertEncoding → Unicode tables for simple fonts lacking ToUnicode.  Return `Option<&'static str>`, so one code can expand to several chars (f-ligatures decompose to ASCII, `rupiah`→`Rp`) |
 | `glyphlist.rs` | `glyph_name_to_string(name)` — Adobe Glyph List resolver for `/Encoding /Differences` glyph names.  Embeds Adobe’s `glyphlist.txt` (BSD-licensed) via `include_str!` into a lazy `OnceLock` map, plus algorithmic `uniXXXX` (UTF-16 units, surrogate pairs) / `uXXXXXX` forms, `.suffix` stripping, and underscore-joined ligature components.  Returns owned `String` (AGL entries can be multi-codepoint) |
 
