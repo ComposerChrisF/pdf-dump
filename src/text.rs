@@ -442,7 +442,18 @@ fn build_font_decoder(
     // 2. Simple font: a recognized base-encoding table and/or `/Encoding
     //    /Differences` glyph names resolved through the Adobe Glyph List.
     if !is_cid {
-        let base = simple_table_for(font_base_encoding(doc, dict).as_deref());
+        let base = simple_table_for(font_base_encoding(doc, dict).as_deref()).or_else(|| {
+            // A Standard-14 text font with no recognized /Encoding uses
+            // StandardEncoding as its builtin (PDF spec Annex D), so decode it
+            // through that table rather than ASCII-only byte passthrough — which
+            // mis-extracts its `0x27`/`0x60` (the curly quotes ’/‘) and any high
+            // byte. This is unambiguous only for the standard-14 set, whose
+            // builtin is fixed; embedded fonts with no /Encoding keep their
+            // honest Degraded passthrough (their builtin could be anything).
+            STANDARD_14_TEXT
+                .contains(&base_font.as_str())
+                .then_some(encodings::standard as fn(u8) -> Option<&'static str>)
+        });
         let diff = build_differences_overrides(doc, dict);
         if !diff.map.is_empty() {
             // Overridden codes decode via AGL; the rest via `base` (or, when no
@@ -520,24 +531,12 @@ fn classify_passthrough(
     }
 
     // Every named single-byte base encoding (WinAnsi, MacRoman, Standard,
-    // MacExpert) now has a table, and any font with a `/Differences` array is
-    // routed through `SimpleTable` (with AGL resolution) earlier in
-    // `build_font_decoder`, so passthrough is only reached for fonts with no
-    // recognized encoding and no `/Differences`.
-
-    // Standard-14 text fonts with no/unknown encoding decode accurately as ASCII.
-    //
-    // KNOWN LIMITATION (verdict can over-claim — same class as the base-less
-    // `/Differences` case in `build_font_decoder`): these fonts decode by raw
-    // byte passthrough, which is correct only for ASCII, yet are reported
-    // Reliable. A bare Helvetica/Times/Courier whose builtin encoding is
-    // StandardEncoding extracts `0x27`/`0x60` as the ASCII `'`/`` ` `` rather
-    // than the curly quotes ’/‘, and any high byte as U+FFFD, under a
-    // "reliable" banner. Revisiting would route these through the `standard`
-    // table instead of passthrough. See docs/ROADMAP.md ("Known limitations").
-    if STANDARD_14_TEXT.contains(&base_font) {
-        return (Reliability::Reliable, "");
-    }
+    // MacExpert) now has a table; any font with a `/Differences` array is routed
+    // through `SimpleTable` (with AGL resolution); and Standard-14 text fonts
+    // with no /Encoding now decode through the `standard` table — all earlier in
+    // `build_font_decoder`. So passthrough is reached only for non-standard-14
+    // simple fonts with no recognized encoding and no `/Differences`, whose
+    // builtin encoding we cannot determine.
     if has_differences(doc, dict) {
         return (
             Reliability::Degraded,
@@ -1524,8 +1523,10 @@ mod tests {
     }
 
     #[test]
-    fn simple_helvetica_passthrough_unchanged() {
-        // Standard-14 font, no ToUnicode: ASCII passthrough, classified Reliable.
+    fn simple_helvetica_ascii_unchanged() {
+        // Standard-14 font, no /Encoding, no ToUnicode: now decoded through the
+        // StandardEncoding table (its builtin), but ASCII output is identical to
+        // the old passthrough. Classified Reliable.
         let mut font = Dictionary::new();
         font.set("Type", Object::Name(b"Font".to_vec()));
         font.set("Subtype", Object::Name(b"Type1".to_vec()));
@@ -1538,6 +1539,43 @@ mod tests {
             document_verdict(&fonts, result.total_codes, result.unmapped_codes),
             Reliability::Reliable
         );
+    }
+
+    #[test]
+    fn standard_14_no_encoding_decodes_quotes_via_standard_table() {
+        // A bare Times-Roman (no /Encoding, no /ToUnicode) uses StandardEncoding
+        // as its builtin, where 0x27/0x60 are the curly quotes ’/‘ — not the
+        // ASCII '/` that raw byte passthrough would have produced. This is the
+        // fix for the documented Standard-14 over-claim: it is now genuinely
+        // decoded, not just declared Reliable.
+        let mut font = Dictionary::new();
+        font.set("Type", Object::Name(b"Font".to_vec()));
+        font.set("Subtype", Object::Name(b"Type1".to_vec()));
+        font.set("BaseFont", Object::Name(b"Times-Roman".to_vec()));
+        let (doc, p_id) = doc_with_font(font, None, b"BT /F1 12 Tf (it\x27s \x60so\x27) Tj ET");
+        let result = extract_text_from_page_with_warnings(&doc, p_id);
+        assert_eq!(result.text, "it\u{2019}s \u{2018}so\u{2019}");
+        let fonts = dedup_font_records(result.fonts);
+        assert_eq!(
+            document_verdict(&fonts, result.total_codes, result.unmapped_codes),
+            Reliability::Reliable
+        );
+    }
+
+    #[test]
+    fn non_standard_14_no_encoding_stays_degraded_passthrough() {
+        // An embedded font with no /Encoding, no /ToUnicode, and a non-standard
+        // BaseFont keeps its honest Degraded passthrough — its builtin encoding
+        // is unknown, so we do NOT presume StandardEncoding for it.
+        let mut font = Dictionary::new();
+        font.set("Type", Object::Name(b"Font".to_vec()));
+        font.set("Subtype", Object::Name(b"Type1".to_vec()));
+        font.set("BaseFont", Object::Name(b"ABCDEF+Custom".to_vec()));
+        let (doc, p_id) = doc_with_font(font, None, b"BT /F1 12 Tf (Hi) Tj ET");
+        let result = extract_text_from_page_with_warnings(&doc, p_id);
+        assert_eq!(result.text, "Hi");
+        let rec = result.fonts.iter().find(|f| f.name == "/F1").expect("F1");
+        assert_eq!(rec.classification, Reliability::Degraded);
     }
 
     #[test]
