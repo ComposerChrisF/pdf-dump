@@ -6,11 +6,10 @@ Remaining enhancements and upstream improvements for pdf-dump.
 
 ## `--text` improvements
 
-Text extraction is now font-aware (Tier 1): show-strings are decoded through each font’s `/ToUnicode` CMap and through WinAnsiEncoding/MacRomanEncoding/StandardEncoding tables for simple fonts that lack one, with raw byte passthrough as a fallback.  A per-document reliability verdict (Reliable/Degraded/Unreliable) is surfaced via a loud stderr banner, a JSON `reliability` object, and exit code 3 when extraction is unreliable (CID/Type0 fonts without ToUnicode).
+Text extraction is now font-aware (Tier 1): show-strings are decoded through each font’s `/ToUnicode` CMap and through tables for all four named single-byte base encodings (WinAnsi, MacRoman, Standard, MacExpert) for simple fonts that lack one, with raw byte passthrough as a fallback.  A per-document reliability verdict (Reliable/Degraded/Unreliable) is surfaced via a loud stderr banner, a JSON `reliability` object, and exit code 3 when extraction is unreliable (CID/Type0 fonts without ToUnicode).
 
 Remaining accuracy improvements:
 
-- **MacExpertEncoding table** — The last single-byte base encoding still on passthrough.  Near-zero real-world usage (expert-set glyphs: old-style figures, small caps, extra ligatures), so it is the lowest-value table to add.
 - **Adobe Glyph List** — Resolve `/Differences` glyph names to Unicode for simple fonts that lack a ToUnicode map.
 - **Predefined CJK CMaps** — Support the Adobe-Japan1/GB1/CNS1/Korea1 CMap resource files for CID fonts that use them without an embedded ToUnicode.
 - **Coordinate-based text ordering** — Use `Tm`/`Td`/`TD` coordinates to sort text blocks top-to-bottom, left-to-right within a page, rather than pure content-stream order.

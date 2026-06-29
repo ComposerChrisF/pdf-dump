@@ -57,24 +57,28 @@ pub(crate) struct FontReliabilityRecord {
 enum FontDecoder {
     /// Decode each code through a parsed ToUnicode CMap.
     ToUnicode { cmap: Rc<ToUnicodeCMap>, width: u8 },
-    /// Single-byte base-encoding table (WinAnsi/MacRoman); `overridden` codes
-    /// are remapped by `/Differences` to glyph names we cannot resolve without
-    /// the Adobe Glyph List, so they emit U+FFFD.
+    /// Single-byte base-encoding table (WinAnsi/MacRoman/Standard/MacExpert).
+    /// `decode` returns `&'static str` so a code can yield more than one
+    /// character (e.g. a decomposed ligature). `overridden` codes are remapped
+    /// by `/Differences` to glyph names we cannot resolve without the Adobe
+    /// Glyph List, so they emit U+FFFD.
     SimpleTable {
-        decode: fn(u8) -> Option<char>,
+        decode: fn(u8) -> Option<&'static str>,
         overridden: HashSet<u8>,
     },
     /// Raw byte passthrough (today's behavior) — used when we cannot decode.
     Passthrough,
 }
 
-/// Pick the byte-table decoder for a recognized simple-font base encoding,
-/// or `None` if we have no table for it (e.g. MacExpertEncoding — Tier 2).
-fn simple_table_for(encoding: Option<&str>) -> Option<fn(u8) -> Option<char>> {
+/// Pick the byte-table decoder for a recognized simple-font base encoding, or
+/// `None` for an unrecognized/custom encoding name we have no table for. All
+/// four named single-byte base encodings are now covered.
+fn simple_table_for(encoding: Option<&str>) -> Option<fn(u8) -> Option<&'static str>> {
     match encoding {
         Some("WinAnsiEncoding") => Some(encodings::winansi),
         Some("MacRomanEncoding") => Some(encodings::macroman),
         Some("StandardEncoding") => Some(encodings::standard),
+        Some("MacExpertEncoding") => Some(encodings::macexpert),
         _ => None,
     }
 }
@@ -291,7 +295,7 @@ fn emit_show_string(
                 if overridden.contains(&b) {
                     out.push('\u{FFFD}');
                 } else {
-                    out.push(decode(b).unwrap_or('\u{FFFD}'));
+                    out.push_str(decode(b).unwrap_or("\u{FFFD}"));
                 }
             }
         }
@@ -466,24 +470,9 @@ fn classify_passthrough(
     }
 
     let has_differences = !encoding_overridden_codes(doc, dict).is_empty();
-    // A recognized base encoding we lack a table for (MacExpert; WinAnsi,
-    // MacRoman, and Standard are handled earlier with tables) still decodes the
-    // ASCII range — which dominates real content — accurately via passthrough, so
-    // it is not flagged. Only the high range (0x80..) can be off, and reserving
-    // the banner for genuinely garbled text keeps it loud.
-    let recognized_base = matches!(
-        font_base_encoding(doc, dict).as_deref(),
-        Some("MacExpertEncoding")
-    );
-    if recognized_base {
-        if has_differences {
-            return (
-                Reliability::Degraded,
-                "/Differences glyph names without a ToUnicode map (no Adobe Glyph List)",
-            );
-        }
-        return (Reliability::Reliable, "");
-    }
+    // Every named single-byte base encoding (WinAnsi, MacRoman, Standard,
+    // MacExpert) now has a table and is handled earlier in `build_font_decoder`,
+    // so passthrough is only reached for fonts with no recognized encoding.
 
     // Standard-14 text fonts with no/unknown encoding decode accurately as ASCII.
     if STANDARD_14_TEXT.contains(&base_font) {
@@ -1388,6 +1377,41 @@ mod tests {
             document_verdict(&fonts, result.total_codes, result.unmapped_codes),
             Reliability::Reliable
         );
+    }
+
+    #[test]
+    fn macexpert_simple_font_folds_to_base_characters() {
+        let mut font = Dictionary::new();
+        font.set("Type", Object::Name(b"Font".to_vec()));
+        font.set("Subtype", Object::Name(b"Type1".to_vec()));
+        font.set("BaseFont", Object::Name(b"ABCDEF+Expert".to_vec()));
+        font.set("Encoding", Object::Name(b"MacExpertEncoding".to_vec()));
+        // 0x63..0x65 are small-cap A/B/C, 0x59 the fi ligature; passthrough
+        // would render these as the raw bytes c/d/e/Y. The ligature decomposes
+        // to the ASCII "fi" (multi-char output) rather than U+FB01.
+        let (doc, p_id) = doc_with_font(font, None, b"BT /F1 12 Tf (\x63\x64\x65\x59) Tj ET");
+        let result = extract_text_from_page_with_warnings(&doc, p_id);
+        assert_eq!(result.text, "ABCfi");
+        // Table decode attempts no ToUnicode codes, so it stays Reliable.
+        let fonts = dedup_font_records(result.fonts);
+        assert_eq!(
+            document_verdict(&fonts, result.total_codes, result.unmapped_codes),
+            Reliability::Reliable
+        );
+    }
+
+    #[test]
+    fn multi_char_glyphs_expand_through_pipeline() {
+        // One byte → several chars must survive the show-string emit path:
+        // 0x5B = ffi ligature, 0x7F = rupiah ("Rp"), wrapping a plain small-cap.
+        let mut font = Dictionary::new();
+        font.set("Type", Object::Name(b"Font".to_vec()));
+        font.set("Subtype", Object::Name(b"Type1".to_vec()));
+        font.set("BaseFont", Object::Name(b"ABCDEF+Expert".to_vec()));
+        font.set("Encoding", Object::Name(b"MacExpertEncoding".to_vec()));
+        let (doc, p_id) = doc_with_font(font, None, b"BT /F1 12 Tf (\x5B\x63\x7F) Tj ET");
+        let result = extract_text_from_page_with_warnings(&doc, p_id);
+        assert_eq!(result.text, "ffiARp");
     }
 
     #[test]
