@@ -46,6 +46,7 @@ pub(crate) mod object;
 pub(crate) mod operators;
 pub(crate) mod page_info;
 pub(crate) mod page_labels;
+pub(crate) mod recover;
 pub(crate) mod refs;
 pub(crate) mod resources;
 pub(crate) mod search;
@@ -89,7 +90,7 @@ pub fn run() {
         }
     }
 
-    let doc = match Document::load(&args.file) {
+    let mut doc = match Document::load(&args.file) {
         Ok(doc) => doc,
         Err(e) => {
             eprintln!("Error: Failed to load PDF file '{}'.", args.file.display());
@@ -97,6 +98,19 @@ pub fn run() {
             std::process::exit(1);
         }
     };
+
+    // Lenient read: lopdf drops a content stream to a bare dictionary when the
+    // PDF declares a wrong /Length (silent body loss). When any such object is
+    // present, re-read the raw file and recover the true stream bodies, with a
+    // loud stderr banner spelling out exactly what was malformed.
+    if recover::has_candidates(&doc)
+        && let Ok(raw) = std::fs::read(&args.file)
+    {
+        let recoveries = recover::recover_malformed_streams(&mut doc, &raw);
+        if let Some(banner) = recover::recovery_banner(&recoveries) {
+            eprint!("{}", banner);
+        }
+    }
 
     let config = DumpConfig {
         decode: args.decode,
