@@ -350,3 +350,94 @@ fn lopdf_load_with_wrong_password_errors() {
         "lopdf changed: a wrong password no longer errors."
     );
 }
+
+// ── Canary: save_modern() + encryption corrupts ObjStm-packed strings ────────
+//
+// save_modern() packs objects (including /Info metadata strings) into an ObjStm
+// that lopdf leaves UNENCRYPTED while /Encrypt tells readers to decrypt ALL
+// streams — so those strings read back corrupt. pdf-orchestrator works around it
+// by using traditional save() for encrypted output (NOT save_modern). This canary
+// is the authoritative gate for "has lopdf fixed it yet": it FAILS LOUDLY when the
+// bug is gone, signalling that the workaround can be removed.
+//
+// It is hardened against the false "everything's okay" that bit us once already:
+//   1. PRECONDITION — it asserts save_modern actually emitted an ObjStm, so
+//      "no corruption" can never be misread as "fixed" when the fixture simply
+//      failed to trigger the ObjStm packing;
+//   2. EXACT round-trip — it compares the reloaded /Info Title to a unique marker,
+//      not an exit status or a substring proxy;
+//   3. BOTH failure modes count as "still broken" — a hard load error OR a
+//      silently garbled title (which one occurs depends on cipher/byte alignment).
+
+/// Read /Info → /Title back as a String, if present and decodable.
+fn info_title(doc: &Document) -> Option<String> {
+    let info = doc.trailer.get(b"Info").ok()?;
+    let dict = match info {
+        Object::Reference(id) => doc.get_object(*id).ok()?.as_dict().ok()?,
+        Object::Dictionary(d) => d,
+        _ => return None,
+    };
+    match dict.get(b"Title").ok()? {
+        Object::String(bytes, _) => Some(String::from_utf8_lossy(bytes).into_owned()),
+        _ => None,
+    }
+}
+
+#[test]
+fn lopdf_save_modern_encryption_corrupts_objstm_strings() {
+    const MARKER: &str = "SENTINEL_save_modern_objstm_roundtrip_marker_42";
+
+    // A doc with a distinctive /Info Title plus enough filler dict objects that
+    // save_modern packs them (and /Info) into an ObjStm.
+    let mut doc = build_minimal_doc();
+    let mut info = Dictionary::new();
+    info.set(b"Title", Object::string_literal(MARKER.as_bytes().to_vec()));
+    let info_id = doc.add_object(Object::Dictionary(info));
+    doc.trailer.set(b"Info", Object::Reference(info_id));
+    for i in 0..40 {
+        let mut d = Dictionary::new();
+        d.set(
+            b"SentinelFiller",
+            Object::string_literal(format!("filler-string-{i}").into_bytes()),
+        );
+        doc.add_object(Object::Dictionary(d));
+    }
+
+    // Encrypt (owner password; empty user password → load_mem auto-decrypts),
+    // then serialize with save_modern (the path that mis-handles the ObjStm).
+    let state = EncryptionState::try_from(EncryptionVersion::V1 {
+        document: &doc,
+        owner_password: "owner",
+        user_password: "",
+        permissions: Permissions::all(),
+    })
+    .expect("failed to create encryption state");
+    doc.encrypt(&state).expect("failed to encrypt document");
+    let mut bytes = Vec::new();
+    doc.save_modern(&mut bytes).expect("failed to save_modern");
+
+    // (1) Precondition: the bug only triggers when save_modern emits an ObjStm.
+    // If it didn't, the fixture stopped exercising the bug — fail loudly rather
+    // than let "no corruption" be silently read as "fixed".
+    let has_objstm = bytes.windows(6).any(|w| w == b"ObjStm");
+    assert!(
+        has_objstm,
+        "sentinel fixture no longer makes save_modern emit an ObjStm — strengthen the \
+         fixture; without an ObjStm this canary cannot detect the encryption bug."
+    );
+
+    // (2)+(3) Reload and require an EXACT round-trip of the marker to call it
+    // fixed. A hard load error or a garbled/missing title both mean still-broken.
+    match Document::load_mem(&bytes) {
+        Err(_) => { /* hard-error failure mode — bug still present */ }
+        Ok(loaded) => {
+            assert_ne!(
+                info_title(&loaded).as_deref(),
+                Some(MARKER),
+                "lopdf save_modern() + encryption now round-trips ObjStm-packed strings — the \
+                 bug appears FIXED. Re-enable save_modern for encrypted output in pdf-orchestrator \
+                 (drop the traditional-save workaround in main.rs) and delete this canary."
+            );
+        }
+    }
+}
