@@ -20,7 +20,8 @@
 //! should be revisited. Each test documents which workaround it guards.
 
 use lopdf::{
-    Dictionary, Document, EncryptionState, EncryptionVersion, Object, Permissions, StringFormat,
+    Dictionary, Document, EncryptionState, EncryptionVersion, LoadOptions, Object, Permissions,
+    StringFormat,
 };
 
 // ── Helpers ──────────────────────────────────────────────────────────────
@@ -322,8 +323,8 @@ fn lopdf_loads_fully_with_correct_password() {
     // objects present, encryption_state Some, and /Encrypt removed from the
     // trailer (is_encrypted() false).
     let bytes = encrypt_to_bytes(build_minimal_doc(), "secret");
-    let loaded = Document::load_mem_with_password(&bytes, "secret")
-        .expect("load_mem_with_password with the correct password should succeed");
+    let loaded = Document::load_mem_with_options(&bytes, LoadOptions::with_password("secret"))
+        .expect("load_mem_with_options with the correct password should succeed");
 
     assert!(
         loaded.objects.len() > 1,
@@ -345,7 +346,7 @@ fn lopdf_load_with_wrong_password_errors() {
     // A wrong password must error (so pdf-dump can exit 1), not silently degrade.
     let bytes = encrypt_to_bytes(build_minimal_doc(), "secret");
     assert!(
-        Document::load_mem_with_password(&bytes, "wrong").is_err(),
+        Document::load_mem_with_options(&bytes, LoadOptions::with_password("wrong")).is_err(),
         "lopdf changed: a wrong password no longer errors."
     );
 }
