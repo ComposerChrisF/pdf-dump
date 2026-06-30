@@ -19,9 +19,11 @@ The per-font Reliable/Degraded/Unreliable verdict is assigned **statically**, fr
 
 The one residual is benign and optional: a base-less `/Differences` font reported Reliable that never actually shows its undecodable codes — the output is correct in that case, so a dedicated static fix is left as an optional refinement (`feature-plan-usage-aware-reliability.md`, Phase 3).
 
-## Dependencies: coordinate a cross-project lopdf bump
+## Dependencies: lopdf
 
-pdf-dump is now on lopdf 0.39.0 (bumped from 0.36.0 to match pdf-maker, which fixed encrypted-PDF interop between the two tools).  The latest crate is 0.42.0.  **TODO:** at some point bump every `~/Chris/App/Rust/Pdf/*` project (pdf-dump, pdf-maker, font-dump, medpdf, pdf-orchestrator, …) to the same latest lopdf in one coordinated pass, rather than letting versions drift apart again — a shared lopdf version keeps parse/encrypt behavior consistent across the toolchain.  Re-run each project’s test suite (pdf-dump’s `tests/lopdf_canary.rs` is the tripwire for behavior changes in the encryption/xref workarounds) when doing so.
+**Done (2026-06-29):** the whole `~/Chris/App/Rust/Pdf/*` toolchain is on a single lopdf **0.42.0** (pdf-dump, pdf-maker, pdf-orchestrator, the medpdf workspace; font-dump has no lopdf).  A shared version keeps parse/encrypt behavior consistent; `tests/lopdf_canary.rs` is the tripwire for the encryption / xref / save_modern behaviors the toolchain depends on.
+
+**Residual:** lopdf **0.43.0 is broken** — its default `time` feature references a nonexistent `FormatItem::StringLiteral`, so the crate will not compile.  Revisit 0.43.x once upstream fixes it; its only addition over 0.42 is an unused “encryption status in PdfMetadata” feature, so there is no urgency.  When bumping, retest the save_modern + encryption sentinel (see Completed): lopdf still mis-encrypts ObjStm-packed strings as of 0.42, which is why pdf-orchestrator uses traditional `save()` for encrypted output.
 
 ## lopdf upstream: preserve encrypt dict
 
@@ -32,6 +34,14 @@ When lopdf loads an encrypted PDF, it removes the `/Encrypt` entry from the trai
 ---
 
 ## Completed
+
+The whole PDF toolchain was bumped to a single lopdf **0.42.0** in one coordinated pass (pdf-dump, pdf-maker, pdf-orchestrator, the medpdf workspace).  0.43.0 was skipped because it does not compile (see Dependencies above).
+
+Observable recovery and a strict gate (v0.22).  Stream-`/Length` recoveries are now surfaced machine-readably: `run()` builds a `recovery` object that `print_json_with_recovery` merges into every `--json` mode (absent for clean PDFs).  `--strict` inverts the default — detect the malformed `/Length`, refuse to repair it, and exit 3 — a hard gate for CI.
+
+Encrypted-PDF reporting and `--password` (v0.23).  The overview’s `encrypted` is now authoritative (`encryption_state.is_some() || doc.is_encrypted()`), so a password-protected PDF opened without its password is reported `encrypted: true` / `decrypted: false` with a loud banner, a validation warning, and exit 3 — instead of the old silent `encrypted: false`, 1 object, 0 pages.  `--password <PW>` decrypts via `Document::load_with_password` so such files read fully.
+
+A hardened lopdf save_modern + encryption sentinel lives in `tests/lopdf_canary.rs`.  lopdf’s `save_modern()` packs strings into an ObjStm it leaves unencrypted under `/Encrypt`, corrupting them (still present through 0.42; pdf-orchestrator works around it with traditional `save()` for encrypted output).  The sentinel checks decoded content (not exit status), asserts an ObjStm was actually emitted (precondition), and requires an exact `/Info` round-trip, so it cannot falsely report “fixed”; it fails loudly when lopdf finally fixes the bug.
 
 `pdf-dump` now reads leniently past a malformed `/Length`.  When a writer emits a content stream whose `/Length` does not match the bytes between `stream` and `endstream`, lopdf cannot find `endstream` where the length says and drops the object to a bare dictionary — its body silently lost (page text vanishes).  `recover.rs` runs once after `Document::load`: it relocates each such object by its cross-reference offset, extracts the true body by scanning to `endstream`, and promotes it back to `Object::Stream`, so every mode (text, `--list`, `--object`, extract-stream, …) sees the repaired document.  Each recovery prints a loud stderr banner naming the object, its declared vs. actual length, and the file offset.  The motivating case was pdf-maker’s overlay output (see its `feature-plan-overlay-content-stream-length.md`).
 
