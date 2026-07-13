@@ -43,7 +43,8 @@
       "Bash(printf '%%PDF-1.7\\\\nbroken')",
       "Bash(cargo run *)",
       "Bash(gh run *)",
-      "Bash(verset *)"
+      "Bash(verset *)",
+      "Bash(pdf-dump *)"
     ]
   }
 }
