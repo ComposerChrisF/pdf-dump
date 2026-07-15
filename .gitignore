@@ -4,3 +4,4 @@ out*.txt
 *.pdf
 *.ttf
 .publish-bin.toml
+.install-bin.toml
