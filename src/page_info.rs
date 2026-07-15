@@ -178,7 +178,9 @@ fn collect_page_info(
     }
 }
 
-/// Returns `true` when the requested page was out of range (exit-3 signal).
+/// Returns `true` when the requested page was out of range. At runtime `run()`
+/// guards an out-of-range `--page` up front and exits 1 before dispatching here,
+/// so this return is reached only by the direct unit tests below.
 pub(crate) fn print_page_info(writer: &mut impl Write, doc: &Document, spec: &PageSpec) -> bool {
     let page_list = match helpers::build_page_list(doc, Some(spec)) {
         Ok(list) => list,
@@ -339,6 +341,8 @@ pub(crate) fn page_info_json_value(doc: &Document, spec: &PageSpec) -> Value {
 }
 
 /// JSON variant that also reports whether the requested page was out of range.
+/// As with `print_page_info`, `run()` exits 1 up front on an out-of-range
+/// `--page`, so the `true` status here is reached only by direct unit tests.
 pub(crate) fn page_info_json_value_with_status(doc: &Document, spec: &PageSpec) -> (Value, bool) {
     let page_list = match helpers::build_page_list(doc, Some(spec)) {
         Ok(list) => list,

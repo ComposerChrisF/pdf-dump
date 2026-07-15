@@ -119,13 +119,17 @@ Use --strict to refuse the repair and exit 3 instead (a hard gate for CI).
 
 Exit codes:
   0   Success (or validation passed with no errors)
-  1   Runtime error (file not found, IO failure, invalid argument value)
-  2   Argument parse error (clap; e.g. unknown flag, missing required arg)
-  3   Tool ran successfully but the input had problems
-      (--validate found errors, --page was out of range, --text extraction
-       was unreliable: a CID/Type0 font without a ToUnicode map, --strict
-       detected a malformed stream /Length, or the PDF is encrypted and could
-       not be decrypted — supply --password to read it)
+  1   Tool error: the input could not be read (file not found, IO failure,
+      corrupt PDF, wrong --password), or --page named a page beyond the end
+      of the document (a caller-claim/world mismatch, naming the real count)
+  2   Usage error: bad arguments — clap's own (unknown flag, missing required
+      arg) plus semantic ones (--raw with --decode, --raw without --object,
+      a malformed --page value, an invalid --search expression)
+  3   Findings: the tool ran correctly but the input had problems
+      (--validate found errors, --text extraction was unreliable: a CID/Type0
+       font without a ToUnicode map, --strict detected a malformed stream
+       /Length, or the PDF is encrypted and could not be decrypted — supply
+       --password to read it)
 ")]
 pub(crate) struct Args {
     /// Path to the PDF file

@@ -255,6 +255,56 @@ fn output_without_extract_object_fails() {
 }
 
 #[test]
+fn raw_with_decode_is_usage_error() {
+    // Conflicting modifiers are a usage error (exit 2), not a tool error (exit 1).
+    let pdf = create_minimal_pdf();
+    let output = Command::new(binary_path())
+        .arg(pdf.path())
+        .arg("--object")
+        .arg("1")
+        .arg("--raw")
+        .arg("--decode")
+        .output()
+        .expect("failed to execute binary");
+
+    assert_eq!(
+        output.status.code(),
+        Some(2),
+        "--raw with --decode should exit 2, got {:?}",
+        output.status.code()
+    );
+    assert!(
+        String::from_utf8_lossy(&output.stderr).contains("cannot be used together"),
+        "stderr should explain the conflict"
+    );
+}
+
+#[test]
+fn standalone_plus_doc_mode_is_usage_error() {
+    // Mixing a standalone mode (--object) with a document mode (--fonts) is a bad
+    // invocation: usage error (exit 2), detected in resolve_mode().
+    let pdf = create_minimal_pdf();
+    let output = Command::new(binary_path())
+        .arg(pdf.path())
+        .arg("--object")
+        .arg("1")
+        .arg("--fonts")
+        .output()
+        .expect("failed to execute binary");
+
+    assert_eq!(
+        output.status.code(),
+        Some(2),
+        "standalone + doc mode should exit 2, got {:?}",
+        output.status.code()
+    );
+    assert!(
+        String::from_utf8_lossy(&output.stderr).contains("Cannot combine standalone mode"),
+        "stderr should explain the mode conflict"
+    );
+}
+
+#[test]
 fn help_flag_prints_usage() {
     let output = Command::new(binary_path())
         .arg("--help")
@@ -697,7 +747,13 @@ fn search_bad_expression_fails() {
         .output()
         .expect("failed to execute binary");
 
-    assert!(!output.status.success());
+    // A malformed --search expression is a usage error (exit 2).
+    assert_eq!(
+        output.status.code(),
+        Some(2),
+        "bad --search expression should exit 2, got {:?}",
+        output.status.code()
+    );
     let stderr = String::from_utf8_lossy(&output.stderr);
     assert!(
         stderr.contains("Invalid") || stderr.contains("error"),
@@ -773,6 +829,15 @@ fn text_nonexistent_page_fails() {
         .output()
         .expect("failed to execute binary");
 
+    // An out-of-range --page in a page-consuming mode is a world mismatch: it
+    // must exit 1, not silently succeed (the pre-migration behavior here was
+    // exit 0, which hid the bad page number from any caller).
+    assert_eq!(
+        output.status.code(),
+        Some(1),
+        "--text with an out-of-range --page should exit 1, got {:?}",
+        output.status.code()
+    );
     let stderr = String::from_utf8_lossy(&output.stderr);
     assert!(
         stderr.contains("not found"),
@@ -972,14 +1037,18 @@ fn page_zero_fails() {
         .output()
         .expect("failed to execute binary");
 
-    assert!(
-        !output.status.success(),
-        "Page 0 should fail (pages are 1-based)"
+    // Page 0 is a malformed value (pages are 1-based) — a usage error (exit 2),
+    // rejected in PageSpec::parse before any document is consulted.
+    assert_eq!(
+        output.status.code(),
+        Some(2),
+        "page 0 should exit 2 (malformed value), got {:?}",
+        output.status.code()
     );
     let stderr = String::from_utf8_lossy(&output.stderr);
     assert!(
-        stderr.contains("not found") || stderr.contains("Error"),
-        "Should report page not found: {}",
+        stderr.contains(">= 1") || stderr.contains("Error"),
+        "Should report the invalid page value: {}",
         stderr
     );
 }
@@ -2265,7 +2334,12 @@ fn page_zero_rejected() {
         .output()
         .expect("failed to execute binary");
 
-    assert!(!output.status.success(), "Page 0 should be rejected");
+    assert_eq!(
+        output.status.code(),
+        Some(2),
+        "page 0 is a malformed value: exit 2, got {:?}",
+        output.status.code()
+    );
     let stderr = String::from_utf8_lossy(&output.stderr);
     assert!(
         stderr.contains("must be >= 1") || stderr.contains("Error"),
@@ -2284,16 +2358,22 @@ fn page_invalid_range_rejected() {
         .output()
         .expect("failed to execute binary");
 
-    assert!(
-        !output.status.success(),
-        "Reversed range should be rejected"
+    // A reversed range is a malformed value: usage error (exit 2).
+    assert_eq!(
+        output.status.code(),
+        Some(2),
+        "reversed range should exit 2, got {:?}",
+        output.status.code()
     );
 }
 
-// ── exit code 3: input had problems ────────────────────────────────
+// ── exit code 1: --page out of range (caller-claim/world mismatch) ──
+// A syntactically-valid --page the document does not contain is exit 1, the
+// same contract as pdf-maker — never a data "finding" (exit 3). A *malformed*
+// --page value (page 0, reversed range) is exit 2 instead (see below).
 
 #[test]
-fn page_out_of_range_exits_3() {
+fn page_out_of_range_exits_1() {
     let pdf = create_minimal_pdf();
     let output = Command::new(binary_path())
         .arg(pdf.path())
@@ -2304,15 +2384,19 @@ fn page_out_of_range_exits_3() {
 
     assert_eq!(
         output.status.code(),
-        Some(3),
-        "--page out of range should exit 3, got {:?}\nstderr: {}",
+        Some(1),
+        "--page out of range should exit 1, got {:?}\nstderr: {}",
         output.status.code(),
         String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(
+        String::from_utf8_lossy(&output.stderr).contains("Page 99 not found"),
+        "stderr should name the out-of-range page and the real count"
     );
 }
 
 #[test]
-fn page_out_of_range_json_exits_3() {
+fn page_out_of_range_json_exits_1() {
     let pdf = create_minimal_pdf();
     let output = Command::new(binary_path())
         .arg(pdf.path())
@@ -2324,14 +2408,8 @@ fn page_out_of_range_json_exits_3() {
 
     assert_eq!(
         output.status.code(),
-        Some(3),
-        "--page out of range with --json should exit 3"
-    );
-    let stdout = String::from_utf8_lossy(&output.stdout);
-    let parsed: serde_json::Value = serde_json::from_str(&stdout).unwrap();
-    assert!(
-        parsed["error"].is_string(),
-        "JSON should carry an error field"
+        Some(1),
+        "--page out of range with --json should exit 1"
     );
 }
 
@@ -2362,7 +2440,7 @@ fn page_open_range_dumps_from_start_to_last() {
 }
 
 #[test]
-fn page_open_range_above_last_exits_3() {
+fn page_open_range_above_last_exits_1() {
     let pdf = create_two_page_pdf_for_range();
     let output = Command::new(binary_path())
         .arg(pdf.path())
@@ -2373,8 +2451,8 @@ fn page_open_range_above_last_exits_3() {
 
     assert_eq!(
         output.status.code(),
-        Some(3),
-        "open range above last page should exit 3"
+        Some(1),
+        "open range above last page is a world mismatch: exit 1"
     );
 }
 

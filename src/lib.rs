@@ -72,21 +72,22 @@ pub fn run() {
 
     let resolved = args.resolve_mode().unwrap_or_else(|e| {
         eprintln!("Error: {}", e);
-        std::process::exit(1);
+        std::process::exit(2);
     });
 
-    // Modifier validation
+    // Modifier validation. A bad flag combination is a usage error (exit 2), the
+    // same class clap itself emits — the argument is malformed, not the document.
     if args.raw {
         if !matches!(
             resolved,
             ResolvedMode::Standalone(StandaloneMode::Object { .. })
         ) {
             eprintln!("Error: --raw requires --object.");
-            std::process::exit(1);
+            std::process::exit(2);
         }
         if args.decode {
             eprintln!("Error: --raw and --decode cannot be used together.");
-            std::process::exit(1);
+            std::process::exit(2);
         }
     }
 
@@ -170,12 +171,28 @@ pub fn run() {
         raw: args.raw,
     };
 
+    // A malformed --page value (non-numeric, reversed range, page 0) is a usage
+    // error (exit 2): the argument itself is wrong, independent of any document.
     let page_spec = args.page.as_deref().map(|s| {
         PageSpec::parse(s).unwrap_or_else(|e| {
             eprintln!("Error: {}", e);
-            std::process::exit(1);
+            std::process::exit(2);
         })
     });
+
+    // A syntactically-valid --page the document does not contain is a
+    // caller-claim/world mismatch: exit 1 naming the page and the real count, the
+    // same contract as pdf-maker — never a data "finding" (exit 3), and never the
+    // silent success that --text and --operators used to give an out-of-range page.
+    // Skipped when the document is encrypted-but-undecrypted: its page count is
+    // Unknown, not Absent, and that condition is already reported as exit 3 below.
+    if !encrypted_undecrypted
+        && let Some(spec) = page_spec.as_ref()
+        && let Err(msg) = helpers::build_page_list(&doc, Some(spec))
+    {
+        eprintln!("Error: {}", msg);
+        std::process::exit(1);
+    }
 
     let mut out = io::stdout().lock();
 
@@ -325,8 +342,9 @@ fn dispatch_standalone(
             let conditions = match search::parse_search_expr(expr) {
                 Ok(c) => c,
                 Err(e) => {
+                    // A malformed --search expression is a usage error (exit 2).
                     eprintln!("Error: Invalid search expression: {}", e);
-                    std::process::exit(1);
+                    std::process::exit(2);
                 }
             };
             if config.json {
