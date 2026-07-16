@@ -1,0 +1,20 @@
+# cargo-release configuration — PUBLISH-ONLY.
+#
+# Versions in this repo are owned by verset / the /commit-* skills, which bump
+# and commit on every change.  cargo-release is therefore NEVER used to bump or
+# commit here — only its `publish`, `tag`, and `push` STEP subcommands are run,
+# against the already-committed current version.  See PUBLISHING.md.
+#
+#   cargo release publish   # dry-run by default; add -x to upload current version
+#   cargo release tag       # tag <crate>-v<version> on the current commit
+#   cargo release push      # push the tag to origin
+#
+# Do NOT run `cargo release <level>` or `cargo release version` here: that would
+# bump the version and collide with the commit-skill / verset workflow.
+
+# Only release from main.
+allow-branch = ["main"]
+
+# Family-wide tag convention: <crate>-v<version> (e.g. pdf-dump-v0.24.0), so
+# tags are unambiguous across repos and match scripts/publish-status.py.
+tag-name = "{{crate_name}}-v{{version}}"
