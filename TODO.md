@@ -4,6 +4,8 @@
 
 A portfolio-style adversarial review found **35 bugs**, filed as `bugs/bug-0001`…`bugs/bug-0035`.
 Each report carries a reproduction (test-ready), a suggested fix, and why the fix works.
+Bugs surfaced _after_ that hunt are slotted into the same phases rather than kept in a separate
+list — the phases are an ordering index, not a record of one review.  So far: **bug-0036**.
 Several are **SPEC DECISIONs** — a downstream instance must NOT code-fix them blindly; resolve
 the decision first (they are gathered in Phase 0 and gate their dependent code fixes).
 
@@ -76,6 +78,12 @@ decision here, then implement in the phase noted. **Do not just “fix the code�
       `bugs/bug-0012-font-dedup-drops-unreliable-verdict.md`
 - [ ] **bug-0011** [HIGH] `--find-text` on an unreliable document → silent “No matches”, exit 0, no
       banner.  Depends on bug-0012. `bugs/bug-0011-find-text-unreliable-silent-success.md`
+- [ ] **bug-0036** [MED] Passthrough coverage counts emitted scalars, not bytes, so a multi-byte
+      invalid run under-reports damage and the >20 % net under-fires (measured: `AAAA` + a truncated
+      4-byte sequence lands on exactly 0.200 → Reliable; the byte denominator gives 0.43 → Degraded).
+      _Do with bug-0012/0011 — same `document_verdict` inputs._  Watch the constraint: `--text`
+      stdout must stay byte-identical, so the counters must decouple from the emitted U+FFFD.
+      `bugs/bug-0036-passthrough-coverage-counts-scalars-not-bytes.md`
 - [ ] **bug-0003** [HIGH] Multiple content streams concatenated with no separator → tokens fuse
       across boundaries (`ETBT`).  Push a newline between segments. `bugs/bug-0003-content-streams-joined-without-separator.md`
 - [ ] **bug-0015** [HIGH] Indirect `/Filter` (a reference) silently treated as unfiltered →
@@ -180,7 +188,7 @@ graduate (a contract violated is a bug; a contract that should grow is a plan):
    fixes (0006, 0007, 0008) are safe to start early but must be reconciled with any behavior change.
 
 Batch by touched file to minimize churn: `validate.rs` (0034, 0027, 0035), `stream.rs` (0004, 0005,
-0015, 0001), `text.rs`/reliability (0012, 0011, 0014), `search.rs` (0029, 0028, 0030, 0033-search),
+0015, 0001), `text.rs`/reliability (0012, 0011, 0036, 0014), `search.rs` (0029, 0028, 0030, 0033-search),
 `types.rs`/`lib.rs` exit codes (0019, 0018, 0025).
 
 ---
