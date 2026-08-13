@@ -17,7 +17,7 @@ Remaining accuracy improvements:
 
 The per-font Reliable/Degraded/Unreliable verdict is assigned **statically**, from a font’s dictionary alone.  A dynamic safety net — the “>20 % of shown codes unmapped → Degraded” downgrade in `document_verdict` — backs it up across **all** decode paths (ToUnicode, base-table, `/Differences` overrides, and passthrough all feed the coverage counters; see Completed).  Every genuine instance of this class has now been addressed: the Standard-14 passthrough over-claim, the ToUnicode-only coverage net, the base-less `/Differences` over-claim (now self-correcting via coverage), and the variable-width ToUnicode codespace (now split per codespace range; see Completed).
 
-The one residual is benign and optional: a base-less `/Differences` font reported Reliable that never actually shows its undecodable codes — the output is correct in that case, so a dedicated static fix is left as an optional refinement (`feature-plan-usage-aware-reliability.md`, Phase 3).
+The one residual is benign and optional.  A `/Differences` font whose glyph names all resolve is reported Reliable even when no base `/Encoding` was recognized, in which case its _non_-overridden codes fall through to single-byte passthrough — accurate only for ASCII.  When such a font actually shows those codes, the coverage net above downgrades it; when it never does, the extracted text is correct and only the verdict is generous.  So a dedicated static fix (presume StandardEncoding for a _nonsymbolic_ base-less font, holding the verdict at Degraded because the true builtin stays unknown) is left as an optional refinement: `plans/plan-0001-nonsymbolic-differences-base.md`.
 
 ## Dependencies: lopdf
 

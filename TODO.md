@@ -141,8 +141,14 @@ behavior-changing fixes land so they describe the shipped behavior.
 
 ### Lower-tier follow-ups (surfaced by the hunt; not filed as bugs)
 
-Feature gaps and cleanups — file as bugs or feature-plans if they graduate:
+Feature gaps and cleanups — file as `bugs/bug-NNNN-*.md` or `plans/plan-NNNN-*.md` if they
+graduate (a contract violated is a bug; a contract that should grow is a plan):
 
+- Per-font decode coverage in the `--text` reliability banner.  `total`/`unmapped` are counted
+  per document, so the banner can say a document was downgraded but not by which font.  Threading
+  a font identifier into `emit_show_string` and tallying per `FontReliabilityRecord` would let it
+  say `/F2 (XFont, Type1): 47% of codes unmapped`.  Explanatory only — the verdict is already
+  correct without it.  (Stretch idea from the usage-aware-reliability work, v0.18.0.)
 - Named destinations (a `/Dest` that is a Name/String) are not resolved through the catalog
   `/Names /Dests` name tree in bookmarks/annotations (`bookmarks.rs::format_dest_value`).  Feature gap.
 - Layer→page attribution (`layers.rs::scan_page_for_ocgs`) inherits `/Resources` only one level and
@@ -176,3 +182,18 @@ Feature gaps and cleanups — file as bugs or feature-plans if they graduate:
 Batch by touched file to minimize churn: `validate.rs` (0034, 0027, 0035), `stream.rs` (0004, 0005,
 0015, 0001), `text.rs`/reliability (0012, 0011, 0014), `search.rs` (0029, 0028, 0030, 0033-search),
 `types.rs`/`lib.rs` exit codes (0019, 0018, 0025).
+
+---
+
+## Open plans
+
+Proposed changes, per `~/.claude/rules/plan-files.md`.  A separate series from the bugs above —
+a bug is an obligation, a plan is an option — and this list is their ordering index, not a
+priority ruling baked into the IDs.
+
+- [ ] **plan-0001** Presume StandardEncoding for nonsymbolic base-less `/Differences` fonts.
+      Optional refinement, explicitly deferred once: the v0.18.0 coverage net already
+      self-corrects the harmful case, so this only tightens a static over-claim whose output is
+      correct anyway.  Pursue if real sample PDFs show it mattering; it touches the same
+      `build_font_decoder` arm as bug-0012/bug-0011, so land it after those.
+      `plans/plan-0001-nonsymbolic-differences-base.md`

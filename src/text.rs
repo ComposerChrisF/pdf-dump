@@ -1089,6 +1089,15 @@ fn dedup_font_records(records: Vec<FontReliabilityRecord>) -> Vec<FontReliabilit
 /// replacement characters on the bytes the document really uses is downgraded
 /// here. The net only ever lowers `Reliable` to `Degraded`; it never reaches
 /// `Unreliable` and never upgrades.
+///
+/// There is deliberately **no minimum-`total` floor.** Ignoring the ratio below
+/// some denominator (say `total < 20`, so one stray U+FFFD in a three-code page
+/// cannot flip a verdict) was considered when the net was made universal, and
+/// rejected: it would mask `low_coverage_downgrades_verdict_to_degraded`, whose
+/// whole point is 5 codes with 4 unmapped, and short-but-entirely-garbage text
+/// is precisely the case a reader most needs warned about. The asymmetry
+/// settles it — a false downgrade costs one banner and a `Degraded` label,
+/// while a suppressed one costs silently wrong text.
 fn document_verdict(fonts: &[FontReliabilityRecord], total: u64, unmapped: u64) -> Reliability {
     let mut verdict = Reliability::Reliable;
     for f in fonts {
