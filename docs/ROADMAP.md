@@ -57,4 +57,4 @@ Variable-width ToUnicode codespaces are now split per codespace range.  `cmap.rs
 
 All features from the original Tier 1, Tier 2, and Tier 3 feature plans have been implemented — including `--search` with regex, `--fonts` with encoding diagnostics, `--images`, `--forms`, `--validate` with 10+ structural checks, `--bookmarks`, `--annotations` (with merged link support), `--tags`, `--tree`, `--detail` views (security, embedded, labels, layers), `--inspect`, `--find-text`, multi-filter stream decoding, `--hex`, `--raw`, configurable truncation, and full `--json` support across all modes.
 
-See [CLAUDE.md](../CLAUDE.md) for the current CLI reference.
+The CLI reference is the global `pdf-tools` skill (`~/.claude/skills/pdf-tools/SKILL.md`); [DEBUGGING_WITH_PDF_DUMP.md](../DEBUGGING_WITH_PDF_DUMP.md) has the JSON schemas and the debugging decision tree.

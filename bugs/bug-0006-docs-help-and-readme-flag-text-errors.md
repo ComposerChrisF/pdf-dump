@@ -16,7 +16,7 @@ files/functions for two modes.
 - `src/types.rs` — `--hex` help.
 - `src/types.rs:94+` (`after_long_help`) — the `regex=` description.
 - `README.md:106` — the `--depth` row.
-- `CLAUDE.md` — the mode → module table.
+- `CLAUDE.md` — the mode → module table.  **Fixed 2026-09-04** by the portfolio CLAUDE.md audit: the two cells below plus four more the report had missed (`print_search` → `search_objects`, `print_validate` → `print_validation`, `print_embedded` → `print_embedded_files`, `page_labels_json_value` → `labels_json_value`, and `Config` → `DumpConfig`).  The remaining items are code (`--help` text) and README.
 
 ## What it does vs. what it should do (each a distinct inaccuracy)
 1. `--page` help reads “Dump the object tree for a specific page or range” — stale pre-v0.12 wording;
@@ -41,7 +41,7 @@ Read each doc line against the cited code, or run the commands (e.g. `--object N
 Correct each string: `--page` help → e.g. “Show info for a specific page or range (also filters
 `--text`/`--operators`/`--annotations`/`--find-text`)”; `--hex` help → “use with `--decode` or
 `--raw`”; `regex=` help → add “or decoded stream”; README `--depth` → “(with `--tree`, `--tags`)”;
-CLAUDE.md → fix the two module cells.
+CLAUDE.md → done 2026-09-04 (see above).
 
 ## Why the fix addresses the bug
 The docs are the discoverable interface for an agent; correcting the flag text stops it from

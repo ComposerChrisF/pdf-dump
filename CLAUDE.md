@@ -14,11 +14,11 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 `pdf-dump` is a Rust CLI tool that dumps the internal object structure of a PDF file.  It uses `lopdf` for PDF parsing, `clap` (derive) for CLI arguments, `flate2` for zlib/FlateDecode stream decompression, and `weezl` for LZW decoding.
 
-For CLI usage documentation, see the global `pdf-tools` skill (`~/.claude/skills/pdf-tools/SKILL.md` — the flag reference’s home since 2026-08-04; the `~/.claude/rules/pdf-tools.md` rule now holds only the use-the-CLI mandate and points at it) or `DEBUGGING_WITH_PDF_DUMP.md` in this repo.
+For CLI usage, load the `pdf-tools` skill (`~/.claude/skills/pdf-tools/SKILL.md`), or read `DEBUGGING_WITH_PDF_DUMP.md` in this repo for the JSON schemas and the debugging decision tree.
 
 ## Architecture
 
-The tool is split across ~31 source files in `src/`.  The flow is:
+The tool is split across the modules in `src/`.  The flow is:
 
 1. **CLI parsing** (`types.rs`) — `Args` struct via clap derive.  Modes are divided into **document-level** (combinable) and **standalone** (mutually exclusive). `--page` is always a modifier.  Help output uses `help_heading` for organized grouping.
 2. **Mode resolution** (`types.rs`) — `Args::resolve_mode()` validates exclusivity and returns `ResolvedMode` enum (Default, Combined, Standalone).
@@ -33,25 +33,25 @@ The tool is split across ~31 source files in `src/`.  The flow is:
 | Mode | Module | Key functions |
 |------|--------|--------------|
 | Overview (default) | `summary.rs` | `print_overview`, `overview_json_value` |
-| `--object` | `object.rs` (~2700 lines) | `print_object`, `object_to_json` |
-| `--list` | `object.rs` | `print_list`, `list_json_value` |
+| `--object` | `object.rs` | `print_object`, `object_to_json` |
+| `--list` | `summary.rs` | `print_list`, `list_json_value` |
 | `--page` | `page_info.rs` | `print_page_info`, `page_info_json_value` |
-| `--inspect` | `inspect.rs` | `print_inspect`, `inspect_json_value` |
-| `--search` | `search.rs` | `print_search`, `search_json_value` |
+| `--inspect` | `inspect.rs` | `print_info`, `inspect_json_value` |
+| `--search` | `search.rs` | `search_objects`, `search_json_value` |
 | `--text` | `text.rs` | `print_text`, `text_json_value` (font-aware: decodes via `/ToUnicode` + WinAnsi/MacRoman) |
 | `--operators` | `operators.rs` | `print_operators`, `operators_json_value` |
 | `--find-text` | `find_text.rs` | `print_find_text`, `find_text_json_value` |
 | `--fonts` | `fonts.rs` | `print_fonts`, `fonts_json_value` |
 | `--images` | `images.rs` | `print_images`, `images_json_value` |
 | `--forms` | `forms.rs` | `print_forms`, `forms_json_value` |
-| `--validate` | `validate.rs` | `print_validate`, `validation_json_value` |
+| `--validate` | `validate.rs` | `print_validation`, `validation_json_value` |
 | `--bookmarks` | `bookmarks.rs` | `print_bookmarks`, `bookmarks_json_value` |
 | `--annotations` | `annotations.rs` | `print_annotations`, `annotations_json_value` |
 | `--tree` | `tree.rs` | `print_tree`, `tree_json_value` |
 | `--tags` | `structure.rs` | `print_structure`, `structure_json_value` |
 | `--detail security` | `security.rs` | `print_security`, `security_json_value` |
-| `--detail embedded` | `embedded.rs` | `print_embedded`, `embedded_json_value` |
-| `--detail labels` | `page_labels.rs` | `print_page_labels`, `page_labels_json_value` |
+| `--detail embedded` | `embedded.rs` | `print_embedded_files`, `embedded_json_value` |
+| `--detail labels` | `page_labels.rs` | `print_page_labels`, `labels_json_value` |
 | `--detail layers` | `layers.rs` | `print_layers`, `layers_json_value` |
 | `--extract-stream` | `lib.rs` (inline) | uses `stream::decode_stream` |
 
@@ -59,7 +59,7 @@ The tool is split across ~31 source files in `src/`.  The flow is:
 
 | Module | Role |
 |--------|------|
-| `types.rs` | `Args`, `Config`, `ResolvedMode`, `PageSpec`, `DetailSub` |
+| `types.rs` | `Args`, `DumpConfig`, `ResolvedMode`, `PageSpec`, `DetailSub` |
 | `stream.rs` | `decode_stream` — filter pipeline: FlateDecode, ASCII85, ASCIIHex, LZW, RunLength |
 | `helpers.rs` | Shared formatting utilities |
 | `refs.rs` | Reference traversal, reverse ref lookup |
@@ -78,10 +78,3 @@ The tool is split across ~31 source files in `src/`.  The flow is:
 - Overview encryption detection (`summary.rs::is_encrypted`) is authoritative across all states: `doc.encryption_state.is_some() || doc.is_encrypted()`.  `encryption_state` is `Some` only after a successful decrypt (which also strips the trailer `/Encrypt`, so lopdf’s `is_encrypted()` is then false); the trailer `/Encrypt` (what `is_encrypted()` checks) survives when a file is encrypted but NOT decrypted.  Neither signal alone covers both states.  lopdf’s `Document::load` auto-decrypts only with the empty password; a password-protected file opened without the password returns a DEGRADED `Ok` document (only the `/Encrypt` dict parsed, `encryption_state` None, `/Encrypt` left in the trailer — see `tests/lopdf_canary.rs`).  `run()` detects that (`doc.is_encrypted() && encryption_state.is_none()`), prints a loud stderr banner (`security::encryption_warning_banner`, reusing `collect_security`), the overview adds `decrypted: false`, `validate_pdf` records a warning, and the run exits **3** — so a locked file’s collapsed object/page/stream counts are never presented as authoritative.  `--password <PW>` routes the load through `Document::load_with_password` so password-protected PDFs read fully (wrong password → exit 1)
 - Lenient read (`recover.rs`): after `Document::load`, `run()` recovers content streams lopdf turned into bare dictionaries because of a wrong `/Length` (silent body loss), promoting them back to streams from the raw bytes and printing a loud stderr banner that names each object and its declared-vs-actual length.  All modes benefit (text, `--list`, `--object`, extract-stream, …) since the repair runs on the shared `Document`.  Recoveries are also surfaced machine-readably: `run()` builds a `recovery` object and `print_json_with_recovery` merges it into every `--json` root (the funnel is why `--object`/`--inspect`/`--search`/overview now have `*_json_value` functions; their `print_*_json` wrappers became `#[cfg(test)]`).  `--strict` flips the behavior to detect-and-refuse: no mutation, `repaired: false`, exit 3 — a spec-conformant gate for CI
 - `--text` is font-aware (Tier 1): `text.rs` builds a per-page `FontDecoder` table, tracks the active font via `Tf`, and decodes show-strings through `/ToUnicode` (`cmap.rs`) or a base-encoding table for any of the four named single-byte encodings — WinAnsi/MacRoman/Standard/MacExpert (`encodings.rs`, dispatched via `simple_table_for`; tables return `&'static str`, so f-ligatures decompose to ASCII like `ﬁ`→`fi` for searchable output); undecodable fonts fall back to byte passthrough (no regression).  `/Encoding /Differences` glyph names are resolved to Unicode through the Adobe Glyph List (`glyphlist.rs`): `build_differences_overrides` walks the array into a per-font `HashMap<u8, String>` consulted before the base table, with `glyph_name_to_string` handling the embedded AGL table plus the algorithmic `uniXXXX`/`uXXXXXX` forms, `.suffix` stripping, and underscore ligatures.  It classifies each font Reliable/Degraded/Unreliable (a `/Differences` font is Reliable when every name resolves, Degraded when some do not), prints a loud stderr banner + JSON `reliability` object, and exits 3 when a document is `Unreliable` (CID/Type0 without ToUnicode).  The operator walk is recursive: a `Do` on a form XObject (`/Subtype /Form`) recurses into that form’s content stream via `process_content`, building a decoder table from the form’s own `/Resources` (or inheriting the caller’s, per PDF 32000-1 §7.8.3) and folding its fonts into the same reliability counters — so text drawn inside forms is extracted, not silently dropped.  A visited-set cycle guard (the active recursion stack) plus a `MAX_FORM_DEPTH` cap keep self-referential and deeply-nested forms terminating.  Remaining Tier 2 follow-on: predefined CJK CMaps (`docs/ROADMAP.md`).
-
-## Rust Edition
-
-Uses Rust edition **2024** — requires a recent nightly or stable toolchain that supports it.
-
-- `use` items in modules are private by default — test modules need explicit imports
-- Pattern matching: `&count` not allowed in implicitly-borrowing patterns — use `**count` instead
