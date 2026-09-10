@@ -11,6 +11,27 @@ PDF text strings are commonly UTF-16BE (with a `FE FF` BOM), the spec encoding f
 authoritative PDF-literal syntax, JSON destroys hex strings, text and JSON disagree, and search never
 matches such strings — so document metadata cannot be read or searched.
 
+## Amendment — 2026-09-09: real-world corroboration, and it misleads in BOTH directions
+
+Filed from the pdf-orchestrator session, which hit this against production data rather than a fixture.  Nothing in the analysis above changes; this adds evidence and an argument that **Medium understates it**.
+
+**Real-world instance.**  `F183-AiaIKaLa‘i` — a Hawaiian title carrying an ‘okina (U+2018).  Built through the production `.pdfOrch`, its correctly-encoded `/Title` displays as:
+
+```
+Title:  ?? A i a   i   k a   L a  i   ( F .   1 8 3 )
+```
+
+That is the `FE FF` BOM rendered lossy, followed by UTF-16 high bytes shown as spaces.  This is not an exotic case for this portfolio: Hawaiian titles with ‘okina and kahakō are routine, and `/Title` is exactly the field this tool is reached for.
+
+**The part that raises the severity — it pointed the wrong way twice.**  pdf-orchestrator’s `bug-0039` (fixed 2026-09-09, v0.16.5) had written metadata as **raw UTF-8** for the whole life of the tool, which is invalid per §7.9.2.2 and renders as mojibake in real viewers.  Because `from_utf8_lossy` decodes raw UTF-8 perfectly:
+
+- **Before that fix:** a genuinely broken PDF displayed as _correct_ here.  This tool — the portfolio’s designated inspection tool, and the one a developer reaches for precisely to check metadata — actively concealed the defect for as long as it existed.
+- **After that fix:** a correct PDF displays as _garbled_.
+
+So it does not merely fail to decode; it produces a confident wrong answer in both directions, and the post-fix direction is the more dangerous one: a developer trusting this output would conclude the correct file is broken and could “fix” it back to the invalid form.  A tool that cannot decode should be distinguishable from one reporting a defect — mojibake looks like the latter.
+
+**Suggested addition to the fix:** when a string carries the `FE FF` BOM, decode it _and_ make the encoding visible (e.g. `Title: Aia i ka La‘i (F. 183)  [UTF-16BE]`), so the reader can tell “decoded from UTF-16BE” from “was ASCII all along”.  That distinction is what would have made the pdf-orchestrator defect visible on sight instead of invisible for the tool’s whole history.
+
 ## Affected code
 Display:
 - `src/object.rs:139-148` — text mode: literal strings printed lossy.

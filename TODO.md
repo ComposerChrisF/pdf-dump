@@ -5,7 +5,7 @@
 A portfolio-style adversarial review found **35 bugs**, filed as `bugs/bug-0001`…`bugs/bug-0035`.
 Each report carries a reproduction (test-ready), a suggested fix, and why the fix works.
 Bugs surfaced _after_ that hunt are slotted into the same phases rather than kept in a separate
-list — the phases are an ordering index, not a record of one review.  So far: **bug-0036**.
+list — the phases are an ordering index, not a record of one review.  So far: **bug-0036**, **bug-0037**.
 Several are **SPEC DECISIONs** — a downstream instance must NOT code-fix them blindly; resolve
 the decision first (they are gathered in Phase 0 and gate their dependent code fixes).
 
@@ -84,6 +84,15 @@ decision here, then implement in the phase noted. **Do not just “fix the code�
       _Do with bug-0012/0011 — same `document_verdict` inputs._  Watch the constraint: `--text`
       stdout must stay byte-identical, so the counters must decouple from the emitted U+FFFD.
       `bugs/bug-0036-passthrough-coverage-counts-scalars-not-bytes.md`
+- [ ] **bug-0037** [MED] A malformed `/CreationDate` is never reported — not as a finding, not even
+      as a note; `--validate` says “no issues found” for an ISO-8601 date, which is not a PDF date at
+      all.  Surveyed 921 real PDFs: 95 % use the `D:` spec form, **0 % use ISO**, 5 % are non-spec
+      legacy (mostly US-locale `8/19/2010 …` from 2003–2013 producers).  Recommended split, per
+      `cli-contract` plan-0001: **finding + exit 3 under `--validate`**, **annotate and stay exit 0**
+      in the default overview, so the legacy 5 % does not become noise.  Filed 2026-09-09 from the
+      pdf-orchestrator session after its own bug-0039 shipped invalid dates in every document it ever
+      produced, unnoticed because this tool printed them as though valid.
+      `bugs/bug-0037-date-string-format-never-checked.md`
 - [ ] **bug-0003** [HIGH] Multiple content streams concatenated with no separator → tokens fuse
       across boundaries (`ETBT`).  Push a newline between segments. `bugs/bug-0003-content-streams-joined-without-separator.md`
 - [ ] **bug-0015** [HIGH] Indirect `/Filter` (a reference) silently treated as unfiltered →
