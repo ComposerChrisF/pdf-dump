@@ -7,6 +7,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.25.0] - 2026-09-23
+### Changed
+- **`--text` exits 3 on a Degraded verdict**, not only on Unreliable.  Degraded
+  means the tool ran correctly and the input had problems, which is findings by
+  the exit-code table; a stderr banner with exit 0 was invisible to any caller
+  that branches on the code.  The text is still printed and `--json` still emits.
+  Callers audited first: no script or hook branches on `--text`’s exit code.
+### Fixed
+- Two clippy lints new in Rust 1.98 (`chunks_exact` with a constant size,
+  a useless `format!`) that had turned CI red since 2026-09-05.
+
 ## [0.24.1] - 2026-09-23
 ### Fixed
 - A form field whose `/Kids` cycles back to itself or an ancestor no longer

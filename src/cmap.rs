@@ -273,10 +273,8 @@ fn be_to_u32(bytes: &[u8]) -> u32 {
 
 /// UTF-16BE bytes → code units. A trailing odd byte is dropped.
 fn utf16be_to_units(bytes: &[u8]) -> Vec<u16> {
-    bytes
-        .chunks_exact(2)
-        .map(|c| ((c[0] as u16) << 8) | c[1] as u16)
-        .collect()
+    let (pairs, _odd) = bytes.as_chunks::<2>();
+    pairs.iter().map(|&pair| u16::from_be_bytes(pair)).collect()
 }
 
 /// UTF-16 code units → String, replacing lone surrogates with U+FFFD.

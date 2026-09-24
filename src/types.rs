@@ -126,10 +126,11 @@ Exit codes:
       arg) plus semantic ones (--raw with --decode, --raw without --object,
       a malformed --page value, an invalid --search expression)
   3   Findings: the tool ran correctly but the input had problems
-      (--validate found errors, --text extraction was unreliable: a CID/Type0
-       font without a ToUnicode map, --strict detected a malformed stream
-       /Length, or the PDF is encrypted and could not be decrypted — supply
-       --password to read it)
+      (--validate found errors; --text extraction was degraded or
+       unreliable, e.g. a CID/Type0 font without a ToUnicode map or >20% of
+       codes undecodable, and the text is still printed; --strict detected a
+       malformed stream /Length; or the PDF is encrypted and could not be
+       decrypted — supply --password to read it)
 ")]
 pub(crate) struct Args {
     /// Path to the PDF file

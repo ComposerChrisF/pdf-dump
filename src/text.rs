@@ -33,6 +33,16 @@ pub(crate) enum Reliability {
 }
 
 impl Reliability {
+    /// Whether this verdict makes `--text` exit 3.  Degraded counts as well as
+    /// Unreliable: the tool ran correctly and the input had problems, which is
+    /// findings by the exit-code table, and a banner on stderr with exit 0 is a
+    /// signal that callers branching on the code never see.  The text is still
+    /// printed and `--json` still emits, because findings are data.  (Through
+    /// v0.24.x only Unreliable exited 3; changed in v0.25.0.)
+    pub(crate) fn is_finding(self) -> bool {
+        self != Reliability::Reliable
+    }
+
     fn as_str(self) -> &'static str {
         match self {
             Reliability::Reliable => "reliable",
@@ -1110,11 +1120,11 @@ pub(crate) fn print_text(
 
     let fonts = dedup_font_records(all_fonts);
     print_reliability_banner(&fonts, total_codes, unmapped_codes);
-    document_verdict(&fonts, total_codes, unmapped_codes) == Reliability::Unreliable
+    document_verdict(&fonts, total_codes, unmapped_codes).is_finding()
 }
 
 /// Returns `(json_value, had_issues)`; `had_issues` is true when the document's
-/// text extraction is classified `Unreliable`.
+/// text extraction is anything but `Reliable` (see `Reliability::is_finding`).
 pub(crate) fn text_json_value(doc: &Document, page_filter: Option<&PageSpec>) -> (Value, bool) {
     let page_list = match helpers::build_page_list(doc, page_filter) {
         Ok(list) => list,
@@ -1146,8 +1156,7 @@ pub(crate) fn text_json_value(doc: &Document, page_filter: Option<&PageSpec>) ->
     // Print the loud banner to stderr even in JSON mode; stdout stays clean.
     print_reliability_banner(&fonts, total_codes, unmapped_codes);
     let reliability = reliability_json_value(&fonts, total_codes, unmapped_codes);
-    let had_issues =
-        document_verdict(&fonts, total_codes, unmapped_codes) == Reliability::Unreliable;
+    let had_issues = document_verdict(&fonts, total_codes, unmapped_codes).is_finding();
     (
         json!({"pages": page_results, "reliability": reliability}),
         had_issues,

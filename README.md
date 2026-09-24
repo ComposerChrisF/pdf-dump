@@ -74,7 +74,7 @@ pdf-dump file.pdf --fonts --images --validate
 
 ### Text extraction reliability
 
-`--text` is font-aware: it decodes character codes through each font’s `/ToUnicode` CMap (the fix for the classic CID/Type0 mojibake) and through WinAnsiEncoding/MacRomanEncoding tables for simple fonts that lack one, falling back to raw byte passthrough when a font can’t be decoded.  When extraction is not fully trustworthy it prints a loud reliability banner to **stderr** (stdout stays clean for piping) and, in `--json` mode, adds a top-level `reliability` object.  The tool exits **3** when a document is `unreliable` — a CID/Type0 font with no ToUnicode map — so scripts can detect junk text programmatically.
+`--text` is font-aware: it decodes character codes through each font’s `/ToUnicode` CMap (the fix for the classic CID/Type0 mojibake) and through WinAnsiEncoding/MacRomanEncoding tables for simple fonts that lack one, falling back to raw byte passthrough when a font can’t be decoded.  When extraction is not fully trustworthy it prints a loud reliability banner to **stderr** (stdout stays clean for piping) and, in `--json` mode, adds a top-level `reliability` object.  The tool exits **3** whenever the verdict is not `reliable` — `unreliable` (a CID/Type0 font with no ToUnicode map) or `degraded` (a font whose encoding is only partly known, or more than 20 % of the codes shown could not be decoded) — so scripts can detect suspect text programmatically.  The text is still printed, and `--json` still emits, on exit 3: the exit code says “read with care”, not “the command failed”.  (Through v0.24.x, `degraded` exited 0.)
 
 ### Lenient stream recovery (and `--strict`)
 

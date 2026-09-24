@@ -3078,3 +3078,53 @@ fn plain_pdf_overview_has_no_decrypted_key() {
         "a non-encrypted PDF must not add a decrypted key"
     );
 }
+
+// ── Degraded --text is a finding (exit 3), text still printed (v0.25.0) ──────
+
+/// An embedded simple font with no /Encoding and no /ToUnicode: its builtin
+/// encoding is unknown, so extraction is Degraded even though "Hi" decodes.
+fn degraded_font_dict() -> Dictionary {
+    let mut font = Dictionary::new();
+    font.set("Type", Object::Name(b"Font".to_vec()));
+    font.set("Subtype", Object::Name(b"Type1".to_vec()));
+    font.set("BaseFont", Object::Name(b"ABCDEF+Custom".to_vec()));
+    font
+}
+
+#[test]
+fn text_degraded_exits_3_and_still_prints_text() {
+    let pdf = create_pdf_with_font(degraded_font_dict(), None, b"BT /F1 12 Tf (Hi) Tj ET");
+    let output = Command::new(binary_path())
+        .arg(pdf.path())
+        .arg("--text")
+        .output()
+        .expect("failed to execute binary");
+    assert_eq!(
+        output.status.code(),
+        Some(3),
+        "degraded --text should exit 3, stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(String::from_utf8_lossy(&output.stdout).contains("Hi"));
+    assert!(String::from_utf8_lossy(&output.stderr).contains("DEGRADED"));
+}
+
+#[test]
+fn text_degraded_json_exits_3_and_emits_json() {
+    let pdf = create_pdf_with_font(degraded_font_dict(), None, b"BT /F1 12 Tf (Hi) Tj ET");
+    let output = Command::new(binary_path())
+        .arg(pdf.path())
+        .arg("--text")
+        .arg("--json")
+        .output()
+        .expect("failed to execute binary");
+    assert_eq!(
+        output.status.code(),
+        Some(3),
+        "degraded --text --json should exit 3"
+    );
+    let parsed: serde_json::Value =
+        serde_json::from_str(&String::from_utf8_lossy(&output.stdout)).unwrap();
+    assert_eq!(parsed["reliability"]["verdict"], "degraded");
+    assert_eq!(parsed["pages"][0]["text"], "Hi");
+}

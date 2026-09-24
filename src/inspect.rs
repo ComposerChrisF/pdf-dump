@@ -676,7 +676,7 @@ pub(crate) fn inspect_json_value(doc: &Document, obj_num: u32, config: &DumpConf
         "generation": 0,
         "role": cls.role,
         "description": cls.description,
-        "kind": format!("{}", object.enum_variant()),
+        "kind": object.enum_variant(),
         "details": details_map,
         "object": object_to_json(object, doc, &json_config),
         "page_associations": page_assoc,
