@@ -1,4 +1,4 @@
-//! Glyph advance widths for `--text --layout` (plans/plan-0002).
+//! Glyph advance widths for `--text --layout` (plan-0002, implemented in v0.26.0).
 //!
 //! A glyph’s position is only as good as the advances before it, so this module
 //! answers one question per font: how far does the pen move for character code
@@ -17,7 +17,8 @@
 //!
 //! Standard-14 fonts may legally omit `/Widths`, relying on the reader’s built-in
 //! AFM metrics.  pdf-dump does not embed those tables yet, so such a font is
-//! `Unknown` for now (plan-0002: interim fail-closed state, accepted by id-redact).
+//! `Unknown` for now: the fail-closed state id-redact accepts until
+//! `plans/plan-0004-standard-14-afm-widths.md` embeds them.
 
 use lopdf::{Document, Object};
 use std::borrow::Cow;

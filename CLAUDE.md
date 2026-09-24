@@ -73,6 +73,8 @@ The tool is split across the modules in `src/`.  The flow is:
 
 ### Key patterns
 
+- **`--layout` fixtures are synthetic, built in-process with lopdf at exact coordinates** (`layout.rs` tests, `tests/integration.rs`).  **Never use a real statement or other personal document as a fixture**: the downstream id-redact pipeline exists so that such inputs are never read by an AI.  Poppler’s `pdftotext -layout` is a differential oracle in `layout_agrees_with_pdftotext_word_order_where_installed`, which skips when `pdftotext` is absent.  It is never a dependency.
+
 - `pub fn run()` in `lib.rs` holds all dispatch (binary crate can’t access `pub(crate)` items from lib)
 - Shared test helpers in `lib.rs::test_utils`: `output_of`, `empty_doc`, `default_config`, `make_stream`, `zlib_compress`, `json_config`, `build_two_page_doc`, `build_page_doc_with_content`, `make_page_with_annots`
 - `validate::collect_reachable_ids` is `pub(crate)` so `object.rs` tests can use it

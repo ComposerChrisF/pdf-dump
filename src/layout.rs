@@ -1,4 +1,4 @@
-//! `--text --layout`: position-faithful text extraction (plans/plan-0002).
+//! `--text --layout`: position-faithful text extraction (plan-0002, implemented in v0.26.0).
 //!
 //! Plain `--text` recovers _what_ a page says.  This module recovers _where_,
 //! so a table survives extraction: each glyph is positioned by a real text-state
