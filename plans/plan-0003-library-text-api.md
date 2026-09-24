@@ -2,7 +2,7 @@
 
 ## Problem
 
-`id-redact` will eventually extract PDF text in-process rather than shelling out to `pdf-dump` (`~/Chris/Proj/Coding/cli-specs/id-redact-spec.md` § Formats, the “PDF, extracted in-process” row).  pdf-dump cannot serve that today:
+`id-redact` will eventually extract PDF text in-process rather than shelling out to `pdf-dump` (`~/Chris/App/Rust/id-redact/SPEC.md` § Formats, the “PDF, extracted in-process” row).  pdf-dump cannot serve that today:
 
 - **The library’s only public item is `pub fn run()`**, which parses `std::env::args`, prints, and exits.  Everything else — `text::text_json_value`, `layout::layout_page`, the `Reliability` verdict — is `pub(crate)`.
 - **The library path exits the process.**  The `w!`/`wln!` macros (`src/lib.rs`) call `std::process::exit` on any write error, and `run()` exits with the table’s codes.  A library that terminates its caller is not a library.
