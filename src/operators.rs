@@ -150,6 +150,33 @@ mod tests {
     }
 
     #[test]
+    fn operators_contents_array_does_not_fuse_tokens() {
+        // bug-0003: two segments ending `ET` / starting `BT` parsed as one `ETBT` operator.
+        use lopdf::{Dictionary, Object, Stream};
+        let mut doc = Document::new();
+        let s1 = doc.add_object(Object::Stream(Stream::new(
+            Dictionary::new(),
+            b"BT (A) Tj ET".to_vec(),
+        )));
+        let s2 = doc.add_object(Object::Stream(Stream::new(
+            Dictionary::new(),
+            b"BT (B) Tj ET".to_vec(),
+        )));
+        let mut page = Dictionary::new();
+        page.set(
+            "Contents",
+            Object::Array(vec![Object::Reference(s1), Object::Reference(s2)]),
+        );
+        let p_id = doc.add_object(Object::Dictionary(page));
+        let ops: Vec<String> = get_page_operations_with_warnings(&doc, p_id)
+            .operations
+            .into_iter()
+            .map(|o| o.operator)
+            .collect();
+        assert_eq!(ops, ["BT", "Tj", "ET", "BT", "Tj", "ET"]);
+    }
+
+    #[test]
     fn operators_with_page_filter() {
         let doc = build_page_doc_with_content(b"BT (Hello) Tj ET");
         let spec = PageSpec::Single(1);

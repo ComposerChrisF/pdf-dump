@@ -49,9 +49,6 @@ decision here, then implement in the phase noted. **Do not just “fix the code�
 
 ### Phase 1 — Crashes & denial-of-service (fix first; mostly no spec decision)
 
-- [ ] **bug-0013** [CRIT] Form-field `/Kids` cycle → stack-overflow abort, reachable from the
-      **default** command (`pdf-dump file.pdf`).  Add a visited-set to `collect_field_recursive`.
-      **This is the single most urgent fix.** `bugs/bug-0013-form-field-kids-cycle-stack-overflow.md`
 - [ ] **bug-0010** [HIGH] `--find-text` panics (exit 101) when case-folding changes byte length
       (Turkish İ, ẞ). `bugs/bug-0010-find-text-case-fold-panic.md`
 - [ ] **bug-0018** [HIGH] Large `--object`/`--page` range materialized in memory before validation
@@ -73,17 +70,8 @@ decision here, then implement in the phase noted. **Do not just “fix the code�
 - [ ] **bug-0034** [HIGH] `--validate` false negative: a dangling `/Root` in the trailer → “0
       errors”, exit 0. `bugs/bug-0034-validate-dangling-root-false-negative.md`
       _(share the trailer-walk with bug-0027; do together.)_
-- [ ] **bug-0012** [HIGH] `dedup_font_records` drops a conflicting Unreliable record → garbage
-      extraction certified “reliable”, exit 0. **Do before bug-0011** (0011 reuses this verdict).
-      `bugs/bug-0012-font-dedup-drops-unreliable-verdict.md`
 - [ ] **bug-0011** [HIGH] `--find-text` on an unreliable document → silent “No matches”, exit 0, no
       banner.  Depends on bug-0012. `bugs/bug-0011-find-text-unreliable-silent-success.md`
-- [ ] **bug-0036** [MED] Passthrough coverage counts emitted scalars, not bytes, so a multi-byte
-      invalid run under-reports damage and the >20 % net under-fires (measured: `AAAA` + a truncated
-      4-byte sequence lands on exactly 0.200 → Reliable; the byte denominator gives 0.43 → Degraded).
-      _Do with bug-0012/0011 — same `document_verdict` inputs._  Watch the constraint: `--text`
-      stdout must stay byte-identical, so the counters must decouple from the emitted U+FFFD.
-      `bugs/bug-0036-passthrough-coverage-counts-scalars-not-bytes.md`
 - [ ] **bug-0037** [MED] A malformed `/CreationDate` is never reported — not as a finding, not even
       as a note; `--validate` says “no issues found” for an ISO-8601 date, which is not a PDF date at
       all.  Surveyed 921 real PDFs: 95 % use the `D:` spec form, **0 % use ISO**, 5 % are non-spec
@@ -93,15 +81,11 @@ decision here, then implement in the phase noted. **Do not just “fix the code�
       pdf-orchestrator session after its own bug-0039 shipped invalid dates in every document it ever
       produced, unnoticed because this tool printed them as though valid.
       `bugs/bug-0037-date-string-format-never-checked.md`
-- [ ] **bug-0003** [HIGH] Multiple content streams concatenated with no separator → tokens fuse
-      across boundaries (`ETBT`).  Push a newline between segments. `bugs/bug-0003-content-streams-joined-without-separator.md`
 - [ ] **bug-0015** [HIGH] Indirect `/Filter` (a reference) silently treated as unfiltered →
       `--extract-stream` writes still-compressed bytes, exit 0. `bugs/bug-0015-indirect-filter-silently-unfiltered.md`
 - [ ] **bug-0029** [HIGH] `--search stream=`/`regex=` search raw bytes when decode fails → false
       hits and false “not found”, warning discarded. `bugs/bug-0029-search-raw-bytes-on-decode-failure.md`
       _(related family with bug-0004: a decode “success” that is not the decoded content.)_
-- [ ] **bug-0022** [HIGH] `--page` info omits inherited `MediaBox`/`CropBox`/`Rotate` (prints `-`)
-      on the many PDFs that set them on an ancestor `/Pages`. `bugs/bug-0022-page-attribute-inheritance-missing.md`
 - [ ] **bug-0021** [MED] `--object N` on an indirect-reference object shows the _target’s_ content
       under N’s header.  Display the stored value, not the deref. `bugs/bug-0021-object-indirect-reference-masquerade.md`
 - [ ] **bug-0019** [HIGH] (code fix, after Phase 0 decision) Route missing-object misses to exit 1;
@@ -122,8 +106,6 @@ decision here, then implement in the phase noted. **Do not just “fix the code�
       `bugs/bug-0027-reverse-refs-skip-trailer.md`
 - [ ] **bug-0035** [MED] `--validate` false positive: every `/Type /ObjStm` flagged “unreachable”
       (extend the XRef-stream skip). `bugs/bug-0035-validate-objstm-false-positive.md`
-- [ ] **bug-0014** [MED] Form XObject text does not inherit the caller’s active font (`Tf`); `q`/`Q`
-      not modeled.  Interacts with the reliability verdict. `bugs/bug-0014-form-xobject-font-not-inherited.md`
 - [ ] **bug-0020** [MED] (code fix, after Phase 0 decision) Address objects by their real
       generation. `bugs/bug-0020-object-generation-not-addressable.md`
 - [ ] **bug-0032** [MED] `--strict` (and default recovery) silently skip on a re-read I/O error →
@@ -179,6 +161,20 @@ graduate (a contract violated is a bug; a contract that should grow is a plan):
 - Trivial: `src/page_info.rs:401` doc-comment says “exit-3 signal” but the path exits 1 (bug-0019
   area).  Usage-error precedence nit: a malformed `--page`/`--search` is detected only after a
   successful load, so `pdf-dump missing.pdf --page 0` exits 1, not 2.
+
+---
+
+## Done
+
+- **bug-0013** Form-field `/Kids` cycle stack overflow: visited-set in `collect_field_recursive` (v0.24.1).
+- **bug-0003** Content streams joined without a separator: `read_content_streams` pushes a newline between segments (v0.24.1).
+- **bug-0012** Font dedup dropped an Unreliable record: `dedup_font_records` keeps the worst classification per key (v0.24.1).
+- **bug-0036** Passthrough coverage counted scalars: the passthrough arm now counts bytes, output unchanged (v0.24.1).
+- **bug-0014** Form XObjects now inherit the caller’s active font; `q`/`Q` save and restore it (v0.24.1).
+- **bug-0022** `--page` geometry: `MediaBox`/`CropBox`/`Rotate` inherited via `helpers::inherited_page_attr` (v0.24.1).
+
+These six were pulled ahead of their phases as prerequisites for `plans/plan-0002` (`--text --layout`): each either
+corrupts the text that `--layout` positions or makes the reliability verdict its exit-3 gate depends on dishonest.
 
 ---
 

@@ -89,15 +89,16 @@ fn collect_page_info(
         }
     };
 
-    let media_box = page_dict
-        .get(b"MediaBox")
-        .ok()
+    // All three are inheritable from an ancestor `/Pages` node (bug-0022), as
+    // `Resources` already was via `collect_page_resources`.
+    let media_box = helpers::inherited_page_attr(doc, page_id, b"MediaBox")
         .map(format_dict_value)
         .unwrap_or_else(|| "-".to_string());
 
-    let crop_box = page_dict.get(b"CropBox").ok().map(format_dict_value);
+    let crop_box = helpers::inherited_page_attr(doc, page_id, b"CropBox").map(format_dict_value);
 
-    let rotate = page_dict.get(b"Rotate").ok().and_then(|v| v.as_i64().ok());
+    let rotate =
+        helpers::inherited_page_attr(doc, page_id, b"Rotate").and_then(|v| v.as_i64().ok());
 
     // Resources
     let res = collect_page_resources(doc, page_id);
@@ -657,6 +658,83 @@ mod tests {
         let out = output_of(|w| print_page_info(w, &doc, &PageSpec::Single(1)));
         assert!(out.contains("CropBox:"));
         assert!(out.contains("[50 50 562 742]"));
+    }
+
+    fn rect(a: i64, b: i64, c: i64, d: i64) -> Object {
+        Object::Array(vec![
+            Object::Integer(a),
+            Object::Integer(b),
+            Object::Integer(c),
+            Object::Integer(d),
+        ])
+    }
+
+    /// Page → intermediate `/Pages` → root `/Pages`, with the geometry set only on
+    /// the ancestors; `page_extra` lets a test put an overriding key on the page.
+    fn doc_with_inherited_geometry(page_extra: &[(&str, Object)]) -> Document {
+        use lopdf::Dictionary;
+        let mut doc = Document::new();
+        let mut root = Dictionary::new();
+        root.set("Type", Object::Name(b"Pages".to_vec()));
+        root.set("Count", Object::Integer(1));
+        root.set("MediaBox", rect(0, 0, 612, 792));
+        root.set("Rotate", Object::Integer(90));
+        let root_id = doc.add_object(Object::Dictionary(root));
+        let crop_id = doc.add_object(rect(10, 20, 600, 780));
+        let mut mid = Dictionary::new();
+        mid.set("Type", Object::Name(b"Pages".to_vec()));
+        mid.set("Count", Object::Integer(1));
+        mid.set("Parent", Object::Reference(root_id));
+        // Indirect, to pin the one-level deref.
+        mid.set("CropBox", Object::Reference(crop_id));
+        let mid_id = doc.add_object(Object::Dictionary(mid));
+        let mut page = Dictionary::new();
+        page.set("Type", Object::Name(b"Page".to_vec()));
+        page.set("Parent", Object::Reference(mid_id));
+        for (k, v) in page_extra {
+            page.set(*k, v.clone());
+        }
+        let page_id = doc.add_object(Object::Dictionary(page));
+        if let Ok(Object::Dictionary(d)) = doc.get_object_mut(mid_id) {
+            d.set("Kids", Object::Array(vec![Object::Reference(page_id)]));
+        }
+        if let Ok(Object::Dictionary(d)) = doc.get_object_mut(root_id) {
+            d.set("Kids", Object::Array(vec![Object::Reference(mid_id)]));
+        }
+        let mut catalog = Dictionary::new();
+        catalog.set("Type", Object::Name(b"Catalog".to_vec()));
+        catalog.set("Pages", Object::Reference(root_id));
+        let catalog_id = doc.add_object(Object::Dictionary(catalog));
+        doc.trailer.set("Root", Object::Reference(catalog_id));
+        doc
+    }
+
+    #[test]
+    fn page_info_inherits_media_box_crop_box_and_rotate() {
+        // bug-0022: all three used to read only the page dict and print `-`.
+        let doc = doc_with_inherited_geometry(&[]);
+        let out = output_of(|w| print_page_info(w, &doc, &PageSpec::Single(1)));
+        assert!(out.contains("MediaBox:     [0 0 612 792]"), "{out}");
+        assert!(out.contains("CropBox:      [10 20 600 780]"), "{out}");
+        assert!(out.contains("Rotate:") && out.contains("90"), "{out}");
+        let json = page_info_json_value(&doc, &PageSpec::Single(1));
+        let page = &json["pages"][0];
+        assert_eq!(page["media_box"], "[0 0 612 792]", "{json}");
+        assert_eq!(page["crop_box"], "[10 20 600 780]", "{json}");
+        assert_eq!(page["rotate"], 90, "{json}");
+    }
+
+    #[test]
+    fn page_own_geometry_overrides_inherited() {
+        let doc = doc_with_inherited_geometry(&[
+            ("MediaBox", rect(0, 0, 100, 200)),
+            ("Rotate", Object::Integer(0)),
+        ]);
+        let json = page_info_json_value(&doc, &PageSpec::Single(1));
+        let page = &json["pages"][0];
+        assert_eq!(page["media_box"], "[0 0 100 200]", "{json}");
+        assert_eq!(page["rotate"], 0, "{json}");
+        assert_eq!(page["crop_box"], "[10 20 600 780]", "{json}");
     }
 
     #[test]

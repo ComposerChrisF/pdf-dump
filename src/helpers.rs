@@ -42,6 +42,33 @@ pub(crate) fn build_page_list(
     }
 }
 
+/// Look up an inheritable page attribute (`MediaBox`, `CropBox`, `Rotate`,
+/// `Resources` — PDF 32000-1 §7.7.3.4, Table 31): the page's own value if it has
+/// one, else the nearest ancestor `/Pages` node's.  A `/Parent` cycle stops the
+/// walk.  An indirect value is dereferenced once, so callers see the array or
+/// number rather than a reference.
+pub(crate) fn inherited_page_attr<'a>(
+    doc: &'a Document,
+    page_id: ObjectId,
+    key: &[u8],
+) -> Option<&'a Object> {
+    let mut current_id = page_id;
+    let mut visited = BTreeSet::new();
+    while let Ok(Object::Dictionary(dict)) = doc.get_object(current_id) {
+        if !visited.insert(current_id) {
+            break;
+        }
+        if let Ok(value) = dict.get(key) {
+            return match value {
+                Object::Reference(id) => doc.get_object(*id).ok(),
+                other => Some(other),
+            };
+        }
+        current_id = dict.get(b"Parent").and_then(|o| o.as_reference()).ok()?;
+    }
+    None
+}
+
 pub(crate) fn resolve_dict<'a>(
     doc: &'a Document,
     obj: &'a Object,
@@ -295,6 +322,11 @@ pub(crate) fn read_content_streams(doc: &Document, page_id: ObjectId) -> Option<
                 if let Some(warn) = warning {
                     warnings.push(format!("Content stream {} {}: {}", cid.0, cid.1, warn));
                     decode_failed = true;
+                }
+                // PDF 32000-1 §7.8.2: segments divide only at token boundaries, so each
+                // one ends a token.  Without a separator, `…ET` + `BT…` fuses into `ETBT`.
+                if !bytes.is_empty() {
+                    bytes.push(b'\n');
                 }
                 bytes.extend_from_slice(&decoded);
             }

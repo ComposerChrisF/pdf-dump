@@ -1,6 +1,6 @@
 use lopdf::{Document, Object, ObjectId, content::Content};
 use serde_json::{Value, json};
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::io::Write;
 use std::rc::Rc;
 
@@ -188,6 +188,7 @@ pub(crate) fn extract_text_from_page_with_warnings(
                 doc,
                 &stream_data.bytes,
                 resources,
+                None,
                 &mut state,
                 &mut visited,
                 0,
@@ -210,10 +211,16 @@ pub(crate) fn extract_text_from_page_with_warnings(
 /// reliability data to `state`. Recurses into form XObjects invoked via `Do`,
 /// resolving each form's own `/Resources` (or inheriting the caller's) and
 /// guarding against cycles (`visited`) and runaway nesting (`depth`).
+///
+/// `inherited_font` is the font active in the invoking stream when it ran `Do`
+/// (`None` for a page).  The text font is part of the graphics state, which a
+/// form XObject executes within (PDF 32000-1 §8.10.1), so a form that shows text
+/// without its own `Tf` uses its caller's font (bug-0014).
 fn process_content(
     doc: &Document,
     bytes: &[u8],
     resources: Option<&lopdf::Dictionary>,
+    inherited_font: Option<&FontDecoder>,
     state: &mut ExtractState,
     visited: &mut HashSet<ObjectId>,
     depth: u32,
@@ -241,9 +248,19 @@ fn process_content(
         }
     };
 
-    let mut current_font: Option<&FontDecoder> = None;
+    let mut current_font: Option<&FontDecoder> = inherited_font;
+    // `q`/`Q` save and restore the graphics state, which includes the text font:
+    // a `Tf` inside `q … Q` must not outlive the `Q`.  An unbalanced `Q` (more
+    // restores than saves) is ignored rather than clearing the font.
+    let mut saved_fonts: Vec<Option<&FontDecoder>> = Vec::new();
     for op in &operations {
         match op.operator.as_str() {
+            "q" => saved_fonts.push(current_font),
+            "Q" => {
+                if let Some(f) = saved_fonts.pop() {
+                    current_font = f;
+                }
+            }
             "BT" => {
                 if !state.first_bt && !state.text.ends_with('\n') {
                     state.text.push('\n');
@@ -337,7 +354,15 @@ fn process_content(
                 // captured; image XObjects and broken refs are skipped.
                 if let Some(Object::Name(n)) = op.operands.first() {
                     let name = String::from_utf8_lossy(n).into_owned();
-                    process_form_xobject(doc, resources, &name, state, visited, depth);
+                    process_form_xobject(
+                        doc,
+                        resources,
+                        current_font,
+                        &name,
+                        state,
+                        visited,
+                        depth,
+                    );
                 }
             }
             _ => {}
@@ -351,6 +376,7 @@ fn process_content(
 fn process_form_xobject(
     doc: &Document,
     parent_resources: Option<&lopdf::Dictionary>,
+    parent_font: Option<&FontDecoder>,
     name: &str,
     state: &mut ExtractState,
     visited: &mut HashSet<ObjectId>,
@@ -375,7 +401,15 @@ fn process_form_xobject(
     if !visited.insert(xobj_id) {
         return;
     }
-    recurse_into_form(doc, xobj_id, parent_resources, state, visited, depth);
+    recurse_into_form(
+        doc,
+        xobj_id,
+        parent_resources,
+        parent_font,
+        state,
+        visited,
+        depth,
+    );
     visited.remove(&xobj_id);
 }
 
@@ -386,6 +420,7 @@ fn recurse_into_form(
     doc: &Document,
     xobj_id: ObjectId,
     parent_resources: Option<&lopdf::Dictionary>,
+    parent_font: Option<&FontDecoder>,
     state: &mut ExtractState,
     visited: &mut HashSet<ObjectId>,
     depth: u32,
@@ -423,7 +458,15 @@ fn recurse_into_form(
         .and_then(|r| helpers::resolve_dict(doc, r))
         .or(parent_resources);
 
-    process_content(doc, &decoded, form_resources, state, visited, depth + 1);
+    process_content(
+        doc,
+        &decoded,
+        form_resources,
+        parent_font,
+        state,
+        visited,
+        depth + 1,
+    );
 }
 
 /// Resolve a named XObject resource (e.g. `Fm0` from `/Fm0 Do`) to its id.
@@ -446,10 +489,24 @@ fn resolve_xobject_id(
 /// the `document_verdict` low-coverage downgrade is a usage-aware safety net for
 /// every font type, not just ToUnicode (see that function's note).
 fn push_code(out: &mut String, s: &str, total: &mut u64, unmapped: &mut u64) {
-    *total += 1;
-    if s == "\u{FFFD}" {
-        *unmapped += 1;
-    }
+    let bad = u64::from(s == "\u{FFFD}");
+    push_counted(out, s, 1, bad, total, unmapped);
+}
+
+/// Append `s` while counting `codes` source codes, `bad` of them unmapped.  The
+/// emitted text and the counts are decoupled so the passthrough arm can count
+/// every undecodable *byte* while emitting the single U+FFFD that
+/// `String::from_utf8_lossy` produces for a whole maximal invalid run.
+fn push_counted(
+    out: &mut String,
+    s: &str,
+    codes: u64,
+    bad: u64,
+    total: &mut u64,
+    unmapped: &mut u64,
+) {
+    *total += codes;
+    *unmapped += bad;
     out.push_str(s);
 }
 
@@ -511,16 +568,47 @@ fn emit_show_string(
                 }
             }
         }
-        // No active font, unknown font, or undecodable font: passthrough. Count
-        // per emitted scalar (U+FFFD for each byte the lossy decode could not
-        // render) while preserving byte-identical output.
+        // No active font, unknown font, or undecodable font: passthrough.  With no
+        // font there are no character codes, so the unit is the byte: each byte of
+        // a valid UTF-8 scalar counts once, and every byte of an invalid run counts
+        // as unmapped (bug-0036).  The output stays byte-identical to
+        // `String::from_utf8_lossy`, which emits ONE U+FFFD per maximal invalid run.
         _ => {
-            for ch in String::from_utf8_lossy(bytes).chars() {
-                *total += 1;
-                if ch == '\u{FFFD}' {
-                    *unmapped += 1;
+            let mut rest = bytes;
+            while !rest.is_empty() {
+                let (valid, bad_len) = match std::str::from_utf8(rest) {
+                    Ok(v) => (v, 0),
+                    Err(e) => {
+                        let ok = e.valid_up_to();
+                        let bad = e.error_len().unwrap_or(rest.len() - ok);
+                        // `valid_up_to` guarantees this prefix is UTF-8.
+                        (std::str::from_utf8(&rest[..ok]).unwrap_or_default(), bad)
+                    }
+                };
+                for ch in valid.chars() {
+                    let mut buf = [0u8; 4];
+                    let s = ch.encode_utf8(&mut buf);
+                    let bad = u64::from(ch == '\u{FFFD}');
+                    push_counted(
+                        out,
+                        s,
+                        s.len() as u64,
+                        bad * s.len() as u64,
+                        total,
+                        unmapped,
+                    );
                 }
-                out.push(ch);
+                if bad_len > 0 {
+                    push_counted(
+                        out,
+                        "\u{FFFD}",
+                        bad_len as u64,
+                        bad_len as u64,
+                        total,
+                        unmapped,
+                    );
+                }
+                rest = &rest[valid.len() + bad_len..];
             }
         }
     }
@@ -1067,13 +1155,26 @@ pub(crate) fn text_json_value(doc: &Document, page_filter: Option<&PageSpec>) ->
 }
 
 /// Deduplicate per-page font records (a font recurs identically on every page).
+///
+/// The key (`name|base_font|subtype`) does not identify a font object: two distinct
+/// objects — one with a `/ToUnicode`, one without — can share it.  So a collision
+/// keeps the *worst* classification, never merely the first seen; otherwise a
+/// Reliable duplicate masks the Unreliable record that drives exit 3 (bug-0012).
 fn dedup_font_records(records: Vec<FontReliabilityRecord>) -> Vec<FontReliabilityRecord> {
-    let mut seen = HashSet::new();
-    let mut out = Vec::new();
+    let mut index: HashMap<String, usize> = HashMap::new();
+    let mut out: Vec<FontReliabilityRecord> = Vec::new();
     for r in records {
         let key = format!("{}|{}|{}", r.name, r.base_font, r.subtype);
-        if seen.insert(key) {
-            out.push(r);
+        match index.get(&key) {
+            Some(&i) => {
+                if r.classification > out[i].classification {
+                    out[i] = r;
+                }
+            }
+            None => {
+                index.insert(key, out.len());
+                out.push(r);
+            }
         }
     }
     out
@@ -1502,6 +1603,30 @@ mod tests {
     }
 
     #[test]
+    fn extract_text_contents_array_keeps_token_boundary() {
+        // bug-0003: `BT (A) Tj ET` + `BT (B) Tj ET` fused into `ETBT` and extracted "AB".
+        let mut doc = Document::new();
+        let s1 = Stream::new(Dictionary::new(), b"BT (A) Tj ET".to_vec());
+        let s1_id = doc.add_object(Object::Stream(s1));
+        let s2 = Stream::new(Dictionary::new(), b"BT (B) Tj ET".to_vec());
+        let s2_id = doc.add_object(Object::Stream(s2));
+        let mut page = Dictionary::new();
+        page.set(
+            "Contents",
+            Object::Array(vec![Object::Reference(s1_id), Object::Reference(s2_id)]),
+        );
+        let p_id = doc.add_object(Object::Dictionary(page));
+        let text = extract_text_from_page(&doc, p_id);
+        assert!(!text.contains("AB"), "segments fused: {text:?}");
+        let a = text.find('A').unwrap();
+        let b = text.find('B').unwrap();
+        assert!(
+            text[a..b].contains('\n'),
+            "A and B on separate lines: {text:?}"
+        );
+    }
+
+    #[test]
     fn extract_text_non_dictionary_page() {
         // Page object is not a dictionary → empty text
         let mut doc = Document::new();
@@ -1803,6 +1928,92 @@ mod tests {
         assert!(rec.reason.contains("CID"), "reason: {}", rec.reason);
     }
 
+    fn record(classification: Reliability, has_to_unicode: bool) -> FontReliabilityRecord {
+        FontReliabilityRecord {
+            name: "/F1".to_string(),
+            base_font: "ABCDEF+Custom".to_string(),
+            subtype: "Type0".to_string(),
+            classification,
+            has_to_unicode,
+            reason: String::new(),
+        }
+    }
+
+    #[test]
+    fn dedup_keeps_worst_classification_whichever_comes_first() {
+        // bug-0012: a Reliable duplicate seen first used to swallow the Unreliable one.
+        for order in [
+            [
+                (Reliability::Reliable, true),
+                (Reliability::Unreliable, false),
+            ],
+            [
+                (Reliability::Unreliable, false),
+                (Reliability::Reliable, true),
+            ],
+        ] {
+            let recs = order.iter().map(|&(c, t)| record(c, t)).collect();
+            let deduped = dedup_font_records(recs);
+            assert_eq!(deduped.len(), 1);
+            assert_eq!(deduped[0].classification, Reliability::Unreliable);
+            assert!(!deduped[0].has_to_unicode);
+        }
+    }
+
+    #[test]
+    fn same_named_font_objects_one_without_tounicode_is_unreliable() {
+        // bug-0012 end to end: page 1's /F1 has a ToUnicode, page 2's /F1 is a different
+        // object with the same BaseFont and none.  Page 2's bytes `\x00A` are valid
+        // UTF-8, so the coverage net cannot catch it — only the font record can.
+        let cmap = b"begincodespacerange <0000> <FFFF> endcodespacerange \
+                     beginbfchar <0041> <0041> endbfchar";
+        let mut doc = Document::new();
+        let tu_id = doc.add_object(Object::Stream(Stream::new(
+            Dictionary::new(),
+            cmap.to_vec(),
+        )));
+        let mut with_tu = type0_font();
+        with_tu.set("ToUnicode", Object::Reference(tu_id));
+        let fonts = [with_tu, type0_font()];
+        let mut kids = Vec::new();
+        for font in fonts {
+            let font_id = doc.add_object(Object::Dictionary(font));
+            let mut f1 = Dictionary::new();
+            f1.set("F1", Object::Reference(font_id));
+            let mut resources = Dictionary::new();
+            resources.set("Font", Object::Dictionary(f1));
+            let c = Stream::new(Dictionary::new(), b"BT /F1 12 Tf <0041> Tj ET".to_vec());
+            let c_id = doc.add_object(Object::Stream(c));
+            let mut page = Dictionary::new();
+            page.set("Type", Object::Name(b"Page".to_vec()));
+            page.set("Contents", Object::Reference(c_id));
+            page.set("Resources", Object::Dictionary(resources));
+            kids.push(doc.add_object(Object::Dictionary(page)));
+        }
+        let mut pages = Dictionary::new();
+        pages.set("Type", Object::Name(b"Pages".to_vec()));
+        pages.set(
+            "Kids",
+            Object::Array(kids.iter().map(|&k| Object::Reference(k)).collect()),
+        );
+        pages.set("Count", Object::Integer(2));
+        let pages_id = doc.add_object(Object::Dictionary(pages));
+        for k in &kids {
+            if let Ok(Object::Dictionary(d)) = doc.get_object_mut(*k) {
+                d.set("Parent", Object::Reference(pages_id));
+            }
+        }
+        let mut catalog = Dictionary::new();
+        catalog.set("Type", Object::Name(b"Catalog".to_vec()));
+        catalog.set("Pages", Object::Reference(pages_id));
+        let catalog_id = doc.add_object(Object::Dictionary(catalog));
+        doc.trailer.set("Root", Object::Reference(catalog_id));
+
+        let (json, had_issues) = text_json_value(&doc, None);
+        assert_eq!(json["reliability"]["verdict"], "unreliable", "{json}");
+        assert!(had_issues, "an Unreliable document must drive exit 3");
+    }
+
     #[test]
     fn no_tf_falls_back_to_passthrough() {
         // No font resources, no Tf: behaves exactly as before.
@@ -1979,6 +2190,62 @@ mod tests {
         assert_eq!(result.text, "A\u{FFFD}B");
         assert_eq!(result.total_codes, 3);
         assert_eq!(result.unmapped_codes, 1);
+    }
+
+    /// Run `bytes` through the passthrough arm (no font) and return (text, total, unmapped).
+    fn passthrough(bytes: &[u8]) -> (String, u64, u64) {
+        let (mut out, mut total, mut unmapped) = (String::new(), 0, 0);
+        emit_show_string(&mut out, bytes, None, &mut total, &mut unmapped);
+        (out, total, unmapped)
+    }
+
+    #[test]
+    fn passthrough_counts_bytes_not_emitted_scalars() {
+        // bug-0036: the rows of the report's measurement table, byte denominator.
+        let cases: &[(&[u8], u64, u64)] = &[
+            (b"\x80\x81", 2, 2),
+            (b"\x93\x94\x96\x41", 4, 3),
+            (b"\x41\xE0\xA0", 3, 2),
+            (b"\x41\x41\x41\x41\xF0\x9F\x98", 7, 3),
+        ];
+        for &(bytes, total, unmapped) in cases {
+            let (_, t, u) = passthrough(bytes);
+            assert_eq!((t, u), (total, unmapped), "input {bytes:02X?}");
+        }
+    }
+
+    #[test]
+    fn passthrough_output_identical_to_from_utf8_lossy() {
+        // `--text` stdout is a stable contract: counting per byte must not change
+        // what is emitted (one U+FFFD per maximal invalid run, not per byte).
+        let inputs: &[&[u8]] = &[
+            b"",
+            b"plain ascii",
+            "caf\u{e9} \u{2014} \u{1F600}".as_bytes(),
+            b"\x80\x81",
+            b"\x41\xE0\xA0",
+            b"\x41\x41\x41\x41\xF0\x9F\x98",
+            b"\xF0\x9F\x98\x41\xFF\xFE\xC3",
+            b"ok\xE2\x82ok\xE2\x82\xAC",
+        ];
+        for &bytes in inputs {
+            assert_eq!(
+                passthrough(bytes).0,
+                String::from_utf8_lossy(bytes),
+                "input {bytes:02X?}"
+            );
+        }
+    }
+
+    #[test]
+    fn passthrough_truncated_four_byte_run_downgrades_to_degraded() {
+        // The threshold case from bug-0036: scalars gave 1/5 = 0.200 (not > 0.20,
+        // Reliable); bytes give 3/7 = 0.43 (Degraded).
+        let (_, total, unmapped) = passthrough(b"AAAA\xF0\x9F\x98");
+        assert_eq!(
+            document_verdict(&[], total, unmapped),
+            Reliability::Degraded
+        );
     }
 
     #[test]
@@ -2201,6 +2468,79 @@ mod tests {
             result.text.contains('\u{2013}'),
             "form should inherit the page font, got: {:?}",
             result.text
+        );
+    }
+
+    #[test]
+    fn form_without_tf_inherits_callers_active_font() {
+        // bug-0014: `/F1 12 Tf /Fm0 Do` where the form shows `(\x96)` with no Tf of
+        // its own.  The text font is graphics state, so the form draws in WinAnsi.
+        let (doc, p_id) = doc_with_form(
+            b"/F1 12 Tf /Fm0 Do",
+            b"BT (\x96) Tj ET",
+            Some(winansi_font()),
+            None,
+        );
+        let result = extract_text_from_page_with_warnings(&doc, p_id);
+        assert_eq!(
+            result.text, "\u{2013}",
+            "inherited font must decode the en dash"
+        );
+        assert_eq!(result.unmapped_codes, 0);
+    }
+
+    #[test]
+    fn form_with_own_resources_but_no_tf_still_uses_callers_font() {
+        // The form's own /Resources name a different /F1, but it never selects it:
+        // the active font is still the caller's font object, not a re-lookup by name.
+        let (doc, p_id) = doc_with_form(
+            b"BT /F1 12 Tf ET /Fm0 Do",
+            b"BT (\x96) Tj ET",
+            Some(winansi_font()),
+            Some(type0_font()),
+        );
+        let result = extract_text_from_page_with_warnings(&doc, p_id);
+        assert!(result.text.contains('\u{2013}'), "got: {:?}", result.text);
+    }
+
+    #[test]
+    fn font_selected_inside_form_does_not_leak_out() {
+        // `Do` wraps the form in an implicit q/Q, so its Tf ends with it.
+        let (doc, p_id) = doc_with_form(
+            b"/Fm0 Do BT (\x96) Tj ET",
+            b"BT /F1 12 Tf ET",
+            None,
+            Some(winansi_font()),
+        );
+        let result = extract_text_from_page_with_warnings(&doc, p_id);
+        assert!(!result.text.contains('\u{2013}'), "got: {:?}", result.text);
+    }
+
+    #[test]
+    fn q_big_q_restores_the_text_font() {
+        // A Tf inside q … Q must not outlive the Q.
+        let (doc, p_id) =
+            doc_with_font(winansi_font(), None, b"q BT /F1 12 Tf ET Q BT (\x96) Tj ET");
+        let result = extract_text_from_page_with_warnings(&doc, p_id);
+        assert!(
+            !result.text.contains('\u{2013}'),
+            "font leaked past Q: {:?}",
+            result.text
+        );
+    }
+
+    #[test]
+    fn q_big_q_keeps_a_font_set_before_q() {
+        let (doc, p_id) = doc_with_font(
+            winansi_font(),
+            None,
+            b"BT /F1 12 Tf ET q Q Q BT (\x96) Tj ET",
+        );
+        let result = extract_text_from_page_with_warnings(&doc, p_id);
+        assert_eq!(
+            result.text.trim(),
+            "\u{2013}",
+            "unbalanced Q must not clear the font"
         );
     }
 

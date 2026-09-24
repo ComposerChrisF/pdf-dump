@@ -7,6 +7,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.24.1] - 2026-09-23
+### Fixed
+- A form field whose `/Kids` cycles back to itself or an ancestor no longer
+  overflows the stack; the default overview, `--json` and `--forms` all survive
+  it (bug-0013).
+- A page whose `/Contents` is an array no longer fuses the last token of one
+  stream with the first of the next (`ET` + `BT` → `ETBT`); `--text`,
+  `--operators` and `--find-text` see the boundary (bug-0003).
+- `--text` no longer certifies a document reliable when two distinct fonts share
+  a resource name, BaseFont and Subtype and only one has a `/ToUnicode`; the worst
+  classification survives deduplication (bug-0012).
+- The `--text` coverage net counts undecodable bytes, not emitted replacement
+  characters, so a multi-byte invalid run is no longer under-counted; output is
+  unchanged (bug-0036).
+- Text inside a form XObject without its own `Tf` now decodes through the caller’s
+  active font, and `q`/`Q` save and restore the text font (bug-0014).
+- `--page` reports `MediaBox`, `CropBox` and `Rotate` inherited from an ancestor
+  `/Pages` node instead of `-` (bug-0022).
+
 ## [0.24.0] - 2026-07-14
 ### Changed
 - Migrate to the canonical portfolio exit-code table and add a “caution” tier.

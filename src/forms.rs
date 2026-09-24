@@ -1,6 +1,6 @@
 use lopdf::{Document, Object, ObjectId};
 use serde_json::{Value, json};
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::io::Write;
 
 pub(crate) struct FormFieldInfo {
@@ -81,22 +81,37 @@ pub(crate) fn collect_form_fields_from_dict(
     }
 
     let mut fields = Vec::new();
+    let mut visited = BTreeSet::new();
     for field_obj in fields_array {
         if let Ok(field_id) = field_obj.as_reference() {
-            collect_field_recursive(doc, field_id, "", &widget_to_page, &mut fields);
+            collect_field_recursive(
+                doc,
+                field_id,
+                "",
+                &widget_to_page,
+                &mut fields,
+                &mut visited,
+            );
         }
     }
 
     (Some(acroform_id), need_appearances, fields)
 }
 
+/// Walks one field and its `/Kids`.  `visited` holds every field id already entered, so a
+/// `/Kids` cycle (a field listing itself or an ancestor) is entered once and then skipped
+/// instead of recursing until the stack overflows.
 pub(crate) fn collect_field_recursive(
     doc: &Document,
     field_id: ObjectId,
     parent_name: &str,
     widget_to_page: &BTreeMap<ObjectId, u32>,
     fields: &mut Vec<FormFieldInfo>,
+    visited: &mut BTreeSet<ObjectId>,
 ) {
+    if !visited.insert(field_id) {
+        return;
+    }
     let dict = match doc.get_object(field_id) {
         Ok(Object::Dictionary(d)) => d,
         Ok(Object::Stream(s)) => &s.dict,
@@ -137,7 +152,14 @@ pub(crate) fn collect_field_recursive(
         });
         if has_field_kids {
             for kid_id in kid_ids {
-                collect_field_recursive(doc, kid_id, &qualified_name, widget_to_page, fields);
+                collect_field_recursive(
+                    doc,
+                    kid_id,
+                    &qualified_name,
+                    widget_to_page,
+                    fields,
+                    visited,
+                );
             }
             return;
         }
@@ -278,6 +300,83 @@ mod tests {
     use lopdf::{Dictionary, StringFormat};
     use pretty_assertions::assert_eq;
     use serde_json::Value;
+
+    /// A catalog whose `/AcroForm /Fields` lists `fields`, with `objs` added verbatim.
+    fn form_doc_with_fields(objs: Vec<(ObjectId, Dictionary)>, fields: Vec<ObjectId>) -> Document {
+        let mut doc = Document::new();
+        for (id, d) in objs {
+            doc.objects.insert(id, Object::Dictionary(d));
+        }
+        let mut acroform = Dictionary::new();
+        acroform.set(
+            "Fields",
+            Object::Array(fields.into_iter().map(Object::Reference).collect()),
+        );
+        let af_id = doc.add_object(Object::Dictionary(acroform));
+        let mut catalog = Dictionary::new();
+        catalog.set("Type", Object::Name(b"Catalog".to_vec()));
+        catalog.set("AcroForm", Object::Reference(af_id));
+        let cat_id = doc.add_object(Object::Dictionary(catalog));
+        doc.trailer.set("Root", Object::Reference(cat_id));
+        doc
+    }
+
+    fn named_field(name: &str, kids: Vec<ObjectId>) -> Dictionary {
+        let mut d = Dictionary::new();
+        d.set(
+            "T",
+            Object::String(name.as_bytes().to_vec(), StringFormat::Literal),
+        );
+        d.set("FT", Object::Name(b"Tx".to_vec()));
+        d.set(
+            "Kids",
+            Object::Array(kids.into_iter().map(Object::Reference).collect()),
+        );
+        d
+    }
+
+    #[test]
+    fn field_kids_self_cycle_terminates() {
+        // bug-0013: `4 0 obj << /T (loop) /Kids [4 0 R] >>` overflowed the stack.
+        let doc = form_doc_with_fields(
+            vec![((4, 0), named_field("loop", vec![(4, 0)]))],
+            vec![(4, 0)],
+        );
+        let (_, _, fields) = collect_form_fields(&doc);
+        assert!(
+            fields.len() <= 1,
+            "cycle must not multiply fields: {}",
+            fields.len()
+        );
+    }
+
+    #[test]
+    fn field_kids_two_node_cycle_terminates() {
+        let doc = form_doc_with_fields(
+            vec![
+                ((4, 0), named_field("a", vec![(5, 0)])),
+                ((5, 0), named_field("b", vec![(4, 0)])),
+            ],
+            vec![(4, 0)],
+        );
+        let (_, _, fields) = collect_form_fields(&doc);
+        assert!(
+            fields.len() <= 2,
+            "cycle must not multiply fields: {}",
+            fields.len()
+        );
+    }
+
+    #[test]
+    fn field_kids_cycle_overview_survives() {
+        // The crash was reachable from the default command, which counts fields.
+        let doc = form_doc_with_fields(
+            vec![((4, 0), named_field("loop", vec![(4, 0)]))],
+            vec![(4, 0)],
+        );
+        let out = output_of(|w| print_forms(w, &doc));
+        assert!(!out.is_empty());
+    }
 
     fn build_form_doc() -> Document {
         let mut doc = Document::new();
