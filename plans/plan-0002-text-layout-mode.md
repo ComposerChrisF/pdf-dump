@@ -1,5 +1,9 @@
 # Plan: `--text --layout` — Position-Faithful Text Extraction
 
+> **Status 2026-09-23 — grid text landed (v0.26.0); plan stays open.**  Shipped: `--text --layout` and `--layout-cell`, the text-state machine (CTM, `q`/`Q`, `Tm`/`Td`/`TD`/`T*`/`'`/`"`, `Tc`/`Tw`/`Tz`/`TL`/`Ts`, `TJ` adjustments, form `/Matrix`), glyph advances from `/Widths`, CID `/W`+`/DW` (Identity-H/V) and Type3 `/FontMatrix` (`src/metrics.rs`), visual space from `/Rotate` and the effective CropBox, and baseline clustering onto the grid (`src/layout.rs`).  Also: the no-invented-spaces guarantee, the non-horizontal section, overprint dedup, and Degraded (exit 3) for an unknown width, per code, never an invented one.  Per-page `rotate`, `crop_box`, `cell`, `non_horizontal_glyphs` and `off_page_glyphs` are in `--json`, and the poppler differential oracle is an integration test that skips when `pdftotext` is absent.  A pre-commit review found the first draft splitting a digit run where another string was drawn over it.  So the grid now works on _chunks_: consecutive inked glyphs, in content order, with no real gap between them, which are never split.  A whitespace glyph joins a chunk only between inked glyphs and never starts one.  Three things this plan did not specify: the left margin every line shares is shifted out, empty lines at a page’s top and bottom are dropped, and glyphs outside the CropBox (or at a non-finite position) go to an `[off-page text]` section, so no line can be stretched without bound.  None of these changes the relative alignment of any two columns.  One deviation: fixtures are built in-process with lopdf at exact coordinates, not with `pdf-maker --watermark`, so no external binary sits in the test path.
+>
+> **Open:** (1) the `spans` array.  Its planned consumer, medpdf `plan-0007`, was rejected on 2026-09-23 (“we are NOT building a PDF redactor”), so whether spans ship for their debugging value alone or are dropped from this plan is Chris’s call.  (2) The Standard-14 AFM width tables; until they land, such fonts are Degraded under `--layout`.
+
 ## Problem
 
 `--text` recovers _what_ a page says but not _where_.  `process_content` (`src/text.rs`) tracks no text matrix, no CTM, and no glyph advances: a line break is inferred from a negative `Td`/`TD` operand or a `T*`, and a space from a `TJ` adjustment below −100.  Reading order is content-stream order.
@@ -25,7 +29,7 @@ pdf-dump statement.pdf --text --layout --json     # the same, plus span geometry
 
 **No invented spaces.**  Grid rounding must never put a space between two glyphs that have no real gap between them.  A space inside a run comes only from an actual gap: the pen advance, `TJ` adjustment, or position jump compared against the font’s space advance.  Column padding goes only _between_ runs that are genuinely separate.  `id-redact`’s spec records this as a guarantee pdf-dump owes.  A digit run printed as one string (`12345678`) that came out as `1234 5678` because of column quantization would demote an exact Tier-1 redaction to a Tier-2 hold.  That is still safe, but it is noise, and nobody would notice the drift.  The reverse, padded adjacent columns reading as one run, is expected and acceptable.
 
-**JSON output** adds, per page, a `spans` array — each a run of same-font, same-baseline glyphs with its decoded text, its bounding box, font resource name, and effective size.  Spans are the unit a redaction engine needs (medpdf `plan-0007`), and are independently useful for debugging (“why did this word extract out of order?”).
+**JSON output** adds, per page, a `spans` array — each a run of same-font, same-baseline glyphs with its decoded text, its bounding box, font resource name, and effective size.  Spans were to be the unit a redaction engine needs (medpdf `plan-0007`, since rejected), and are independently useful for debugging (“why did this word extract out of order?”).
 
 **Two coordinate spaces, deliberately.**  They serve different consumers:
 
@@ -33,7 +37,7 @@ pdf-dump statement.pdf --text --layout --json     # the same, plus span geometry
 - **The text grid is built in visual space**: rotated by `/Rotate` and made relative to the effective CropBox, so a landscape statement reads top to bottom as it displays.
 - **Each page’s JSON entry also carries its `/Rotate` and its effective CropBox** (both inherited per `helpers::inherited_page_attr`), so a consumer can map between the two spaces without re-reading the PDF.
 
-**Landing order.**  The grid text ships first, because it is all `id-redact` v1 consumes.  The `spans` array follows in a second landing for medpdf `plan-0007`, and the first landing writes a dated status banner here saying so.
+**Landing order.**  The grid text ships first, because it is all `id-redact` v1 consumes.  The `spans` array was to follow in a second landing for medpdf `plan-0007`; see the status banner above.
 
 **Reliability** extends the existing verdict rather than adding a second one.  Positions are only as good as the widths behind them, so a font whose advances cannot be determined (see below) makes layout **Degraded**.  Never place glyphs with an invented width and report Reliable.
 
@@ -45,7 +49,7 @@ A real text-state machine, replacing the heuristics only under `--layout` (plain
 
 - **Graphics state:** `q`/`Q` stack, `cm` concatenation into the CTM.  Form XObjects apply their `/Matrix` on the existing recursion path (`recurse_into_form`).
 - **Text state:** `BT`/`ET`; `Tm` and the line matrix; `Td`, `TD` (which also sets leading), `T*`, `'`, `"`; `Tc`, `Tw` (applied only to single-byte code 32), `Tz`, `TL`, `Ts`, `Tf` size.
-- **Glyph advance:** simple fonts from `/Widths` + `/FirstChar`; CID fonts from `/W` + `/DW`; Type3 through `/FontMatrix`.  **Standard-14 fonts carry no `/Widths`** and need the AFM width tables — pdf-dump has none today, and neither does medpdf (checked 2026-09-23).  Embed Adobe’s 14 AFM width tables in pdf-dump, with Adobe’s license notice, the same way `glyphlist.rs` embeds the AGL.  They need not ship in the same landing: until they do, a Standard-14 font with no `/Widths` is Degraded, which means exit 3.  `id-redact` accepts that interim fail-closed state.  Whether medpdf later shares these tables or keeps its own copy is medpdf `plan-0007`’s open question (share, or keep an independent verification path).
+- **Glyph advance:** simple fonts from `/Widths` + `/FirstChar`; CID fonts from `/W` + `/DW`; Type3 through `/FontMatrix`.  **Standard-14 fonts carry no `/Widths`** and need the AFM width tables — pdf-dump has none today, and neither does medpdf (checked 2026-09-23).  Embed Adobe’s 14 AFM width tables in pdf-dump, with Adobe’s license notice, the same way `glyphlist.rs` embeds the AGL.  They need not ship in the same landing: until they do, a Standard-14 font with no `/Widths` is Degraded, which means exit 3.  `id-redact` accepts that interim fail-closed state.
 - **`TJ` adjustments** move the pen by `−n/1000 × size × Tz`; the current `< −100 ⇒ space` heuristic becomes a gap-width comparison against the space advance.
 - **Page geometry:** honor `/Rotate` and the CropBox origin, so coordinates in JSON are stated in one documented space.
 - **Non-horizontal text** (rotated labels, vertical writing) does not belong on the grid.  Emit it after the page’s grid under a marker line, and count it in JSON, rather than splicing it into rows.
@@ -59,4 +63,4 @@ bug-0003 (content streams fused across `/Contents` segments), bug-0012 and bug-0
 
 ## Why Not a Workaround
 
-`pdftotext -layout` exists and does most of this, but it is outside the portfolio’s reliability contract: it has no Reliable/Degraded verdict and no exit 3 for undecodable fonts, so an extraction that silently mangled the account-number line would look exactly like a clean one.  The redaction pipeline depends on being told when extraction cannot be trusted.  The span geometry is also what medpdf `plan-0007` (true redaction) needs; whether the two share one positioning engine or deliberately keep two, so that verification runs through an independent code path, is an open question recorded there.
+`pdftotext -layout` exists and does most of this, but it is outside the portfolio’s reliability contract: it has no Reliable/Degraded verdict and no exit 3 for undecodable fonts, so an extraction that silently mangled the account-number line would look exactly like a clean one.  The redaction pipeline depends on being told when extraction cannot be trusted.

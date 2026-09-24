@@ -42,6 +42,8 @@ pub(crate) mod helpers;
 pub(crate) mod images;
 pub(crate) mod inspect;
 pub(crate) mod layers;
+pub(crate) mod layout;
+pub(crate) mod metrics;
 pub(crate) mod object;
 pub(crate) mod operators;
 pub(crate) mod page_info;
@@ -417,6 +419,7 @@ fn build_mode_json_value(
         DocMode::Forms => (forms::forms_json_value(doc), false),
         DocMode::Bookmarks => (bookmarks::bookmarks_json_value(doc), false),
         DocMode::Annotations => (annotations::annotations_json_value(doc, page_spec), false),
+        DocMode::Text if args.layout => layout::layout_json_value(doc, page_spec, args.layout_cell),
         DocMode::Text => text::text_json_value(doc, page_spec),
         DocMode::Operators => (operators::operators_json_value(doc, page_spec), false),
         DocMode::Tags => (structure::structure_json_value(doc, config), false),
@@ -476,6 +479,7 @@ fn dispatch_mode_text(
             annotations::print_annotations(out, doc, page_spec);
             false
         }
+        DocMode::Text if args.layout => layout::print_layout(out, doc, page_spec, args.layout_cell),
         DocMode::Text => text::print_text(out, doc, page_spec),
         DocMode::Operators => {
             operators::print_operators(out, doc, page_spec);

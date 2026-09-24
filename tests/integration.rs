@@ -3128,3 +3128,158 @@ fn text_degraded_json_exits_3_and_emits_json() {
     assert_eq!(parsed["reliability"]["verdict"], "degraded");
     assert_eq!(parsed["pages"][0]["text"], "Hi");
 }
+
+// ── --text --layout (plan-0002, grid-text landing) ───────────────────────────
+
+/// A simple font with every width 600 (6 pt at 10 pt), so grid columns are exact.
+fn mono_font_dict() -> Dictionary {
+    let mut font = Dictionary::new();
+    font.set("Type", Object::Name(b"Font".to_vec()));
+    font.set("Subtype", Object::Name(b"Type1".to_vec()));
+    font.set("BaseFont", Object::Name(b"Courier".to_vec()));
+    font.set("Encoding", Object::Name(b"WinAnsiEncoding".to_vec()));
+    font.set("FirstChar", Object::Integer(32));
+    font.set("LastChar", Object::Integer(126));
+    font.set(
+        "Widths",
+        Object::Array((32..=126).map(|_| Object::Integer(600)).collect()),
+    );
+    font
+}
+
+/// A statement table drawn column by column (amounts, then descriptions, then
+/// dates), with debit and credit in separate columns.
+fn statement_content() -> Vec<u8> {
+    let cells: &[(f64, f64, &str)] = &[
+        (300.0, 700.0, "4.50"),
+        (468.0, 700.0, "95.50"),
+        (384.0, 688.0, "1000.00"),
+        (468.0, 688.0, "1095.50"),
+        (102.0, 700.0, "Coffee"),
+        (102.0, 688.0, "Payroll"),
+        (48.0, 700.0, "01/02"),
+        (48.0, 688.0, "01/03"),
+        (48.0, 712.0, "Date"),
+        (102.0, 712.0, "Description"),
+        (300.0, 712.0, "Debit"),
+        (384.0, 712.0, "Credit"),
+        (468.0, 712.0, "Balance"),
+    ];
+    cells
+        .iter()
+        .map(|(x, y, t)| format!("BT /F1 10 Tf 1 0 0 1 {x} {y} Tm ({t}) Tj ET\n"))
+        .collect::<String>()
+        .into_bytes()
+}
+
+fn run_pdf_dump(args: &[&str], pdf: &tempfile::NamedTempFile) -> std::process::Output {
+    Command::new(binary_path())
+        .arg(pdf.path())
+        .args(args)
+        .output()
+        .expect("failed to execute binary")
+}
+
+#[test]
+fn layout_keeps_statement_columns_and_exits_0() {
+    let pdf = create_pdf_with_font(mono_font_dict(), None, &statement_content());
+    let out = run_pdf_dump(&["--text", "--layout"], &pdf);
+    assert_eq!(
+        out.status.code(),
+        Some(0),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    let lines: Vec<&str> = stdout.lines().collect();
+    assert_eq!(lines[0], "--- Page 1 ---");
+    assert!(lines[1].starts_with("Date"), "{stdout}");
+    assert!(lines[2].starts_with("01/02"), "{stdout}");
+    assert!(lines[3].starts_with("01/03"), "{stdout}");
+    let debit = lines[1].find("Debit").unwrap();
+    let credit = lines[1].find("Credit").unwrap();
+    assert_eq!(lines[2].find("4.50"), Some(debit), "{stdout}");
+    assert_eq!(lines[3].find("1000.00"), Some(credit), "{stdout}");
+}
+
+#[test]
+fn layout_json_reports_page_geometry() {
+    let pdf = create_pdf_with_font(mono_font_dict(), None, &statement_content());
+    let out = run_pdf_dump(&["--text", "--layout", "--json"], &pdf);
+    assert_eq!(out.status.code(), Some(0));
+    let v: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+    assert_eq!(v["layout"], true);
+    assert_eq!(v["reliability"]["verdict"], "reliable");
+    assert_eq!(v["pages"][0]["rotate"], 0);
+    assert_eq!(
+        v["pages"][0]["crop_box"],
+        serde_json::json!([0.0, 0.0, 612.0, 792.0])
+    );
+    assert!(v["pages"][0]["text"].as_str().unwrap().contains("Payroll"));
+}
+
+#[test]
+fn layout_with_unknown_widths_exits_3_and_still_prints() {
+    let mut helv = Dictionary::new();
+    helv.set("Type", Object::Name(b"Font".to_vec()));
+    helv.set("Subtype", Object::Name(b"Type1".to_vec()));
+    helv.set("BaseFont", Object::Name(b"Helvetica".to_vec()));
+    let pdf = create_pdf_with_font(helv, None, b"BT /F1 10 Tf 50 700 Td (Hello) Tj ET");
+    let out = run_pdf_dump(&["--text", "--layout"], &pdf);
+    assert_eq!(out.status.code(), Some(3));
+    assert!(String::from_utf8_lossy(&out.stdout).contains("Hello"));
+    assert!(String::from_utf8_lossy(&out.stderr).contains("DEGRADED"));
+    // Plain --text of the same file stays reliable: widths only matter to layout.
+    assert_eq!(run_pdf_dump(&["--text"], &pdf).status.code(), Some(0));
+}
+
+#[test]
+fn layout_flags_are_usage_errors_out_of_context() {
+    let pdf = create_pdf_with_font(mono_font_dict(), None, &statement_content());
+    for args in [
+        &["--layout"][..],
+        &["--text", "--layout-cell", "6"],
+        &["--text", "--layout", "--layout-cell", "0"],
+        &["--text", "--layout", "--layout-cell", "-3"],
+        &["--text", "--layout", "--layout-cell", "NaN"],
+    ] {
+        assert_eq!(run_pdf_dump(args, &pdf).status.code(), Some(2), "{args:?}");
+    }
+    assert_eq!(
+        run_pdf_dump(&["--text", "--layout", "--layout-cell", "4.5"], &pdf)
+            .status
+            .code(),
+        Some(0)
+    );
+}
+
+/// Differential oracle: where poppler’s `pdftotext` is installed, every line must
+/// carry the same words in the same order as `pdftotext -layout`.  Skipped (with
+/// a note) where it is not; pdf-dump never depends on it.
+#[test]
+fn layout_agrees_with_pdftotext_word_order_where_installed() {
+    let Ok(probe) = Command::new("pdftotext").arg("-v").output() else {
+        eprintln!("pdftotext not installed; differential oracle skipped");
+        return;
+    };
+    let _ = probe;
+    let pdf = create_pdf_with_font(mono_font_dict(), None, &statement_content());
+    let ours = run_pdf_dump(&["--text", "--layout"], &pdf);
+    let theirs = Command::new("pdftotext")
+        .args(["-layout"])
+        .arg(pdf.path())
+        .arg("-")
+        .output()
+        .unwrap();
+    let words = |s: &str, skip_header: bool| -> Vec<Vec<String>> {
+        s.lines()
+            .filter(|l| !(skip_header && l.starts_with("--- Page")))
+            .map(|l| l.split_whitespace().map(str::to_string).collect::<Vec<_>>())
+            .filter(|w| !w.is_empty())
+            .collect()
+    };
+    assert_eq!(
+        words(&String::from_utf8_lossy(&ours.stdout), true),
+        words(&String::from_utf8_lossy(&theirs.stdout), false)
+    );
+}

@@ -39,6 +39,7 @@ The tool is split across the modules in `src/`.  The flow is:
 | `--inspect` | `inspect.rs` | `print_info`, `inspect_json_value` |
 | `--search` | `search.rs` | `search_objects`, `search_json_value` |
 | `--text` | `text.rs` | `print_text`, `text_json_value` (font-aware: decodes via `/ToUnicode` + WinAnsi/MacRoman) |
+| `--text --layout` | `layout.rs` | `print_layout`, `layout_json_value`, `layout_page` (text-state machine → visual-space glyphs → `build_chunks`: inked runs in content order, never split → lines by baseline → `render_line` onto the grid; off-page and non-horizontal glyphs go to side sections) |
 | `--operators` | `operators.rs` | `print_operators`, `operators_json_value` |
 | `--find-text` | `find_text.rs` | `print_find_text`, `find_text_json_value` |
 | `--fonts` | `fonts.rs` | `print_fonts`, `fonts_json_value` |
@@ -67,6 +68,7 @@ The tool is split across the modules in `src/`.  The flow is:
 | `cmap.rs` | `ToUnicodeCMap::parse` — best-effort ToUnicode CMap parser (bfchar/bfrange, codespace `lo`/`hi` bounds) for `--text`; `byte_width`/`next_code` split show-string bytes into codes, honoring variable-width codespaces (mixed 1-byte/2-byte CJK) |
 | `encodings.rs` | `winansi(b)` / `macroman(b)` / `standard(b)` / `macexpert(b)` — WinAnsiEncoding (CP1252), Mac OS Roman, Adobe StandardEncoding, and MacExpertEncoding → Unicode tables for simple fonts lacking ToUnicode.  Return `Option<&'static str>`, so one code can expand to several chars (f-ligatures decompose to ASCII, `rupiah`→`Rp`) |
 | `glyphlist.rs` | `glyph_name_to_string(name)` — Adobe Glyph List resolver for `/Encoding /Differences` glyph names.  Embeds Adobe’s `glyphlist.txt` (BSD-licensed) via `include_str!` into a lazy `OnceLock` map, plus algorithmic `uniXXXX` (UTF-16 units, surrogate pairs) / `uXXXXXX` forms, `.suffix` stripping, and underscore-joined ligature components.  Returns owned `String` (AGL entries can be multi-codepoint) |
+| `metrics.rs` | `font_metrics` → `FontMetrics::advance(code)`: glyph advances for `--layout` from simple-font `/Widths` (+`/MissingWidth`), Type3 `/FontMatrix`, and CID `/W`+`/DW` (Identity-H/V only).  Returns `None`, never an invented width; `unknown_reason` feeds the Degraded verdict |
 | `recover.rs` | Lenient post-load repair: `recover_malformed_streams` promotes objects lopdf dropped to bare dictionaries (because the PDF declared a wrong `/Length`, so `endstream` wasn’t where the length said) back to `Object::Stream`, scanning the raw bytes to the `endstream` keyword via each object’s xref offset.  A read-only `scan_malformed_streams` underlies both `recover_malformed_streams` (applies) and `detect_malformed_streams` (`--strict`, no mutation).  `has_candidates` gates the re-read; `recovery_banner` / `strict_banner` print the loud stderr warning (declared vs. actual length, file offset); `recovery_json_value` produces the `{repaired, strict, count, streams}` object surfaced in `--json`.  Run once in `run()` after `Document::load` |
 
 ### Key patterns

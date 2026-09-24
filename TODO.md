@@ -204,6 +204,10 @@ Proposed changes, per `~/.claude/rules/plan-files.md`.  A separate series from t
 a bug is an obligation, a plan is an option — and this list is their ordering index, not a
 priority ruling baked into the IDs.
 
+- [ ] **plan-0002** `--text --layout`.  Grid text landed v0.26.0 (status banner in the plan).
+      Open: the `spans` array (its consumer, medpdf plan-0007, was rejected — Chris to decide keep
+      or drop) and the Standard-14 AFM width tables (until then such fonts are Degraded under
+      `--layout`).  `plans/plan-0002-text-layout-mode.md`
 - [ ] **plan-0001** Presume StandardEncoding for nonsymbolic base-less `/Differences` fonts.
       Optional refinement, explicitly deferred once: the v0.18.0 coverage net already
       self-corrects the harmful case, so this only tightens a static over-claim whose output is

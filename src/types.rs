@@ -225,6 +225,22 @@ pub(crate) struct Args {
     #[arg(long, help_heading = "Modifiers")]
     pub json: bool,
 
+    /// With --text: place text on a character grid by position, so table columns
+    /// stay aligned (like `pdftotext -layout`); text from forms, rotated pages and
+    /// out-of-order content streams lands where it displays.  Column 0 is the
+    /// page's leftmost text, not its edge.  Rotated or vertical text follows the
+    /// grid under a `[non-horizontal text]` line, and text outside the CropBox
+    /// under `[off-page text]`; those marker lines are pdf-dump's, not the
+    /// document's.  A font whose glyph widths are unknown makes the verdict
+    /// degraded (exit 3)
+    #[arg(long, requires = "text", help_heading = "Modifiers")]
+    pub layout: bool,
+
+    /// With --layout: grid cell width in points, at least 1 (default: the page's
+    /// median glyph advance at its dominant font size)
+    #[arg(long, requires = "layout", value_name = "PT", value_parser = parse_layout_cell, help_heading = "Modifiers")]
+    pub layout_cell: Option<f64>,
+
     /// Strict reader: do not silently repair malformed streams (wrong /Length);
     /// instead report them and exit 3, as a spec-conformant reader would
     #[arg(long, help_heading = "Modifiers")]
@@ -361,6 +377,18 @@ pub(crate) struct DumpConfig {
     pub depth: Option<usize>,
     pub deref: bool,
     pub raw: bool,
+}
+
+/// `--layout-cell` must be a finite number of points, at least
+/// `layout::MIN_CELL` (usage error, exit 2).
+fn parse_layout_cell(s: &str) -> Result<f64, String> {
+    let min = crate::layout::MIN_CELL;
+    match s.trim().parse::<f64>() {
+        Ok(v) if v.is_finite() && v >= min => Ok(v),
+        _ => Err(format!(
+            "expected a number of points, at least {min}, got '{s}'"
+        )),
+    }
 }
 
 #[derive(Debug)]

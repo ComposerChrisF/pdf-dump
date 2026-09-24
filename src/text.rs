@@ -64,7 +64,7 @@ pub(crate) struct FontReliabilityRecord {
 }
 
 /// How a font's show-string bytes are turned into Unicode.
-enum FontDecoder {
+pub(crate) enum FontDecoder {
     /// Decode each code through a parsed ToUnicode CMap. `width` carries the
     /// codespace decision: `Fixed(w)` chunks the bytes at a constant width (the
     /// common Identity case), while `Variable`/`Unknown` extracts codes one at a
@@ -104,7 +104,7 @@ fn simple_table_for(encoding: Option<&str>) -> Option<fn(u8) -> Option<&'static 
 
 /// The standard-14 nonsymbolic base fonts (Symbol/ZapfDingbats excluded — they
 /// are handled separately as symbolic). ASCII passthrough is accurate for these.
-const STANDARD_14_TEXT: &[&str] = &[
+pub(crate) const STANDARD_14_TEXT: &[&str] = &[
     "Courier",
     "Courier-Bold",
     "Courier-BoldOblique",
@@ -123,7 +123,7 @@ const STANDARD_14_TEXT: &[&str] = &[
 /// Deep enough for any legitimate document; a hard backstop against pathological
 /// or adversarial nesting (e.g. balanced diamonds) that the visited-set cycle
 /// guard alone would not bound.
-const MAX_FORM_DEPTH: u32 = 15;
+pub(crate) const MAX_FORM_DEPTH: u32 = 15;
 
 /// Mutable accumulators threaded through `process_content` as it walks a page's
 /// content stream and recurses into the form XObjects that stream invokes via
@@ -480,7 +480,7 @@ fn recurse_into_form(
 }
 
 /// Resolve a named XObject resource (e.g. `Fm0` from `/Fm0 Do`) to its id.
-fn resolve_xobject_id(
+pub(crate) fn resolve_xobject_id(
     doc: &Document,
     resources: &lopdf::Dictionary,
     name: &str,
@@ -532,51 +532,10 @@ fn emit_show_string(
     unmapped: &mut u64,
 ) {
     match font {
-        Some(FontDecoder::ToUnicode { cmap, width }) => match *width {
-            CodeWidth::Fixed(w) => {
-                // Fast path: chunk at a constant byte width (Identity-H et al.).
-                for code in split_codes(bytes, w) {
-                    let mapped = cmap.map_code(code);
-                    push_code(
-                        out,
-                        mapped.as_deref().unwrap_or("\u{FFFD}"),
-                        total,
-                        unmapped,
-                    );
-                }
-            }
-            CodeWidth::Variable(..) | CodeWidth::Unknown => {
-                // Variable-width codespace: extract codes per range so a mixed
-                // 1-byte/2-byte CJK CMap is split correctly instead of forced to
-                // one width.
-                let mut rest = bytes;
-                while !rest.is_empty() {
-                    let (code, consumed) = cmap.next_code(rest);
-                    let mapped = cmap.map_code(code);
-                    push_code(
-                        out,
-                        mapped.as_deref().unwrap_or("\u{FFFD}"),
-                        total,
-                        unmapped,
-                    );
-                    rest = &rest[consumed.max(1)..];
-                }
-            }
-        },
-        Some(FontDecoder::SimpleTable { decode, overrides }) => {
-            for &b in bytes {
-                if let Some(s) = overrides.get(&b) {
-                    // `/Differences` override (AGL-resolved, or U+FFFD if the
-                    // glyph name was unresolvable).
-                    push_code(out, s, total, unmapped);
-                } else if let Some(f) = decode {
-                    push_code(out, f(b).unwrap_or("\u{FFFD}"), total, unmapped);
-                } else {
-                    // No recognized base table: single-byte UTF-8 passthrough,
-                    // matching prior behavior for unrecognized-encoding fonts.
-                    push_code(out, &String::from_utf8_lossy(&[b]), total, unmapped);
-                }
-            }
+        Some(decoder @ (FontDecoder::ToUnicode { .. } | FontDecoder::SimpleTable { .. })) => {
+            for_each_code(bytes, Some(decoder), 1, |_, _, s| {
+                push_code(out, s, total, unmapped)
+            });
         }
         // No active font, unknown font, or undecodable font: passthrough.  With no
         // font there are no character codes, so the unit is the byte: each byte of
@@ -624,6 +583,75 @@ fn emit_show_string(
     }
 }
 
+/// Split a show-string into character codes and decode each one, calling
+/// `f(code, byte_len, text)` per code.  An unmapped code yields U+FFFD.
+///
+/// For `ToUnicode` and `SimpleTable` this is exactly the per-code decode
+/// `emit_show_string` does.  For `Passthrough` (or no font) the unit is a
+/// `passthrough_width`-byte chunk, 1 for a simple font or 2 for a Type0 font
+/// with no ToUnicode, and a chunk decodes only when it is a single ASCII byte.
+/// `--text --layout` needs one callback per glyph so it can position each one;
+/// plain `--text` keeps its own byte walk for passthrough, whose output groups
+/// multi-byte UTF-8 runs and must stay byte-identical.
+pub(crate) fn for_each_code(
+    bytes: &[u8],
+    font: Option<&FontDecoder>,
+    passthrough_width: u8,
+    mut f: impl FnMut(u32, usize, &str),
+) {
+    match font {
+        Some(FontDecoder::ToUnicode { cmap, width }) => match *width {
+            CodeWidth::Fixed(w) => {
+                // Fast path: chunk at a constant byte width (Identity-H et al.).
+                let w = w.max(1) as usize;
+                for (code, chunk) in split_codes(bytes, w as u8).into_iter().zip(bytes.chunks(w)) {
+                    let mapped = cmap.map_code(code);
+                    f(code, chunk.len(), mapped.as_deref().unwrap_or("\u{FFFD}"));
+                }
+            }
+            CodeWidth::Variable(..) | CodeWidth::Unknown => {
+                // Variable-width codespace: extract codes per range so a mixed
+                // 1-byte/2-byte CJK CMap is split correctly instead of forced to
+                // one width.
+                let mut rest = bytes;
+                while !rest.is_empty() {
+                    let (code, consumed) = cmap.next_code(rest);
+                    let consumed = consumed.max(1).min(rest.len());
+                    let mapped = cmap.map_code(code);
+                    f(code, consumed, mapped.as_deref().unwrap_or("\u{FFFD}"));
+                    rest = &rest[consumed..];
+                }
+            }
+        },
+        Some(FontDecoder::SimpleTable { decode, overrides }) => {
+            for &b in bytes {
+                if let Some(s) = overrides.get(&b) {
+                    // `/Differences` override (AGL-resolved, or U+FFFD if the
+                    // glyph name was unresolvable).
+                    f(b as u32, 1, s);
+                } else if let Some(table) = decode {
+                    f(b as u32, 1, table(b).unwrap_or("\u{FFFD}"));
+                } else {
+                    // No recognized base table: single-byte UTF-8 passthrough,
+                    // matching prior behavior for unrecognized-encoding fonts.
+                    f(b as u32, 1, &String::from_utf8_lossy(&[b]));
+                }
+            }
+        }
+        Some(FontDecoder::Passthrough) | None => {
+            let w = passthrough_width.max(1) as usize;
+            for (code, chunk) in split_codes(bytes, w as u8).into_iter().zip(bytes.chunks(w)) {
+                let mut buf = [0u8; 4];
+                let text = match chunk {
+                    [b] if b.is_ascii() => char::from(*b).encode_utf8(&mut buf),
+                    _ => "\u{FFFD}",
+                };
+                f(code, chunk.len(), text);
+            }
+        }
+    }
+}
+
 /// Split a show-string into `width`-byte big-endian character codes.
 fn split_codes(bytes: &[u8], width: u8) -> Vec<u32> {
     let w = (width.max(1)) as usize;
@@ -651,38 +679,48 @@ fn build_font_table(
 ) {
     let mut table = std::collections::HashMap::new();
     let mut records = Vec::new();
-
-    let font_dict = match resources.get(b"Font") {
-        Ok(obj) => match helpers::resolve_dict(doc, obj) {
-            Some(d) => d,
-            None => return (table, records),
-        },
-        Err(_) => return (table, records),
-    };
-
-    for (name, value) in font_dict.iter() {
-        let font_name = String::from_utf8_lossy(name).into_owned();
-        let dict = match value {
-            Object::Reference(r) => match doc.get_object(*r) {
-                Ok(Object::Dictionary(d)) => d,
-                Ok(Object::Stream(s)) => &s.dict,
-                _ => continue,
-            },
-            Object::Dictionary(d) => d,
-            Object::Stream(s) => &s.dict,
-            _ => continue,
-        };
-
+    for (font_name, dict) in font_dicts(doc, resources) {
         let (decoder, record) = build_font_decoder(doc, dict, &font_name);
         table.insert(font_name, decoder);
         records.push(record);
     }
-
     (table, records)
 }
 
+/// The fonts a resources dictionary declares, as `(resource name, font dict)`
+/// in declaration order, with indirect references resolved.  Entries that do
+/// not resolve to a dictionary are skipped.
+pub(crate) fn font_dicts<'a>(
+    doc: &'a Document,
+    resources: &'a lopdf::Dictionary,
+) -> Vec<(String, &'a lopdf::Dictionary)> {
+    let Some(font_dict) = resources
+        .get(b"Font")
+        .ok()
+        .and_then(|obj| helpers::resolve_dict(doc, obj))
+    else {
+        return Vec::new();
+    };
+    font_dict
+        .iter()
+        .filter_map(|(name, value)| {
+            let dict = match value {
+                Object::Reference(r) => match doc.get_object(*r) {
+                    Ok(Object::Dictionary(d)) => d,
+                    Ok(Object::Stream(s)) => &s.dict,
+                    _ => return None,
+                },
+                Object::Dictionary(d) => d,
+                Object::Stream(s) => &s.dict,
+                _ => return None,
+            };
+            Some((String::from_utf8_lossy(name).into_owned(), dict))
+        })
+        .collect()
+}
+
 /// Build a decoder and reliability record for a single font dictionary.
-fn build_font_decoder(
+pub(crate) fn build_font_decoder(
     doc: &Document,
     dict: &lopdf::Dictionary,
     font_name: &str,
@@ -1078,7 +1116,7 @@ pub(crate) fn check_page_font_encodings(
 /// Marker suffix shared by every `check_page_font_encodings` warning. Used to
 /// keep those (now summarized in the reliability banner) out of the
 /// deduplicated content-warning stream printed to stderr.
-const FONT_WARNING_MARKER: &str = "Text may be inaccurate";
+pub(crate) const FONT_WARNING_MARKER: &str = "Text may be inaccurate";
 
 pub(crate) fn print_text(
     writer: &mut impl Write,
@@ -1169,7 +1207,9 @@ pub(crate) fn text_json_value(doc: &Document, page_filter: Option<&PageSpec>) ->
 /// objects — one with a `/ToUnicode`, one without — can share it.  So a collision
 /// keeps the *worst* classification, never merely the first seen; otherwise a
 /// Reliable duplicate masks the Unreliable record that drives exit 3 (bug-0012).
-fn dedup_font_records(records: Vec<FontReliabilityRecord>) -> Vec<FontReliabilityRecord> {
+pub(crate) fn dedup_font_records(
+    records: Vec<FontReliabilityRecord>,
+) -> Vec<FontReliabilityRecord> {
     let mut index: HashMap<String, usize> = HashMap::new();
     let mut out: Vec<FontReliabilityRecord> = Vec::new();
     for r in records {
@@ -1208,7 +1248,11 @@ fn dedup_font_records(records: Vec<FontReliabilityRecord>) -> Vec<FontReliabilit
 /// is precisely the case a reader most needs warned about. The asymmetry
 /// settles it — a false downgrade costs one banner and a `Degraded` label,
 /// while a suppressed one costs silently wrong text.
-fn document_verdict(fonts: &[FontReliabilityRecord], total: u64, unmapped: u64) -> Reliability {
+pub(crate) fn document_verdict(
+    fonts: &[FontReliabilityRecord],
+    total: u64,
+    unmapped: u64,
+) -> Reliability {
     let mut verdict = Reliability::Reliable;
     for f in fonts {
         verdict = verdict.max(f.classification);
@@ -1224,7 +1268,7 @@ fn document_verdict(fonts: &[FontReliabilityRecord], total: u64, unmapped: u64) 
 
 /// Print a loud, delineated reliability banner to stderr when extraction is not
 /// fully reliable. Silent on the happy path.
-fn print_reliability_banner(fonts: &[FontReliabilityRecord], total: u64, unmapped: u64) {
+pub(crate) fn print_reliability_banner(fonts: &[FontReliabilityRecord], total: u64, unmapped: u64) {
     let verdict = document_verdict(fonts, total, unmapped);
     if verdict == Reliability::Reliable {
         return;
@@ -1272,7 +1316,11 @@ fn print_reliability_banner(fonts: &[FontReliabilityRecord], total: u64, unmappe
 }
 
 /// Build the JSON `reliability` object summarizing the document verdict.
-fn reliability_json_value(fonts: &[FontReliabilityRecord], total: u64, unmapped: u64) -> Value {
+pub(crate) fn reliability_json_value(
+    fonts: &[FontReliabilityRecord],
+    total: u64,
+    unmapped: u64,
+) -> Value {
     let verdict = document_verdict(fonts, total, unmapped);
     let ratio = if total > 0 {
         (unmapped as f64 / total as f64 * 1000.0).round() / 1000.0

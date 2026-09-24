@@ -7,6 +7,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.26.0] - 2026-09-23
+### Added
+- `--text --layout`: position-faithful text extraction on a character grid,
+  so table columns survive (plan-0002, first landing).  A real text-state
+  machine (CTM, `cm`, `q`/`Q`, text matrix, `Tc`/`Tw`/`Tz`/`TL`/`Ts`, `TJ`
+  adjustments, form `/Matrix`) positions every glyph from its font’s widths
+  (`/Widths`, CID `/W`/`/DW`, Type3 `/FontMatrix`), in visual space (`/Rotate`
+  and CropBox honored).  Glyphs with no real gap form a run that the grid never
+  splits, even when another string (a padding space, leader dots) is drawn
+  over it.  Rotated and vertical text follows the grid under a
+  `[non-horizontal text]` line, text outside the CropBox under
+  `[off-page text]`, and overprinted fake bold collapses.  A glyph whose width
+  is unknown makes its font degraded (exit 3); no width is ever invented.
+  `--layout-cell <pt>` (at least 1) sets the grid, and `--json` adds per-page
+  `rotate`, `crop_box`, `cell`, `non_horizontal_glyphs` and `off_page_glyphs`.
+  Plain `--text` output is unchanged.
+
 ## [0.25.0] - 2026-09-23
 ### Changed
 - **`--text` exits 3 on a Degraded verdict**, not only on Unreliable.  Degraded

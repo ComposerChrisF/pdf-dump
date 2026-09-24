@@ -76,6 +76,17 @@ pdf-dump file.pdf --fonts --images --validate
 
 `--text` is font-aware: it decodes character codes through each font’s `/ToUnicode` CMap (the fix for the classic CID/Type0 mojibake) and through WinAnsiEncoding/MacRomanEncoding tables for simple fonts that lack one, falling back to raw byte passthrough when a font can’t be decoded.  When extraction is not fully trustworthy it prints a loud reliability banner to **stderr** (stdout stays clean for piping) and, in `--json` mode, adds a top-level `reliability` object.  The tool exits **3** whenever the verdict is not `reliable` — `unreliable` (a CID/Type0 font with no ToUnicode map) or `degraded` (a font whose encoding is only partly known, or more than 20 % of the codes shown could not be decoded) — so scripts can detect suspect text programmatically.  The text is still printed, and `--json` still emits, on exit 3: the exit code says “read with care”, not “the command failed”.  (Through v0.24.x, `degraded` exited 0.)
 
+### Position-faithful text (`--text --layout`)
+
+`--text --layout` places each glyph by its real position, so tables keep their columns.  That matters for a bank statement, say, where a debit and a credit differ only by which column the amount sits in, and where generators often draw all the dates, then all the descriptions, then all the amounts.  Consecutive glyphs with no real gap between them form a run, which is never split, even by another string drawn over it.  Runs are clustered into lines by baseline, top to bottom, and each run lands at column `round(x / cell)`.  The grid **never inserts a space inside a run**, so a number printed as one string stays one string.  `cell` defaults to the page’s median glyph advance at its dominant font size, and `--layout-cell <pt>` overrides it.
+
+```bash
+pdf-dump statement.pdf --text --layout            # character grid, columns aligned
+pdf-dump statement.pdf --text --layout --json     # the same, plus per-page rotate, crop_box, cell
+```
+
+Positions honor the CTM, form XObject `/Matrix`, `/Rotate` and the CropBox origin, so a landscape page reads as it displays.  Rotated or vertical text does not go on the grid: it follows under a `[non-horizontal text]` line.  Text positioned outside the CropBox follows under `[off-page text]`, shown but never allowed to stretch a line.  Positions are only as good as the glyph widths behind them.  A font whose widths are unknown makes the verdict `degraded` (exit 3) rather than being placed with invented widths.  That includes a Standard-14 font without `/Widths`: pdf-dump does not yet embed the built-in AFM metrics.  Plain `--text` output is unaffected by any of this.
+
 ### Lenient stream recovery (and `--strict`)
 
 pdf-dump is a tolerant reader by default.  When a content stream declares a wrong `/Length`, a strict parser fails to find `endstream`, drops the body, and the page text silently vanishes; pdf-dump instead re-reads the raw file, recovers the true body by scanning to `endstream`, and carries on.  Every recovery is announced loudly on **stderr** and, in `--json` mode, surfaced as a top-level `recovery` object — `{repaired, strict, count, streams: [{object, generation, file_offset, declared_length, actual_length}]}` — so machine consumers never mistake repaired output for the original document.  The key is absent for well-formed PDFs, and recovery keeps the default exit code **0**.

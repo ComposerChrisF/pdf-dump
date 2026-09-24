@@ -10,6 +10,7 @@ Use `pdf-dump` instead of writing Python/shell scripts to inspect PDF internals.
 | Overview with compression ratios | `pdf-dump f.pdf --decode` |
 | Page dimensions, resources, text preview | `pdf-dump f.pdf --page 3` (or `--page 1-5`) |
 | Extract text | `pdf-dump f.pdf --text` (or `--text --page 3`) |
+| Extract a table with columns aligned | `pdf-dump f.pdf --text --layout` (`--layout-cell <pt>` to set the grid) |
 | Search for text across pages | `pdf-dump f.pdf --find-text "word"` |
 | List all fonts | `pdf-dump f.pdf --fonts` |
 | List all images | `pdf-dump f.pdf --images` |
@@ -126,6 +127,11 @@ When a content stream declares a wrong `/Length`, a strict parser drops its body
 
 **Operators** (`--operators --json`):
 `{pages: [{page_number, operation_count, operations: [{operator, operands: [str]}], warnings?: [str]}]}`
+
+**Layout text** (`--text --layout --json`):
+`{layout: true, pages: [{page_number, text, rotate, crop_box: [x0, y0, x1, y1], cell, non_horizontal_glyphs, off_page_glyphs, warnings?: [str]}], reliability: {…same as --text…}}`
+
+`text` is the character grid (lines top to bottom in visual space; column 0 is the page’s leftmost text; rotated or vertical text after a `[non-horizontal text]` line, text outside the CropBox after `[off-page text]`).  `rotate` is the page’s normalized `/Rotate`; `crop_box` is the effective CropBox (CropBox ∩ MediaBox, inherited) in default user space; `cell` is the grid column width in points.  A glyph whose width is unknown makes its font’s verdict `degraded`, which exits 3.  That covers a Standard-14 font without `/Widths`, `/Widths` without `/FirstChar`, a non-numeric or missing entry, an out-of-range code with no explicit `/MissingWidth`, a malformed CID `/W`, a Type0 font with a non-Identity `/Encoding`, and text shown with no usable font.
 
 **Find text** (`--find-text "x" --json`):
 `{pattern, match_count, pages: [{page_number, matches: [str]}]}`
