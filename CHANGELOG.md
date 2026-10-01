@@ -7,6 +7,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.29.0] - 2026-10-01
+### Changed
+- **Behavior change (exit codes): `--find-text` now exits 3, with the stderr
+  reliability banner, when the searched text is degraded or unreliable,
+  whether or not anything matched.**  “No matches” over undecodable text is not
+  evidence that a word is absent; a search of a CID font without a ToUnicode map
+  used to print “No matches”, exit 0, and show no banner, while `--text` on the
+  same file exited 3.  `--find-text` now shares `--text`’s reliability verdict
+  (`document_verdict(...).is_finding()`) and its banner.  Callers that treated
+  exit 0 from `--find-text` as “searched reliably” must now handle exit 3.
+  (bug-0011)
+- **`--find-text --json` gains a `reliability` object**, the same shape as
+  `--text --json`.
+- `--help`, README, and `DEBUGGING_WITH_PDF_DUMP.md` document the shared
+  signaling.
+
 ## [0.28.0] - 2026-10-01
 ### Changed
 - **Behavior change (exit codes): an `--object` range now means “the objects

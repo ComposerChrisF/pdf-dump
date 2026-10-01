@@ -134,7 +134,9 @@ When a content stream declares a wrong `/Length`, a strict parser drops its body
 `text` is the character grid (lines top to bottom in visual space; column 0 is the page’s leftmost text; rotated or vertical text after a `[non-horizontal text]` line, text outside the CropBox after `[off-page text]`).  `rotate` is the page’s normalized `/Rotate`; `crop_box` is the effective CropBox (CropBox ∩ MediaBox, inherited) in default user space; `cell` is the grid column width in points.  A glyph whose width is unknown makes its font’s verdict `degraded`, which exits 3.  That covers a Standard-14 font without `/Widths`, `/Widths` without `/FirstChar`, a non-numeric or missing entry, an out-of-range code with no explicit `/MissingWidth`, a malformed CID `/W`, a Type0 font with a non-Identity `/Encoding`, and text shown with no usable font.
 
 **Find text** (`--find-text "x" --json`):
-`{pattern, match_count, pages: [{page_number, matches: [str]}]}`
+`{pattern, match_count, pages: [{page_number, matches: [str]}], reliability}`
+
+`reliability` is the same object `--text --json` carries, computed over the pages searched.  Since v0.29.0 `--find-text` shares `--text`’s reliability signaling: when the searched text is degraded or unreliable it prints the stderr banner and exits **3**, whether or not anything matched, since “no matches” in undecodable text is not evidence that the word is absent.
 
 **Fonts** (`--fonts --json`):
 `{font_count, fonts: [{object_number, generation, base_font, subtype, encoding, embedded: null|{object_number, generation}, to_unicode?, first_char?, last_char?, widths_count?, encoding_differences?, cid_system_info?}]}`

@@ -58,8 +58,6 @@ decision here, then implement in the phase noted. **Do not just “fix the code�
 - [ ] **bug-0034** [HIGH] `--validate` false negative: a dangling `/Root` in the trailer → “0
       errors”, exit 0. `bugs/bug-0034-validate-dangling-root-false-negative.md`
       _(share the trailer-walk with bug-0027; do together.)_
-- [ ] **bug-0011** [HIGH] `--find-text` on an unreliable document → silent “No matches”, exit 0, no
-      banner.  Depends on bug-0012. `bugs/bug-0011-find-text-unreliable-silent-success.md`
 - [ ] **bug-0037** [MED] A malformed `/CreationDate` is never reported — not as a finding, not even
       as a note; `--validate` says “no issues found” for an ISO-8601 date, which is not a PDF date at
       all.  Surveyed 921 real PDFs: 95 % use the `D:` spec form, **0 % use ISO**, 5 % are non-spec

@@ -2711,6 +2711,41 @@ fn text_cid_without_tounicode_exits_3_with_banner() {
 }
 
 #[test]
+fn find_text_in_unreliable_text_exits_3_with_banner() {
+    // bug-0011: "No matches" over undecodable text used to exit 0, silently.
+    let pdf = create_pdf_with_font(
+        type0_font_dict(b"ABCDEF+NoMap"),
+        None,
+        b"BT /F1 12 Tf <0041> Tj ET",
+    );
+    for json in [false, true] {
+        let mut args = vec!["--find-text", "word"];
+        if json {
+            args.push("--json");
+        }
+        let output = run_args(&pdf, &args);
+        assert_eq!(output.status.code(), Some(3), "json={json}");
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert!(
+            stderr.contains("UNRELIABLE"),
+            "json={json}, stderr: {stderr}"
+        );
+    }
+}
+
+#[test]
+fn find_text_in_reliable_text_exits_0() {
+    let pdf = create_minimal_pdf();
+    let output = run_args(&pdf, &["--find-text", "nothing-here"]);
+    assert_eq!(output.status.code(), Some(0));
+    assert!(
+        output.stderr.is_empty(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
+#[test]
 fn text_reliable_font_exits_0_no_banner() {
     // create_minimal_pdf uses standard-14 Helvetica.
     let pdf = create_minimal_pdf();

@@ -443,14 +443,9 @@ fn build_mode_json_value(
         DocMode::Operators => (operators::operators_json_value(doc, page_spec), false),
         DocMode::Tags => (structure::structure_json_value(doc, config), false),
         DocMode::Tree => (tree::tree_json_value(doc, config), false),
-        DocMode::FindText => (
-            find_text::find_text_json_value(
-                doc,
-                args.find_text.as_deref().unwrap_or(""),
-                page_spec,
-            ),
-            false,
-        ),
+        DocMode::FindText => {
+            find_text::find_text_json_value(doc, args.find_text.as_deref().unwrap_or(""), page_spec)
+        }
         DocMode::Detail(sub) => {
             let value = match sub {
                 types::DetailSub::Security => security::security_json_value(doc, &args.file),
@@ -509,13 +504,7 @@ fn dispatch_mode_text(
             false
         }
         DocMode::FindText => {
-            find_text::print_find_text(
-                out,
-                doc,
-                args.find_text.as_deref().unwrap_or(""),
-                page_spec,
-            );
-            false
+            find_text::print_find_text(out, doc, args.find_text.as_deref().unwrap_or(""), page_spec)
         }
         DocMode::Tree => {
             if args.dot {

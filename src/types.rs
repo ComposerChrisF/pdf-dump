@@ -131,9 +131,10 @@ Exit codes:
       a malformed --page value, object number 0, an invalid --search
       expression)
   3   Findings: the tool ran correctly but the input had problems
-      (--validate found errors; --text extraction was degraded or
-       unreliable, e.g. a CID/Type0 font without a ToUnicode map or >20% of
-       codes undecodable, and the text is still printed; --strict detected a
+      (--validate found errors; the text that --text printed or --find-text
+       searched was degraded or unreliable, e.g. a CID/Type0 font without a
+       ToUnicode map or >20% of codes undecodable, and the output is still
+       printed; --strict detected a
        malformed stream /Length; or the PDF is encrypted and could not be
        decrypted — supply --password to read it)
 ")]
@@ -160,7 +161,9 @@ pub(crate) struct Args {
     #[arg(long, help_heading = "Content")]
     pub operators: bool,
 
-    /// Search for text across pages (case-insensitive substring match)
+    /// Search for text across pages (case-insensitive substring match).  When
+    /// the searched text is not reliably decodable, prints the --text banner
+    /// and exits 3: 'no matches' there is not evidence of absence
     #[arg(long, help_heading = "Content")]
     pub find_text: Option<String>,
 

@@ -55,7 +55,7 @@ These can be used together — output gets section headers automatically:
 |------|-------------|
 | `--text` | Extract readable text (font-aware: decodes `/ToUnicode` CMaps and WinAnsi/MacRoman encodings; flags unreliable extraction) |
 | `--operators` | Show content stream operators |
-| `--find-text "pattern"` | Case-insensitive text search with context |
+| `--find-text "pattern"` | Case-insensitive text search with context; exits 3, like `--text`, when the searched text is not reliably decodable |
 | `--fonts` | List all fonts with encoding and embedding details |
 | `--images` | List all images with dimensions, color space, filters |
 | `--forms` | List AcroForm fields with names, types, values |

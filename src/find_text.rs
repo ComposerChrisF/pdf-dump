@@ -2,12 +2,41 @@ use lopdf::Document;
 use serde_json::{Value, json};
 use std::io::Write;
 
-use crate::text::extract_text_from_page_with_warnings;
+use crate::text::{
+    FontReliabilityRecord, dedup_font_records, document_verdict,
+    extract_text_from_page_with_warnings, print_reliability_banner, reliability_json_value,
+};
 use crate::types::PageSpec;
 
 struct PageMatch {
     page_number: u32,
     snippets: Vec<String>,
+}
+
+/// The matches, plus the reliability of the text they were searched in: a
+/// search over undecodable text is not evidence that a word is absent
+/// (bug-0011), so the verdict travels with the result.
+struct FindResult {
+    pages: Vec<PageMatch>,
+    fonts: Vec<FontReliabilityRecord>,
+    total_codes: u64,
+    unmapped_codes: u64,
+}
+
+impl FindResult {
+    fn empty() -> Self {
+        FindResult {
+            pages: Vec::new(),
+            fonts: Vec::new(),
+            total_codes: 0,
+            unmapped_codes: 0,
+        }
+    }
+
+    /// True when the searched text is anything but `Reliable`, as for `--text`.
+    fn is_finding(&self) -> bool {
+        document_verdict(&self.fonts, self.total_codes, self.unmapped_codes).is_finding()
+    }
 }
 
 /// Characters of context shown on each side of a match.
@@ -48,9 +77,9 @@ fn chars_after(s: &str, pos: usize, n: usize) -> usize {
         .map_or(s.len(), |(i, _)| pos + i)
 }
 
-fn find_matches(doc: &Document, pattern: &str, page_filter: Option<&PageSpec>) -> Vec<PageMatch> {
+fn find_matches(doc: &Document, pattern: &str, page_filter: Option<&PageSpec>) -> FindResult {
     if pattern.is_empty() {
-        return Vec::new();
+        return FindResult::empty();
     }
     let pages = doc.get_pages();
     let (lower_pattern, _) = fold_case(pattern);
@@ -65,10 +94,13 @@ fn find_matches(doc: &Document, pattern: &str, page_filter: Option<&PageSpec>) -
         pages.iter().map(|(&pn, &id)| (pn, id)).collect()
     };
 
-    let mut results = Vec::new();
+    let mut found = FindResult::empty();
 
     for (pn, page_id) in &page_list {
         let result = extract_text_from_page_with_warnings(doc, *page_id);
+        found.total_codes += result.total_codes;
+        found.unmapped_codes += result.unmapped_codes;
+        found.fonts.extend(result.fonts);
         let text = &result.text;
         let (lower_text, spans) = fold_case(text);
 
@@ -99,32 +131,37 @@ fn find_matches(doc: &Document, pattern: &str, page_filter: Option<&PageSpec>) -
         }
 
         if !snippets.is_empty() {
-            results.push(PageMatch {
+            found.pages.push(PageMatch {
                 page_number: *pn,
                 snippets,
             });
         }
     }
 
-    results
+    found.fonts = dedup_font_records(found.fonts);
+    found
 }
 
+/// Prints the matches; returns true when the searched text is not
+/// `Reliable`, after printing the same stderr banner as `--text`.
 pub(crate) fn print_find_text(
     writer: &mut impl Write,
     doc: &Document,
     pattern: &str,
     page_filter: Option<&PageSpec>,
-) {
-    let matches = find_matches(doc, pattern, page_filter);
+) -> bool {
+    let found = find_matches(doc, pattern, page_filter);
+    print_reliability_banner(&found.fonts, found.total_codes, found.unmapped_codes);
+    let matches = &found.pages;
 
     if matches.is_empty() {
         wln!(writer, "No matches for \"{}\".", pattern);
-        return;
+        return found.is_finding();
     }
 
     let total_matches: usize = matches.iter().map(|m| m.snippets.len()).sum();
 
-    for page_match in &matches {
+    for page_match in matches {
         for snippet in &page_match.snippets {
             wln!(writer, "Page {}: \"{}\"", page_match.page_number, snippet);
         }
@@ -141,14 +178,19 @@ pub(crate) fn print_find_text(
         page_count,
         if page_count == 1 { "" } else { "s" },
     );
+    found.is_finding()
 }
 
+/// Returns `(json_value, had_issues)`, with `had_issues` as for `--text`.
 pub(crate) fn find_text_json_value(
     doc: &Document,
     pattern: &str,
     page_filter: Option<&PageSpec>,
-) -> Value {
-    let matches = find_matches(doc, pattern, page_filter);
+) -> (Value, bool) {
+    let found = find_matches(doc, pattern, page_filter);
+    // The banner goes to stderr even in JSON mode; stdout stays clean.
+    print_reliability_banner(&found.fonts, found.total_codes, found.unmapped_codes);
+    let matches = &found.pages;
     let total_matches: usize = matches.iter().map(|m| m.snippets.len()).sum();
 
     let pages: Vec<Value> = matches
@@ -161,11 +203,13 @@ pub(crate) fn find_text_json_value(
         })
         .collect();
 
-    json!({
+    let value = json!({
         "pattern": pattern,
         "match_count": total_matches,
         "pages": pages,
-    })
+        "reliability": reliability_json_value(&found.fonts, found.total_codes, found.unmapped_codes),
+    });
+    (value, found.is_finding())
 }
 
 #[cfg(test)]
@@ -222,7 +266,7 @@ mod tests {
     #[test]
     fn find_text_json_output() {
         let doc = build_page_doc_with_content(b"BT (Hello World) Tj ET");
-        let out = output_of(|w| render_json(w, &find_text_json_value(&doc, "Hello", None)));
+        let out = output_of(|w| render_json(w, &find_text_json_value(&doc, "Hello", None).0));
         let v: serde_json::Value = serde_json::from_str(&out).unwrap();
         assert_eq!(v["pattern"], "Hello");
         assert_eq!(v["match_count"], 1);
@@ -233,7 +277,7 @@ mod tests {
     #[test]
     fn find_text_json_no_matches() {
         let doc = build_page_doc_with_content(b"BT (Hello) Tj ET");
-        let out = output_of(|w| render_json(w, &find_text_json_value(&doc, "xyz", None)));
+        let out = output_of(|w| render_json(w, &find_text_json_value(&doc, "xyz", None).0));
         let v: serde_json::Value = serde_json::from_str(&out).unwrap();
         assert_eq!(v["match_count"], 0);
         assert_eq!(v["pages"].as_array().unwrap().len(), 0);
@@ -284,7 +328,7 @@ mod tests {
     #[test]
     fn find_text_json_multiple_pages() {
         let doc = build_two_page_doc();
-        let out = output_of(|w| render_json(w, &find_text_json_value(&doc, "Page", None)));
+        let out = output_of(|w| render_json(w, &find_text_json_value(&doc, "Page", None).0));
         let v: serde_json::Value = serde_json::from_str(&out).unwrap();
         assert!(v["match_count"].as_u64().unwrap() >= 2);
         assert!(v["pages"].as_array().unwrap().len() >= 2);
@@ -312,7 +356,7 @@ mod tests {
         // original, so 50 İs before the match pushed the snippet past it.
         let text = format!("BT ({}needle tail) Tj ET", "İ".repeat(50));
         let doc = build_page_doc_with_content(text.as_bytes());
-        let v = find_text_json_value(&doc, "needle", None);
+        let v = find_text_json_value(&doc, "needle", None).0;
         let snippet = v["pages"][0]["matches"][0].as_str().unwrap();
         assert!(snippet.contains("needle tail"), "{snippet}");
         assert!(snippet.starts_with(&format!("...{}", "İ".repeat(CONTEXT_CHARS))));
@@ -323,6 +367,55 @@ mod tests {
         let (folded, spans) = fold_case("Aİ");
         assert_eq!(folded, "ai\u{307}");
         assert_eq!(spans, vec![(0, 1), (1, 3), (1, 3), (1, 3)]);
+    }
+
+    /// A one-page doc whose only font is a Type0 (CID) font with no
+    /// `/ToUnicode`: its text extraction is `Unreliable`.
+    fn unreliable_doc() -> lopdf::Document {
+        use lopdf::{Dictionary, Object};
+        let mut doc = build_page_doc_with_content(b"BT /F1 12 Tf <0041> Tj ET");
+        let mut font = Dictionary::new();
+        font.set("Type", Object::Name(b"Font".to_vec()));
+        font.set("Subtype", Object::Name(b"Type0".to_vec()));
+        font.set("BaseFont", Object::Name(b"ABCDEF+Custom".to_vec()));
+        doc.objects.insert((5, 0), Object::Dictionary(font));
+        let mut f1 = Dictionary::new();
+        f1.set("F1", Object::Reference((5, 0)));
+        let mut resources = Dictionary::new();
+        resources.set("Font", Object::Dictionary(f1));
+        if let Ok(Object::Dictionary(page)) = doc.get_object_mut((2, 0)) {
+            page.set("Resources", Object::Dictionary(resources));
+        }
+        doc
+    }
+
+    #[test]
+    fn find_text_no_match_in_unreliable_text_is_a_finding() {
+        // bug-0011: undecodable text is not evidence that a word is absent.
+        let doc = unreliable_doc();
+        let mut had_issues = false;
+        let out = output_of(|w| had_issues = print_find_text(w, &doc, "word", None));
+        assert!(out.contains("No matches"), "{out}");
+        assert!(had_issues, "unreliable text must exit 3");
+    }
+
+    #[test]
+    fn find_text_json_carries_the_reliability_verdict() {
+        let (v, had_issues) = find_text_json_value(&unreliable_doc(), "word", None);
+        assert!(had_issues);
+        assert_eq!(v["reliability"]["verdict"], "unreliable");
+        assert_eq!(v["match_count"], 0);
+    }
+
+    #[test]
+    fn find_text_on_reliable_text_is_not_a_finding() {
+        let doc = build_page_doc_with_content(b"BT (Hello World) Tj ET");
+        let mut had_issues = true;
+        output_of(|w| had_issues = print_find_text(w, &doc, "Hello", None));
+        assert!(!had_issues);
+        let (v, had_issues) = find_text_json_value(&doc, "Hello", None);
+        assert!(!had_issues);
+        assert_eq!(v["reliability"]["verdict"], "reliable");
     }
 
     #[test]
