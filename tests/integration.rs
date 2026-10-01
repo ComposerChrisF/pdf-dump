@@ -484,12 +484,95 @@ fn object_flag_nonexistent_object_fails() {
         .output()
         .expect("failed to execute binary");
 
+    assert_eq!(
+        output.status.code(),
+        Some(1),
+        "bug-0019: a missing object exits 1"
+    );
     let stderr = String::from_utf8_lossy(&output.stderr);
     assert!(
         stderr.contains("not found"),
         "Should report object not found: {}",
         stderr
     );
+}
+
+fn run_args(pdf: &tempfile::NamedTempFile, args: &[&str]) -> std::process::Output {
+    Command::new(binary_path())
+        .arg(pdf.path())
+        .args(args)
+        .output()
+        .expect("failed to execute binary")
+}
+
+#[test]
+fn object_list_with_one_miss_exits_1_but_prints_the_rest() {
+    // bug-0019: any miss in a list exits 1; found objects still print.
+    let pdf = create_minimal_pdf();
+    let output = run_args(&pdf, &["--object", "1,9999"]);
+    assert_eq!(output.status.code(), Some(1));
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        stdout.contains("Object 1 0"),
+        "found object missing: {stdout}"
+    );
+    assert!(String::from_utf8_lossy(&output.stderr).contains("Object 9999 not found"));
+}
+
+#[test]
+fn object_missing_json_exits_1_and_names_the_object() {
+    let pdf = create_minimal_pdf();
+    let output = run_args(&pdf, &["--object", "9999", "--json"]);
+    assert_eq!(output.status.code(), Some(1));
+    let v: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(v["object_number"], 9999);
+    assert_eq!(v["generation"], 0);
+    assert!(v["error"].as_str().unwrap().contains("not found"));
+}
+
+#[test]
+fn object_found_exits_0() {
+    let pdf = create_minimal_pdf();
+    let output = run_args(&pdf, &["--object", "1"]);
+    assert_eq!(output.status.code(), Some(0));
+}
+
+#[test]
+fn inspect_missing_object_exits_1_with_error_on_stderr() {
+    // bug-0019: the error moved off stdout, and the exit code reports it.
+    let pdf = create_minimal_pdf();
+    let output = run_args(&pdf, &["--inspect", "9999"]);
+    assert_eq!(output.status.code(), Some(1));
+    assert!(
+        output.stdout.is_empty(),
+        "stdout: {}",
+        String::from_utf8_lossy(&output.stdout)
+    );
+    assert!(String::from_utf8_lossy(&output.stderr).contains("Object 9999 not found"));
+}
+
+#[test]
+fn inspect_missing_object_json_exits_1() {
+    let pdf = create_minimal_pdf();
+    let output = run_args(&pdf, &["--inspect", "9999", "--json"]);
+    assert_eq!(output.status.code(), Some(1));
+    let v: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(v["error"], "not found");
+}
+
+#[test]
+fn object_zero_is_a_usage_error() {
+    // bug-0019: object 0 is never a real object.
+    let pdf = create_minimal_pdf();
+    for args in [
+        &["--object", "0"][..],
+        &["--object", "0-2"],
+        &["--inspect", "0"],
+        &["--extract-stream", "0", "--output", "/dev/null"],
+    ] {
+        let output = run_args(&pdf, args);
+        assert_eq!(output.status.code(), Some(2), "{args:?}");
+    }
 }
 
 #[test]

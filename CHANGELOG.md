@@ -7,6 +7,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.27.0] - 2026-10-01
+### Changed
+- **Behavior change (exit codes): callers that check the exit status of
+  `--object` or `--inspect` may need updating.**  A named object the document
+  lacks now exits 1 under `--object` and `--inspect` (it exited 0 before),
+  matching `--extract-stream` and `--page`.  In a list such as
+  `--object 1,9999`, any miss exits 1, and the objects that were found still
+  print.  Object 0 (the free-list head, never a real object) is a usage error,
+  exit 2, for `--object` (including ranges starting at 0), `--inspect`, and
+  `--extract-stream`.  (bug-0019)
+- `--inspect`’s “object not found” error moves from stdout to stderr.
+- The single-object `--object --json` error now carries `object_number` and
+  `generation`, like the list and `--inspect` forms.
+- The `--help` exit-code table names the new exit-1 and exit-2 cases.
+
 ## [0.26.1] - 2026-10-01
 ### Fixed
 - bug-0010: `--find-text` folds case per character and maps folded offsets back

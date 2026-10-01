@@ -204,7 +204,12 @@ pub fn run() {
             dispatch_default(&mut out, &doc, &config, page_spec.as_ref(), recovery)
         }
         ResolvedMode::Standalone(mode) => {
-            dispatch_standalone(&mut out, &doc, &config, mode, recovery);
+            if dispatch_standalone(&mut out, &doc, &config, mode, recovery) {
+                // A named object the document lacks is a caller-claim/world
+                // mismatch (exit 1), like --page past the end (bug-0019).
+                let _ = out.flush();
+                std::process::exit(1);
+            }
             false
         }
         ResolvedMode::Combined(modes) => dispatch_combined(
@@ -272,13 +277,15 @@ fn dispatch_default(
     }
 }
 
+/// Returns true when an object named by `--object` or `--inspect` is not in
+/// the document; whatever was found has already been printed.
 fn dispatch_standalone(
     out: &mut impl Write,
     doc: &Document,
     config: &DumpConfig,
     mode: StandaloneMode,
     recovery: Option<&Value>,
-) {
+) -> bool {
     match mode {
         StandaloneMode::ExtractStream {
             obj_num,
@@ -301,6 +308,7 @@ fn dispatch_standalone(
                         obj_num,
                         output.display()
                     );
+                    false
                 }
                 Ok(_) => {
                     eprintln!(
@@ -325,6 +333,7 @@ fn dispatch_standalone(
             } else {
                 object::print_objects(out, doc, nums, config);
             }
+            !object::missing_objects(doc, nums).is_empty()
         }
         StandaloneMode::Inspect { obj_num } => {
             if config.json {
@@ -336,6 +345,7 @@ fn dispatch_standalone(
             } else {
                 inspect::print_info(out, doc, obj_num);
             }
+            !object::missing_objects(doc, &[obj_num]).is_empty()
         }
         StandaloneMode::Search {
             ref expr,
@@ -358,6 +368,7 @@ fn dispatch_standalone(
             } else {
                 search::search_objects(out, doc, &conditions, config, list_modifier);
             }
+            false
         }
     }
 }

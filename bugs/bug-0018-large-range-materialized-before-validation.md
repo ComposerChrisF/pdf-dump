@@ -42,8 +42,12 @@ returns promptly (intersected with the doc’s pages) rather than allocating bil
 ## Suggested fix
 For `--page`, intersect the requested range with `doc.get_pages()` (mirror the `OpenRange` path)
 instead of enumerating the literal range.  For `--object`, iterate the range lazily and validate each
-number against `doc.objects` (or cap absurd spans).  Both should treat “range matches nothing” per the
-missing-object contract decided in [[bug-0019-missing-object-modes-exit-zero]].
+number against `doc.objects` (or cap absurd spans).  Both should follow the missing-object contract from bug-0019 (fixed in v0.27.0, Chris’s option A):
+any named object the document lacks exits 1, and object 0 is a usage error (exit 2).  As shipped, a range
+is treated as a list, so `--object 1-50` exits 1 if any number in the span is absent, and prints one
+“not found” line per gap.  Before fixing this bug, ask Chris whether a _range_ should instead mean “the
+objects present in this span” (exit 1 only when it matches nothing), since a real file’s object numbers
+often have gaps.
 
 ## Why the fix addresses the bug
 Intersecting the range with the document bounds the work to real pages/objects, eliminating the eager

@@ -120,11 +120,15 @@ Use --strict to refuse the repair and exit 3 instead (a hard gate for CI).
 Exit codes:
   0   Success (or validation passed with no errors)
   1   Tool error: the input could not be read (file not found, IO failure,
-      corrupt PDF, wrong --password), or --page named a page beyond the end
-      of the document (a caller-claim/world mismatch, naming the real count)
+      corrupt PDF, wrong --password), or the caller named something the
+      document lacks (a caller-claim/world mismatch): --page beyond the end
+      (naming the real count), or an --object, --inspect, or --extract-stream
+      object that is not there.  With --object, any missing number exits 1;
+      the objects that were found are still printed
   2   Usage error: bad arguments — clap's own (unknown flag, missing required
       arg) plus semantic ones (--raw with --decode, --raw without --object,
-      a malformed --page value, an invalid --search expression)
+      a malformed --page value, object number 0, an invalid --search
+      expression)
   3   Findings: the tool ran correctly but the input had problems
       (--validate found errors; --text extraction was degraded or
        unreliable, e.g. a CID/Type0 font without a ToUnicode map or >20% of
@@ -195,7 +199,7 @@ pub(crate) struct Args {
     pub object: Option<String>,
 
     /// Show a human-readable explanation of an object's role, with full content
-    #[arg(long, help_heading = "Objects")]
+    #[arg(long, value_parser = clap::value_parser!(u32).range(1..), help_heading = "Objects")]
     pub inspect: Option<u32>,
 
     /// Search for objects matching an expression (e.g. Type=Font, key=MediaBox, value=Hello)
@@ -209,7 +213,12 @@ pub(crate) struct Args {
 
     // ── Export ────────────────────────────────────────────────────────
     /// Extract a stream object to a file
-    #[arg(long, requires = "output", help_heading = "Export")]
+    #[arg(
+        long,
+        requires = "output",
+        value_parser = clap::value_parser!(u32).range(1..),
+        help_heading = "Export"
+    )]
     pub extract_stream: Option<u32>,
 
     /// Output file for extracted stream
@@ -456,6 +465,10 @@ impl PageSpec {
     }
 }
 
+/// Object 0 heads the free list and is never a real object (PDF 32000-1
+/// §7.5.4), so naming it is a usage error, like page 0 (bug-0019).
+const OBJECT_ZERO: &str = "Invalid object number: 0 (object numbers start at 1)";
+
 pub(crate) fn parse_object_spec(s: &str) -> Result<Vec<u32>, String> {
     let mut result = Vec::new();
     for part in s.split(',') {
@@ -472,6 +485,9 @@ pub(crate) fn parse_object_spec(s: &str) -> Result<Vec<u32>, String> {
                 .trim()
                 .parse()
                 .map_err(|_| format!("Invalid object number: '{}'", end_s.trim()))?;
+            if start == 0 {
+                return Err(OBJECT_ZERO.to_string());
+            }
             if start > end {
                 return Err(format!("Invalid object range: {} > {}", start, end));
             }
@@ -480,6 +496,9 @@ pub(crate) fn parse_object_spec(s: &str) -> Result<Vec<u32>, String> {
             let num: u32 = part
                 .parse()
                 .map_err(|_| format!("Invalid object number: '{}'", part))?;
+            if num == 0 {
+                return Err(OBJECT_ZERO.to_string());
+            }
             result.push(num);
         }
     }
@@ -1207,10 +1226,12 @@ mod tests {
     }
 
     #[test]
-    fn parse_object_spec_zero() {
-        // Zero is technically valid for parse_object_spec (unlike PageSpec)
-        let result = parse_object_spec("0").unwrap();
-        assert_eq!(result, vec![0]);
+    fn parse_object_spec_zero_is_rejected() {
+        // bug-0019: object 0 is never a real object, so it is a usage error.
+        for spec in ["0", "0-3", "1,0"] {
+            let err = parse_object_spec(spec).unwrap_err();
+            assert!(err.contains("start at 1"), "{spec}: {err}");
+        }
     }
 
     #[test]

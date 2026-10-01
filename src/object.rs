@@ -358,6 +358,14 @@ pub(crate) fn print_objects_json(
     );
 }
 
+/// The requested object numbers (generation 0) the document does not contain.
+pub(crate) fn missing_objects(doc: &Document, nums: &[u32]) -> Vec<u32> {
+    nums.iter()
+        .copied()
+        .filter(|&n| doc.get_object((n, 0)).is_err())
+        .collect()
+}
+
 /// Build the `--object --json` root value. A single object number yields the
 /// object schema directly (or an `error` object when not found); multiple
 /// numbers yield `{"objects": [...]}` with a per-item `error` for any missing.
@@ -370,7 +378,11 @@ pub(crate) fn objects_json_value(doc: &Document, nums: &[u32], config: &DumpConf
                 "generation": 0,
                 "object": object_to_json(object, doc, config),
             }),
-            Err(_) => json!({"error": format!("Object {} not found.", obj_num)}),
+            Err(_) => json!({
+                "object_number": obj_num,
+                "generation": 0,
+                "error": format!("Object {} not found.", obj_num),
+            }),
         }
     } else {
         let mut items = Vec::new();

@@ -48,7 +48,7 @@ decision here, then implement in the phase noted. **Do not just “fix the code�
 
 - [ ] **bug-0018** [HIGH] Large `--object`/`--page` range materialized in memory before validation
       (~17 GB alloc / multi-second hang).  Intersect with the real document instead of enumerating.
-      Exit-code for “range matches nothing” depends on **bug-0019**. `bugs/bug-0018-large-range-materialized-before-validation.md`
+      Ask Chris first how a range treats gaps (see the report; bug-0019 shipped “any miss exits 1”). `bugs/bug-0018-large-range-materialized-before-validation.md`
 
 ---
 
@@ -79,8 +79,6 @@ decision here, then implement in the phase noted. **Do not just “fix the code�
       _(related family with bug-0004: a decode “success” that is not the decoded content.)_
 - [ ] **bug-0021** [MED] `--object N` on an indirect-reference object shows the _target’s_ content
       under N’s header.  Display the stored value, not the deref. `bugs/bug-0021-object-indirect-reference-masquerade.md`
-- [ ] **bug-0019** [HIGH] (code fix, decided 1-Oct-2026: option A) Any miss exits 1, even
-      one in a list; `--inspect`’s error to stderr; `--object 0` is a usage error, exit 2. `bugs/bug-0019-missing-object-modes-exit-zero.md`
 - [ ] **bug-0004** [HIGH] (code fix, after Phase 0 decision) Apply predictor or warn on
       `/DecodeParms`. `bugs/bug-0004-decodeparms-predictor-ignored.md`
 - [ ] **bug-0033** [MED] (code fix, after Phase 0 decision) Decode UTF-16BE text strings / lossless

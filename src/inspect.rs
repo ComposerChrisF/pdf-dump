@@ -524,7 +524,7 @@ pub(crate) fn print_info(writer: &mut impl Write, doc: &Document, obj_num: u32) 
     let object = match doc.get_object(obj_id) {
         Ok(obj) => obj,
         Err(_) => {
-            wln!(writer, "Error: Object {} not found.", obj_num);
+            eprintln!("Error: Object {} not found.", obj_num);
             return;
         }
     };
@@ -1811,14 +1811,11 @@ mod tests {
     }
 
     #[test]
-    fn print_info_object_not_found() {
+    fn print_info_object_not_found_keeps_stdout_clean() {
+        // bug-0019: the error goes to stderr, so stdout stays pipeable.
         let doc = Document::new();
         let out = output_of(|w| print_info(w, &doc, 999));
-        assert!(
-            out.contains("not found"),
-            "expected 'not found' in output, got: {}",
-            out
-        );
+        assert!(out.is_empty(), "expected nothing on stdout, got: {}", out);
     }
 
     #[test]
