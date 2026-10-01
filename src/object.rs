@@ -7,7 +7,7 @@ use std::io::Write;
 use crate::helpers::json_pretty;
 use crate::helpers::{format_dict_value, format_operation, object_type_label};
 use crate::stream::{decode_stream, format_hex_dump, get_filter_names, is_binary_stream};
-use crate::types::DumpConfig;
+use crate::types::{DumpConfig, ObjectSpec};
 
 pub(crate) fn print_stream_content(
     writer: &mut impl Write,
@@ -366,6 +366,62 @@ pub(crate) fn missing_objects(doc: &Document, nums: &[u32]) -> Vec<u32> {
         .collect()
 }
 
+/// What an `--object` spec selects from a document: every explicit number,
+/// present or not, plus the objects present in each range (bug-0018).
+pub(crate) struct ObjectSelection {
+    /// Sorted and deduplicated.
+    pub nums: Vec<u32>,
+    /// Ranges in which the document has no objects at all.
+    pub empty_ranges: Vec<(u32, u32)>,
+    /// The spec was one explicit number: use the single-object JSON shape.
+    pub single: bool,
+}
+
+/// Resolves `spec` against `doc`.  A range is looked up in the object table
+/// (a `BTreeMap`), so its cost is the objects present, never the span.
+pub(crate) fn resolve_object_spec(doc: &Document, spec: &ObjectSpec) -> ObjectSelection {
+    let mut nums: BTreeSet<u32> = spec.singles.iter().copied().collect();
+    let mut empty_ranges = Vec::new();
+    for &(start, end) in &spec.ranges {
+        let mut present = doc
+            .objects
+            .range((start, 0)..=(end, u16::MAX))
+            .filter(|((_, generation), _)| *generation == 0)
+            .map(|(&(num, _), _)| num)
+            .peekable();
+        if present.peek().is_none() {
+            empty_ranges.push((start, end));
+        }
+        nums.extend(present);
+    }
+    ObjectSelection {
+        nums: nums.into_iter().collect(),
+        empty_ranges,
+        single: spec.is_single(),
+    }
+}
+
+/// The `--object --json` root for a resolved selection: the single-object
+/// shape for one explicit number, else `{"objects": [...]}` with an error
+/// entry for each range that matched nothing.
+pub(crate) fn selection_json_value(
+    doc: &Document,
+    selection: &ObjectSelection,
+    config: &DumpConfig,
+) -> Value {
+    if selection.single {
+        return objects_json_value(doc, &selection.nums, config);
+    }
+    let mut items = object_list_items(doc, &selection.nums, config);
+    items.extend(selection.empty_ranges.iter().map(|&(start, end)| {
+        json!({
+            "range": format!("{}-{}", start, end),
+            "error": "no objects in range",
+        })
+    }));
+    json!({"objects": items})
+}
+
 /// Build the `--object --json` root value. A single object number yields the
 /// object schema directly (or an `error` object when not found); multiple
 /// numbers yield `{"objects": [...]}` with a per-item `error` for any missing.
@@ -385,28 +441,33 @@ pub(crate) fn objects_json_value(doc: &Document, nums: &[u32], config: &DumpConf
             }),
         }
     } else {
-        let mut items = Vec::new();
-        for &obj_num in nums {
-            let obj_id = (obj_num, 0);
-            match doc.get_object(obj_id) {
-                Ok(object) => {
-                    items.push(json!({
-                        "object_number": obj_num,
-                        "generation": 0,
-                        "object": object_to_json(object, doc, config),
-                    }));
-                }
-                Err(_) => {
-                    items.push(json!({
-                        "object_number": obj_num,
-                        "generation": 0,
-                        "error": "not found",
-                    }));
-                }
+        json!({"objects": object_list_items(doc, nums, config)})
+    }
+}
+
+/// One `{"objects": [...]}` entry per number, with an `error` for any missing.
+fn object_list_items(doc: &Document, nums: &[u32], config: &DumpConfig) -> Vec<Value> {
+    let mut items = Vec::new();
+    for &obj_num in nums {
+        let obj_id = (obj_num, 0);
+        match doc.get_object(obj_id) {
+            Ok(object) => {
+                items.push(json!({
+                    "object_number": obj_num,
+                    "generation": 0,
+                    "object": object_to_json(object, doc, config),
+                }));
+            }
+            Err(_) => {
+                items.push(json!({
+                    "object_number": obj_num,
+                    "generation": 0,
+                    "error": "not found",
+                }));
             }
         }
-        json!({"objects": items})
     }
+    items
 }
 
 // ── JSON output (Phase 1) ────────────────────────────────────────────
@@ -2311,6 +2372,74 @@ mod tests {
         let parsed: Value = serde_json::from_str(&out).unwrap();
         // Single object should NOT wrap in array
         assert!(parsed["object_number"].is_number());
+    }
+
+    fn doc_with_objects(nums: &[u32]) -> Document {
+        let mut doc = Document::new();
+        for &n in nums {
+            doc.objects.insert((n, 0), Object::Integer(n as i64));
+        }
+        doc
+    }
+
+    #[test]
+    fn resolve_range_selects_only_present_objects() {
+        // bug-0018: holes in a range are allowed; the span is never expanded.
+        let doc = doc_with_objects(&[1, 2, 5]);
+        let spec = crate::types::parse_object_spec("1-4294967295").unwrap();
+        let sel = resolve_object_spec(&doc, &spec);
+        assert_eq!(sel.nums, vec![1, 2, 5]);
+        assert!(sel.empty_ranges.is_empty());
+        assert!(!sel.single);
+    }
+
+    #[test]
+    fn resolve_range_with_no_objects_is_reported() {
+        let doc = doc_with_objects(&[1, 2, 5]);
+        let spec = crate::types::parse_object_spec("1,3-4,9-20").unwrap();
+        let sel = resolve_object_spec(&doc, &spec);
+        assert_eq!(sel.nums, vec![1]);
+        assert_eq!(sel.empty_ranges, vec![(3, 4), (9, 20)]);
+    }
+
+    #[test]
+    fn resolve_keeps_missing_explicit_numbers() {
+        // bug-0019: an explicit number is kept even when absent, so it is
+        // reported and exits 1.
+        let doc = doc_with_objects(&[1, 2]);
+        let spec = crate::types::parse_object_spec("7,1-2").unwrap();
+        let sel = resolve_object_spec(&doc, &spec);
+        assert_eq!(sel.nums, vec![1, 2, 7]);
+        assert_eq!(missing_objects(&doc, &sel.nums), vec![7]);
+    }
+
+    #[test]
+    fn resolve_range_ignores_nonzero_generations() {
+        let mut doc = doc_with_objects(&[]);
+        doc.objects.insert((4, 1), Object::Null);
+        let spec = crate::types::parse_object_spec("3-5").unwrap();
+        assert_eq!(resolve_object_spec(&doc, &spec).empty_ranges, vec![(3, 5)]);
+    }
+
+    #[test]
+    fn selection_json_lists_a_range_even_when_one_object_matches() {
+        let doc = doc_with_objects(&[5]);
+        let config = json_config();
+        let spec = crate::types::parse_object_spec("3-7,20-30").unwrap();
+        let v = selection_json_value(&doc, &resolve_object_spec(&doc, &spec), &config);
+        let objs = v["objects"].as_array().unwrap();
+        assert_eq!(objs[0]["object_number"], 5);
+        assert_eq!(objs[1]["range"], "20-30");
+        assert_eq!(objs[1]["error"], "no objects in range");
+    }
+
+    #[test]
+    fn selection_json_single_number_keeps_the_single_shape() {
+        let doc = doc_with_objects(&[5]);
+        let spec = crate::types::parse_object_spec("5").unwrap();
+        let v = selection_json_value(&doc, &resolve_object_spec(&doc, &spec), &json_config());
+        assert_eq!(v["object_number"], 5);
+        assert!(v.get("objects").is_none());
     }
 
     #[test]

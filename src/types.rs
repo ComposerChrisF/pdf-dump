@@ -76,7 +76,7 @@ impl DocMode {
 
 #[derive(Debug)]
 pub(crate) enum StandaloneMode {
-    Object { nums: Vec<u32> },
+    Object { spec: ObjectSpec },
     Inspect { obj_num: u32 },
     Search { expr: String, list_modifier: bool },
     ExtractStream { obj_num: u32, output: PathBuf },
@@ -123,8 +123,9 @@ Exit codes:
       corrupt PDF, wrong --password), or the caller named something the
       document lacks (a caller-claim/world mismatch): --page beyond the end
       (naming the real count), or an --object, --inspect, or --extract-stream
-      object that is not there.  With --object, any missing number exits 1;
-      the objects that were found are still printed
+      object that is not there.  With --object, an explicit number that is
+      missing exits 1, and so does a range holding no objects at all; gaps
+      within a range are fine.  Whatever was found is still printed
   2   Usage error: bad arguments — clap's own (unknown flag, missing required
       arg) plus semantic ones (--raw with --decode, --raw without --object,
       a malformed --page value, object number 0, an invalid --search
@@ -194,7 +195,8 @@ pub(crate) struct Args {
     pub forms: bool,
 
     // ── Objects ──────────────────────────────────────────────────────
-    /// Print one or more objects by number (e.g. 5, 1,5,12, 3-7, 1,5,10-15)
+    /// Print one or more objects by number (e.g. 5, 1,5,12, 3-7, 1,5,10-15).
+    /// A range prints the objects present in it; gaps are skipped
     #[arg(short = 'o', long, help_heading = "Objects")]
     pub object: Option<String>,
 
@@ -300,8 +302,8 @@ impl Args {
             });
         }
         if let Some(ref spec) = self.object {
-            let nums = parse_object_spec(spec)?;
-            standalone.push(StandaloneMode::Object { nums });
+            let spec = parse_object_spec(spec)?;
+            standalone.push(StandaloneMode::Object { spec });
         }
         if let Some(obj_num) = self.inspect {
             standalone.push(StandaloneMode::Inspect { obj_num });
@@ -452,25 +454,46 @@ impl PageSpec {
             PageSpec::OpenRange(start) => page >= *start,
         }
     }
-
-    /// Returns the explicit page numbers for `Single`/`Range`.
-    /// `OpenRange` returns an empty Vec — callers that need to enumerate it
-    /// must filter `doc.get_pages()` via `contains()` (see `helpers::build_page_list`).
-    pub fn pages(&self) -> Vec<u32> {
-        match self {
-            PageSpec::Single(n) => vec![*n],
-            PageSpec::Range(start, end) => (*start..=*end).collect(),
-            PageSpec::OpenRange(_) => Vec::new(),
-        }
-    }
 }
 
 /// Object 0 heads the free list and is never a real object (PDF 32000-1
 /// §7.5.4), so naming it is a usage error, like page 0 (bug-0019).
 const OBJECT_ZERO: &str = "Invalid object number: 0 (object numbers start at 1)";
 
-pub(crate) fn parse_object_spec(s: &str) -> Result<Vec<u32>, String> {
-    let mut result = Vec::new();
+/// A parsed `--object` value, kept unexpanded so that a huge range costs
+/// nothing until it is resolved against the document (bug-0018).
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) struct ObjectSpec {
+    /// Explicitly named numbers, sorted and deduplicated; each must exist.
+    pub singles: Vec<u32>,
+    /// Inclusive ranges, each meaning “the objects present in this span”.
+    pub ranges: Vec<(u32, u32)>,
+}
+
+impl ObjectSpec {
+    /// True for exactly one explicit number, which selects the single-object
+    /// JSON shape; anything else, a range included, is the list shape.
+    pub fn is_single(&self) -> bool {
+        self.singles.len() == 1 && self.ranges.is_empty()
+    }
+
+    /// Every number the spec names, sorted and deduplicated.  Test-only: it
+    /// expands ranges, which production code must never do.
+    #[cfg(test)]
+    pub fn expand(&self) -> Vec<u32> {
+        let mut all = self.singles.clone();
+        for &(start, end) in &self.ranges {
+            all.extend(start..=end);
+        }
+        all.sort_unstable();
+        all.dedup();
+        all
+    }
+}
+
+pub(crate) fn parse_object_spec(s: &str) -> Result<ObjectSpec, String> {
+    let mut singles = Vec::new();
+    let mut ranges = Vec::new();
     for part in s.split(',') {
         let part = part.trim();
         if part.is_empty() {
@@ -491,7 +514,7 @@ pub(crate) fn parse_object_spec(s: &str) -> Result<Vec<u32>, String> {
             if start > end {
                 return Err(format!("Invalid object range: {} > {}", start, end));
             }
-            result.extend(start..=end);
+            ranges.push((start, end));
         } else {
             let num: u32 = part
                 .parse()
@@ -499,15 +522,15 @@ pub(crate) fn parse_object_spec(s: &str) -> Result<Vec<u32>, String> {
             if num == 0 {
                 return Err(OBJECT_ZERO.to_string());
             }
-            result.push(num);
+            singles.push(num);
         }
     }
-    if result.is_empty() {
+    if singles.is_empty() && ranges.is_empty() {
         return Err("Empty object specification".to_string());
     }
-    result.sort_unstable();
-    result.dedup();
-    Ok(result)
+    singles.sort_unstable();
+    singles.dedup();
+    Ok(ObjectSpec { singles, ranges })
 }
 
 #[cfg(test)]
@@ -562,13 +585,6 @@ mod tests {
     }
 
     #[test]
-    fn page_spec_open_range_pages_empty() {
-        // OpenRange::pages() returns empty — callers must use contains() with doc context.
-        let spec = PageSpec::OpenRange(5);
-        assert!(spec.pages().is_empty());
-    }
-
-    #[test]
     fn page_spec_contains() {
         let single = PageSpec::Single(3);
         assert!(single.contains(3));
@@ -583,35 +599,26 @@ mod tests {
     }
 
     #[test]
-    fn page_spec_pages() {
-        let single = PageSpec::Single(3);
-        assert_eq!(single.pages(), vec![3]);
-
-        let range = PageSpec::Range(2, 5);
-        assert_eq!(range.pages(), vec![2, 3, 4, 5]);
-    }
-
-    #[test]
     fn parse_object_spec_single() {
-        let result = parse_object_spec("5").unwrap();
+        let result = parse_object_spec("5").unwrap().expand();
         assert_eq!(result, vec![5]);
     }
 
     #[test]
     fn parse_object_spec_multiple() {
-        let result = parse_object_spec("1,5,12").unwrap();
+        let result = parse_object_spec("1,5,12").unwrap().expand();
         assert_eq!(result, vec![1, 5, 12]);
     }
 
     #[test]
     fn parse_object_spec_range() {
-        let result = parse_object_spec("3-7").unwrap();
+        let result = parse_object_spec("3-7").unwrap().expand();
         assert_eq!(result, vec![3, 4, 5, 6, 7]);
     }
 
     #[test]
     fn parse_object_spec_mixed() {
-        let result = parse_object_spec("1,5,10-12").unwrap();
+        let result = parse_object_spec("1,5,10-12").unwrap().expand();
         assert_eq!(result, vec![1, 5, 10, 11, 12]);
     }
 
@@ -649,7 +656,6 @@ mod tests {
         // Range where start == end is valid (equivalent to single)
         let spec = PageSpec::parse("5-5").unwrap();
         assert!(matches!(spec, PageSpec::Range(5, 5)));
-        assert_eq!(spec.pages(), vec![5]);
     }
 
     #[test]
@@ -682,39 +688,39 @@ mod tests {
 
     #[test]
     fn parse_object_spec_deduplicates() {
-        let result = parse_object_spec("1,1,5,5").unwrap();
+        let result = parse_object_spec("1,1,5,5").unwrap().expand();
         assert_eq!(result, vec![1, 5]);
     }
 
     #[test]
     fn parse_object_spec_sorts() {
-        let result = parse_object_spec("10,5,1").unwrap();
+        let result = parse_object_spec("10,5,1").unwrap().expand();
         assert_eq!(result, vec![1, 5, 10]);
     }
 
     #[test]
     fn parse_object_spec_trailing_comma() {
         // Empty parts from trailing comma should be skipped
-        let result = parse_object_spec("1,5,").unwrap();
+        let result = parse_object_spec("1,5,").unwrap().expand();
         assert_eq!(result, vec![1, 5]);
     }
 
     #[test]
     fn parse_object_spec_whitespace() {
-        let result = parse_object_spec(" 1 , 5 , 10 - 12 ").unwrap();
+        let result = parse_object_spec(" 1 , 5 , 10 - 12 ").unwrap().expand();
         assert_eq!(result, vec![1, 5, 10, 11, 12]);
     }
 
     #[test]
     fn parse_object_spec_overlap_deduped() {
         // Ranges that overlap should be deduped
-        let result = parse_object_spec("1-3,2-4").unwrap();
+        let result = parse_object_spec("1-3,2-4").unwrap().expand();
         assert_eq!(result, vec![1, 2, 3, 4]);
     }
 
     #[test]
     fn parse_object_spec_single_element_range() {
-        let result = parse_object_spec("5-5").unwrap();
+        let result = parse_object_spec("5-5").unwrap().expand();
         assert_eq!(result, vec![5]);
     }
 
@@ -829,8 +835,8 @@ mod tests {
         let args = Args::parse_from(["pdf-dump", "test.pdf", "--object", "5"]);
         let mode = args.resolve_mode().unwrap();
         match mode {
-            ResolvedMode::Standalone(StandaloneMode::Object { nums }) => {
-                assert_eq!(nums, vec![5]);
+            ResolvedMode::Standalone(StandaloneMode::Object { spec }) => {
+                assert_eq!(spec.expand(), vec![5]);
             }
             _ => panic!("Expected Standalone(Object)"),
         }
@@ -1050,8 +1056,8 @@ mod tests {
         let args = Args::parse_from(["pdf-dump", "test.pdf", "--object", "1,5,10-12"]);
         let mode = args.resolve_mode().unwrap();
         match mode {
-            ResolvedMode::Standalone(StandaloneMode::Object { nums }) => {
-                assert_eq!(nums, vec![1, 5, 10, 11, 12]);
+            ResolvedMode::Standalone(StandaloneMode::Object { spec }) => {
+                assert_eq!(spec.expand(), vec![1, 5, 10, 11, 12]);
             }
             _ => panic!("Expected Standalone(Object) with multiple nums"),
         }
@@ -1213,7 +1219,7 @@ mod tests {
 
     #[test]
     fn parse_object_spec_large_range() {
-        let result = parse_object_spec("1-100").unwrap();
+        let result = parse_object_spec("1-100").unwrap().expand();
         assert_eq!(result.len(), 100);
         assert_eq!(result[0], 1);
         assert_eq!(result[99], 100);
@@ -1236,32 +1242,17 @@ mod tests {
 
     #[test]
     fn parse_object_spec_large_numbers() {
-        let result = parse_object_spec("999999").unwrap();
+        let result = parse_object_spec("999999").unwrap().expand();
         assert_eq!(result, vec![999999]);
     }
 
     #[test]
     fn parse_object_spec_leading_comma() {
-        let result = parse_object_spec(",1,5").unwrap();
+        let result = parse_object_spec(",1,5").unwrap().expand();
         assert_eq!(result, vec![1, 5]);
     }
 
     // ── PageSpec additional edge cases ─────────────────────────────
-
-    #[test]
-    fn page_spec_range_pages_large() {
-        let spec = PageSpec::Range(1, 10);
-        let pages = spec.pages();
-        assert_eq!(pages.len(), 10);
-        assert_eq!(pages, vec![1, 2, 3, 4, 5, 6, 7, 8, 9, 10]);
-    }
-
-    #[test]
-    fn page_spec_single_pages_returns_one_element() {
-        let spec = PageSpec::Single(42);
-        let pages = spec.pages();
-        assert_eq!(pages, vec![42]);
-    }
 
     #[test]
     fn page_spec_single_contains_only_self() {

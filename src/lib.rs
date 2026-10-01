@@ -278,7 +278,8 @@ fn dispatch_default(
 }
 
 /// Returns true when an object named by `--object` or `--inspect` is not in
-/// the document; whatever was found has already been printed.
+/// the document, or an `--object` range holds no objects; whatever was found
+/// has already been printed.
 fn dispatch_standalone(
     out: &mut impl Write,
     doc: &Document,
@@ -323,17 +324,24 @@ fn dispatch_standalone(
                 }
             }
         }
-        StandaloneMode::Object { ref nums } => {
+        StandaloneMode::Object { ref spec } => {
+            let selection = object::resolve_object_spec(doc, spec);
+            for (start, end) in &selection.empty_ranges {
+                eprintln!("Error: No objects in range {}-{}.", start, end);
+            }
             if config.json {
                 print_json_with_recovery(
                     out,
-                    object::objects_json_value(doc, nums, config),
+                    object::selection_json_value(doc, &selection, config),
                     recovery,
                 );
             } else {
-                object::print_objects(out, doc, nums, config);
+                object::print_objects(out, doc, &selection.nums, config);
             }
-            !object::missing_objects(doc, nums).is_empty()
+            // A range only needs some object in its span; an explicit number
+            // must itself exist (bug-0018, bug-0019).
+            !selection.empty_ranges.is_empty()
+                || !object::missing_objects(doc, &selection.nums).is_empty()
         }
         StandaloneMode::Inspect { obj_num } => {
             if config.json {

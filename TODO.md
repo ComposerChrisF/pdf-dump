@@ -46,9 +46,6 @@ decision here, then implement in the phase noted. **Do not just “fix the code�
 
 ### Phase 1 — Crashes & denial-of-service (fix first; mostly no spec decision)
 
-- [ ] **bug-0018** [HIGH] Large `--object`/`--page` range materialized in memory before validation
-      (~17 GB alloc / multi-second hang).  Intersect with the real document instead of enumerating.
-      Ask Chris first how a range treats gaps (see the report; bug-0019 shipped “any miss exits 1”). `bugs/bug-0018-large-range-materialized-before-validation.md`
 
 ---
 

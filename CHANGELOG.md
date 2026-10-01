@@ -7,6 +7,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.28.0] - 2026-10-01
+### Changed
+- **Behavior change (exit codes): an `--object` range now means “the objects
+  present in the span”.**  Gaps inside a range no longer exit 1 and no longer
+  print per-gap errors; only a range that holds no objects at all exits 1, with
+  a single `No objects in range A-B.` line (and, under `--json`, one
+  `{"range", "error"}` item).  A single explicit number that is missing still
+  exits 1.  Callers that relied on a gap in a range failing must name the
+  numbers explicitly.  (bug-0018)
+- **Behavior change (JSON shape): any range, `5-5` included, now uses the
+  `{"objects": [...]}` list shape.**  Only a single explicit number uses the
+  single-object shape.
+- `--object` ranges resolve against the document’s objects instead of being
+  expanded during argument parsing, so `--object 1-4294967295` costs only the
+  objects present rather than a ~17 GB vector.  `--page` ranges are walked only
+  up to the first absent page, so their cost is bounded by the page count; the
+  `Page N not found. Document has M pages.` error and exit 1 are unchanged.
+- `--help` documents `--object` range semantics, and the exit-code table
+  distinguishes an explicit missing number from an empty range.
+
 ## [0.27.0] - 2026-10-01
 ### Changed
 - **Behavior change (exit codes): callers that check the exit status of

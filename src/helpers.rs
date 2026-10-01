@@ -13,33 +13,29 @@ pub(crate) fn build_page_list(
     let Some(spec) = page_filter else {
         return Ok(pages.iter().map(|(&pn, &id)| (pn, id)).collect());
     };
-    match spec {
-        PageSpec::Single(_) | PageSpec::Range(_, _) => spec
-            .pages()
-            .into_iter()
-            .map(|pn| {
-                pages.get(&pn).map(|&id| (pn, id)).ok_or_else(|| {
-                    format!("Page {} not found. Document has {} pages.", pn, pages.len())
-                })
-            })
-            .collect(),
+    let not_found = |pn: u32| format!("Page {} not found. Document has {} pages.", pn, pages.len());
+    let (start, end) = match *spec {
+        PageSpec::Single(n) => (n, n),
+        PageSpec::Range(start, end) => (start, end),
         PageSpec::OpenRange(start) => {
-            let result: Vec<(u32, ObjectId)> = pages
-                .iter()
-                .filter(|(pn, _)| **pn >= *start)
-                .map(|(&pn, &id)| (pn, id))
-                .collect();
-            if result.is_empty() {
-                Err(format!(
-                    "Page {} not found. Document has {} pages.",
-                    start,
-                    pages.len()
-                ))
+            let result: Vec<(u32, ObjectId)> =
+                pages.range(start..).map(|(&pn, &id)| (pn, id)).collect();
+            return if result.is_empty() {
+                Err(not_found(start))
             } else {
                 Ok(result)
-            }
+            };
         }
+    };
+    // Walk only up to the first absent page, so a huge range costs at most
+    // the document's page count, never the span (bug-0018).
+    if let Some(pn) = (start..=end).find(|pn| !pages.contains_key(pn)) {
+        return Err(not_found(pn));
     }
+    Ok(pages
+        .range(start..=end)
+        .map(|(&pn, &id)| (pn, id))
+        .collect())
 }
 
 /// Look up an inheritable page attribute (`MediaBox`, `CropBox`, `Rotate`,
@@ -377,6 +373,28 @@ mod tests {
     use lopdf::Object;
     use lopdf::{Dictionary, Stream, StringFormat};
     use pretty_assertions::assert_eq;
+
+    #[test]
+    fn build_page_list_huge_range_stops_at_the_first_absent_page() {
+        // bug-0018: a range is walked only to its first miss, never expanded.
+        let doc = build_two_page_doc();
+        let err = build_page_list(&doc, Some(&PageSpec::Range(1, u32::MAX))).unwrap_err();
+        assert_eq!(err, "Page 3 not found. Document has 2 pages.");
+        let err = build_page_list(&doc, Some(&PageSpec::Range(7, u32::MAX))).unwrap_err();
+        assert_eq!(err, "Page 7 not found. Document has 2 pages.");
+    }
+
+    #[test]
+    fn build_page_list_range_within_the_document() {
+        let doc = build_two_page_doc();
+        let pages = build_page_list(&doc, Some(&PageSpec::Range(1, 2))).unwrap();
+        assert_eq!(
+            pages.iter().map(|(pn, _)| *pn).collect::<Vec<_>>(),
+            vec![1, 2]
+        );
+        let pages = build_page_list(&doc, Some(&PageSpec::Single(2))).unwrap();
+        assert_eq!(pages.iter().map(|(pn, _)| *pn).collect::<Vec<_>>(), vec![2]);
+    }
 
     #[test]
     fn object_type_label_dictionary_with_type() {

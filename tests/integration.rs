@@ -561,6 +561,50 @@ fn inspect_missing_object_json_exits_1() {
 }
 
 #[test]
+fn object_range_with_holes_exits_0() {
+    // bug-0018: a range means the objects present in the span, so gaps are
+    // fine, and a huge range is never expanded.
+    let pdf = create_minimal_pdf();
+    let output = run_args(&pdf, &["--object", "1-4294967295"]);
+    assert_eq!(output.status.code(), Some(0));
+    assert!(
+        output.stderr.is_empty(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(String::from_utf8_lossy(&output.stdout).contains("Object 1 0"));
+}
+
+#[test]
+fn object_range_matching_nothing_exits_1() {
+    let pdf = create_minimal_pdf();
+    let output = run_args(&pdf, &["--object", "1,9000-9999"]);
+    assert_eq!(output.status.code(), Some(1));
+    assert!(String::from_utf8_lossy(&output.stdout).contains("Object 1 0"));
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert_eq!(stderr.trim(), "Error: No objects in range 9000-9999.");
+}
+
+#[test]
+fn object_range_matching_nothing_json_names_the_range() {
+    let pdf = create_minimal_pdf();
+    let output = run_args(&pdf, &["--object", "9000-9999", "--json"]);
+    assert_eq!(output.status.code(), Some(1));
+    let v: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(v["objects"][0]["range"], "9000-9999");
+    assert_eq!(v["objects"][0]["error"], "no objects in range");
+}
+
+#[test]
+fn page_huge_range_fails_fast_naming_the_first_missing_page() {
+    // bug-0018: used to allocate the whole span before checking it.
+    let pdf = create_minimal_pdf();
+    let output = run_args(&pdf, &["--page", "1-4294967295", "--text"]);
+    assert_eq!(output.status.code(), Some(1));
+    assert!(String::from_utf8_lossy(&output.stderr).contains("Page 2 not found"));
+}
+
+#[test]
 fn object_zero_is_a_usage_error() {
     // bug-0019: object 0 is never a real object.
     let pdf = create_minimal_pdf();
