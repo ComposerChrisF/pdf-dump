@@ -36,5 +36,5 @@ Replace bijective base-26 with the repeated-letter scheme: `letter = (n - 1) % 2
 The repeated-letter formula matches Table 159 exactly, unlike spreadsheet-style base-26.
 
 ## Related
-[[bug-0024-page-label-roman-unbounded-loop]] (same module, `page_labels.rs`).  The existing
+[[bug-0024-page-label-roman-unbounded-loop]] (same module, `page_labels.rs`).  The repeated-letter form is linear in the value (page 2,600 is 100 letters), so the fix must cap it the way bug-0024 capped roman numerals at `MAX_ROMAN` (fixed 2026-10-01), or a hostile `/St` reopens the same DoS.  The existing
 `int_to_alpha_basic` test only covers up to 27 and must be extended.

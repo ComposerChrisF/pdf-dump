@@ -37,6 +37,10 @@ behavior, because tests deliberately pin the current behavior.
 - Decide the multi-object case: `--object 1,999` currently prints object 1 then an error for 999 and
   exits 0 — should any miss in a list drive exit 1?
 
+**DECIDED 2026-10-01 by Chris (effort-coord `row:App/Rust/Pdf/pdf-dump/0001`), option A:** any miss
+exits 1, even one in a list (found objects still print); `--inspect`’s error moves to stderr;
+`--object 0` becomes a usage error, exit 2.
+
 ## Reproduction
 ```
 pdf-dump f.pdf --object 9999        # currently: stderr message, exit 0   → want exit 1

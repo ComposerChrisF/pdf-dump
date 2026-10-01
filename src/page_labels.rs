@@ -14,8 +14,13 @@ pub(crate) struct PageLabelEntry {
     pub start: i64,
 }
 
+/// Largest value rendered as a roman numeral; 3999 (MMMCMXCIX) is the
+/// conventional maximum.  Larger values fall back to decimal, so a hostile
+/// `/St` cannot drive the repeated-subtraction loop (bug-0024).
+const MAX_ROMAN: i64 = 3999;
+
 fn int_to_roman(mut n: i64, uppercase: bool) -> String {
-    if n <= 0 {
+    if !(1..=MAX_ROMAN).contains(&n) {
         return n.to_string();
     }
     let table: &[(i64, &str)] = &[
@@ -208,6 +213,14 @@ mod tests {
         assert_eq!(int_to_roman(9, true), "IX");
         assert_eq!(int_to_roman(14, false), "xiv");
         assert_eq!(int_to_roman(1999, true), "MCMXCIX");
+    }
+
+    #[test]
+    fn int_to_roman_falls_back_to_decimal_above_cap() {
+        // bug-0024: a hostile /St must not drive the subtraction loop.
+        assert_eq!(int_to_roman(MAX_ROMAN, true), "MMMCMXCIX");
+        assert_eq!(int_to_roman(MAX_ROMAN + 1, true), "4000");
+        assert_eq!(int_to_roman(i64::MAX, false), i64::MAX.to_string());
     }
 
     #[test]

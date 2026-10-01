@@ -7,6 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.26.1] - 2026-10-01
+### Fixed
+- bug-0010: `--find-text` folds case per character and maps folded offsets back
+  to the source text, so `İ` and `ẞ` no longer panic and snippets no longer drift
+  past the match.
+- bug-0024: page-label roman numerals render 1..=3999 and fall back to decimal
+  above, so a hostile `/St` cannot drive the subtraction loop.
+- bug-0005: LZW decodes in 4 KiB chunks and RunLength checks before each run,
+  both failing as soon as output would pass `MAX_DECODED_SIZE`.
+
 ## [0.26.0] - 2026-09-23
 ### Added
 - `--text --layout`: position-faithful text extraction on a character grid,

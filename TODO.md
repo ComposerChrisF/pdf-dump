@@ -25,9 +25,6 @@ contract violation · **[MED]** correctness/robustness on unusual input · **[LO
 These need a decision from Chris; the report lists the options and a recommendation.  Do the
 decision here, then implement in the phase noted. **Do not just “fix the code”.**
 
-- [ ] **bug-0019** [HIGH] Missing-object modes exit 0 (should `--object`/`--inspect` on a missing
-      object exit 1 like `--extract-stream`/`--page`? and should `--object 0` be a usage error?).
-      Decision gates the Phase 2 code fix. `bugs/bug-0019-missing-object-modes-exit-zero.md`
 - [ ] **bug-0020** [MED] Object generation not addressable (fallback lookup vs a `--object N:G`
       syntax?).  Gates Phase 3 fix. `bugs/bug-0020-object-generation-not-addressable.md`
 - [ ] **bug-0004** [HIGH] `/DecodeParms` predictor ignored (apply the PNG/TIFF predictor, or emit a
@@ -49,15 +46,9 @@ decision here, then implement in the phase noted. **Do not just “fix the code�
 
 ### Phase 1 — Crashes & denial-of-service (fix first; mostly no spec decision)
 
-- [ ] **bug-0010** [HIGH] `--find-text` panics (exit 101) when case-folding changes byte length
-      (Turkish İ, ẞ). `bugs/bug-0010-find-text-case-fold-panic.md`
 - [ ] **bug-0018** [HIGH] Large `--object`/`--page` range materialized in memory before validation
       (~17 GB alloc / multi-second hang).  Intersect with the real document instead of enumerating.
       Exit-code for “range matches nothing” depends on **bug-0019**. `bugs/bug-0018-large-range-materialized-before-validation.md`
-- [ ] **bug-0024** [MED] Page-label roman numerals: unbounded loop on a crafted `/St` (DoS).  Cap
-      the value. `bugs/bug-0024-page-label-roman-unbounded-loop.md`
-- [ ] **bug-0005** [MED] LZW/RunLength decompression-bomb cap enforced after-the-fact / not at all.
-      Cap during decode. `bugs/bug-0005-decompression-bomb-lzw-runlength-uncapped.md`
 
 ---
 
@@ -88,8 +79,8 @@ decision here, then implement in the phase noted. **Do not just “fix the code�
       _(related family with bug-0004: a decode “success” that is not the decoded content.)_
 - [ ] **bug-0021** [MED] `--object N` on an indirect-reference object shows the _target’s_ content
       under N’s header.  Display the stored value, not the deref. `bugs/bug-0021-object-indirect-reference-masquerade.md`
-- [ ] **bug-0019** [HIGH] (code fix, after Phase 0 decision) Route missing-object misses to exit 1;
-      move `--inspect`’s error to stderr. `bugs/bug-0019-missing-object-modes-exit-zero.md`
+- [ ] **bug-0019** [HIGH] (code fix, decided 1-Oct-2026: option A) Any miss exits 1, even
+      one in a list; `--inspect`’s error to stderr; `--object 0` is a usage error, exit 2. `bugs/bug-0019-missing-object-modes-exit-zero.md`
 - [ ] **bug-0004** [HIGH] (code fix, after Phase 0 decision) Apply predictor or warn on
       `/DecodeParms`. `bugs/bug-0004-decodeparms-predictor-ignored.md`
 - [ ] **bug-0033** [MED] (code fix, after Phase 0 decision) Decode UTF-16BE text strings / lossless

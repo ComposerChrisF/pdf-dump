@@ -3,6 +3,8 @@ use std::borrow::Cow;
 use std::io::Read;
 
 /// Maximum decoded stream size (256 MB) to prevent decompression bombs.
+/// Each expanding filter (Flate, LZW, RunLength) enforces it during decode,
+/// not after; the ASCII filters only shrink their input.
 const MAX_DECODED_SIZE: u64 = 256 * 1024 * 1024;
 
 pub(crate) fn is_binary_stream(content: &[u8]) -> bool {
@@ -113,21 +115,51 @@ pub(crate) fn hex_digit(b: u8) -> Option<u8> {
 }
 
 pub(crate) fn decode_lzw(data: &[u8]) -> Result<Vec<u8>, String> {
+    decode_lzw_capped(data, MAX_DECODED_SIZE)
+}
+
+/// LZW-decodes `data` in chunks, failing as soon as the output would exceed
+/// `limit` rather than decoding everything first (bug-0005).  An input that
+/// runs out before the end marker is an error, as with weezl's `decode`.
+fn decode_lzw_capped(data: &[u8], limit: u64) -> Result<Vec<u8>, String> {
     let mut decoder = weezl::decode::Decoder::with_tiff_size_switch(weezl::BitOrder::Msb, 8);
-    let result = decoder
-        .decode(data)
-        .map_err(|e| format!("LZWDecode: {}", e))?;
-    if result.len() as u64 > MAX_DECODED_SIZE {
-        return Err(format!(
-            "LZWDecode: decoded size {} exceeds {} byte limit",
-            result.len(),
-            MAX_DECODED_SIZE
-        ));
+    let mut result = Vec::new();
+    let mut chunk = [0u8; 1 << 12];
+    let mut input = data;
+    loop {
+        let step = decoder.decode_bytes(input, &mut chunk);
+        input = &input[step.consumed_in..];
+        if (result.len() + step.consumed_out) as u64 > limit {
+            return Err(format!(
+                "LZWDecode: decoded size exceeds {} byte limit",
+                limit
+            ));
+        }
+        result.extend_from_slice(&chunk[..step.consumed_out]);
+        match step.status {
+            Ok(weezl::LzwStatus::Ok) => {}
+            Ok(weezl::LzwStatus::Done) => return Ok(result),
+            Ok(weezl::LzwStatus::NoProgress) => {
+                return Err(format!("LZWDecode: {}", weezl::LzwError::InvalidCode));
+            }
+            Err(e) => return Err(format!("LZWDecode: {}", e)),
+        }
     }
-    Ok(result)
 }
 
 pub(crate) fn decode_run_length(data: &[u8]) -> Result<Vec<u8>, String> {
+    decode_run_length_capped(data, MAX_DECODED_SIZE)
+}
+
+/// RunLength-decodes `data`, failing before any run that would push the
+/// output past `limit` (bug-0005).
+fn decode_run_length_capped(data: &[u8], limit: u64) -> Result<Vec<u8>, String> {
+    let over_limit = |len: usize| {
+        Err(format!(
+            "RunLengthDecode: decoded size {} exceeds {} byte limit",
+            len, limit
+        ))
+    };
     let mut result = Vec::new();
     let mut i = 0;
     while i < data.len() {
@@ -138,6 +170,9 @@ pub(crate) fn decode_run_length(data: &[u8]) -> Result<Vec<u8>, String> {
             if i + count > data.len() {
                 return Err("RunLengthDecode: truncated literal run".to_string());
             }
+            if (result.len() + count) as u64 > limit {
+                return over_limit(result.len() + count);
+            }
             result.extend_from_slice(&data[i..i + count]);
             i += count;
         } else if length == 128 {
@@ -147,6 +182,9 @@ pub(crate) fn decode_run_length(data: &[u8]) -> Result<Vec<u8>, String> {
                 return Err("RunLengthDecode: truncated repeat run".to_string());
             }
             let count = 257 - length as usize;
+            if (result.len() + count) as u64 > limit {
+                return over_limit(result.len() + count);
+            }
             let byte = data[i];
             i += 1;
             result.extend(std::iter::repeat_n(byte, count));
@@ -1166,6 +1204,71 @@ mod tests {
         let compressed = encoder.encode(original).unwrap();
         let result = decode_lzw(&compressed).unwrap();
         assert_eq!(result, original.as_slice());
+    }
+
+    /// A small cap, so the bomb tests need not allocate 256 MB.
+    const TEST_LIMIT: u64 = 1000;
+
+    #[test]
+    fn decode_lzw_capped_stops_during_decode() {
+        // bug-0005: the stream lacks its end marker, so a decoder that checks
+        // the cap only afterwards reports the bad code, not the limit.
+        let original = vec![0u8; 100_000];
+        let mut encoder = weezl::encode::Encoder::with_tiff_size_switch(weezl::BitOrder::Msb, 8);
+        let mut compressed = encoder.encode(&original).unwrap();
+        compressed.truncate(compressed.len() - 4);
+        let err = decode_lzw_capped(&compressed, TEST_LIMIT).unwrap_err();
+        assert!(err.contains("byte limit"), "{err}");
+    }
+
+    #[test]
+    fn decode_lzw_capped_accepts_output_at_the_limit() {
+        let original = vec![b'X'; TEST_LIMIT as usize];
+        let mut encoder = weezl::encode::Encoder::with_tiff_size_switch(weezl::BitOrder::Msb, 8);
+        let compressed = encoder.encode(&original).unwrap();
+        assert_eq!(
+            decode_lzw_capped(&compressed, TEST_LIMIT).unwrap(),
+            original
+        );
+    }
+
+    #[test]
+    fn decode_lzw_missing_end_marker_is_an_error() {
+        let mut encoder = weezl::encode::Encoder::with_tiff_size_switch(weezl::BitOrder::Msb, 8);
+        let mut compressed = encoder.encode(b"AAABBBCCC").unwrap();
+        compressed.truncate(compressed.len() - 2);
+        assert!(decode_lzw(&compressed).is_err());
+    }
+
+    #[test]
+    fn decode_run_length_capped_rejects_repeat_runs_past_the_limit() {
+        // bug-0005: eight maximal repeat runs (0x81 = 128 copies) = 1024 bytes.
+        let data = [0x81, b'x'].repeat(8);
+        let err = decode_run_length_capped(&data, TEST_LIMIT).unwrap_err();
+        assert!(err.contains("byte limit"), "{err}");
+    }
+
+    #[test]
+    fn decode_run_length_capped_rejects_literal_runs_past_the_limit() {
+        let mut data = Vec::new();
+        for _ in 0..8 {
+            data.push(127); // 128 literal bytes follow
+            data.extend([b'y'; 128]);
+        }
+        let err = decode_run_length_capped(&data, TEST_LIMIT).unwrap_err();
+        assert!(err.contains("byte limit"), "{err}");
+    }
+
+    #[test]
+    fn decode_run_length_capped_accepts_output_at_the_limit() {
+        let mut data = [0x81, b'x'].repeat(7); // 896 bytes
+        data.extend([0x98, b'z']); // 257 - 0x98 = 105 bytes, total 1001
+        assert!(decode_run_length_capped(&data, TEST_LIMIT).is_err());
+        data[14] = 0x99; // 104 bytes, total exactly 1000
+        assert_eq!(
+            decode_run_length_capped(&data, TEST_LIMIT).unwrap().len(),
+            TEST_LIMIT as usize
+        );
     }
 
     #[test]

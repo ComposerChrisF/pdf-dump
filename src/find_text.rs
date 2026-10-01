@@ -10,12 +10,50 @@ struct PageMatch {
     snippets: Vec<String>,
 }
 
+/// Characters of context shown on each side of a match.
+const CONTEXT_CHARS: usize = 40;
+
+/// Lowercases `s` one character at a time, returning the folded string and,
+/// for each of its bytes, the byte span in `s` of the character it came from.
+///
+/// Per-character folding (rather than `str::to_lowercase`) applies the same
+/// mapping to the text and the pattern, so matching never depends on context
+/// such as Greek final sigma.
+fn fold_case(s: &str) -> (String, Vec<(usize, usize)>) {
+    let mut folded = String::with_capacity(s.len());
+    let mut spans = Vec::with_capacity(s.len());
+    for (start, c) in s.char_indices() {
+        let end = start + c.len_utf8();
+        let before = folded.len();
+        folded.extend(c.to_lowercase());
+        spans.resize(spans.len() + (folded.len() - before), (start, end));
+    }
+    (folded, spans)
+}
+
+/// The byte offset `n` characters before `pos` in `s` (or 0).
+fn chars_before(s: &str, pos: usize, n: usize) -> usize {
+    s[..pos]
+        .char_indices()
+        .rev()
+        .nth(n.saturating_sub(1))
+        .map_or(0, |(i, _)| i)
+}
+
+/// The byte offset `n` characters after `pos` in `s` (or `s.len()`).
+fn chars_after(s: &str, pos: usize, n: usize) -> usize {
+    s[pos..]
+        .char_indices()
+        .nth(n)
+        .map_or(s.len(), |(i, _)| pos + i)
+}
+
 fn find_matches(doc: &Document, pattern: &str, page_filter: Option<&PageSpec>) -> Vec<PageMatch> {
     if pattern.is_empty() {
         return Vec::new();
     }
     let pages = doc.get_pages();
-    let lower_pattern = pattern.to_lowercase();
+    let (lower_pattern, _) = fold_case(pattern);
 
     let page_list: Vec<(u32, lopdf::ObjectId)> = if let Some(spec) = page_filter {
         pages
@@ -32,16 +70,21 @@ fn find_matches(doc: &Document, pattern: &str, page_filter: Option<&PageSpec>) -
     for (pn, page_id) in &page_list {
         let result = extract_text_from_page_with_warnings(doc, *page_id);
         let text = &result.text;
-        let lower_text = text.to_lowercase();
+        let (lower_text, spans) = fold_case(text);
 
         let mut snippets = Vec::new();
         let mut search_start = 0;
 
+        // All search offsets live in `lower_text`; `spans` maps a match back
+        // onto `text`, since lowercasing can change a character's byte length
+        // (İ is 2 bytes and folds to 3; ẞ is 3 and folds to 2).
         while let Some(pos) = lower_text[search_start..].find(&lower_pattern) {
-            let abs_pos = search_start + pos;
-            // Extract context: 40 chars each side
-            let ctx_start = text.floor_char_boundary(abs_pos.saturating_sub(40));
-            let ctx_end = text.ceil_char_boundary((abs_pos + pattern.len() + 40).min(text.len()));
+            let lower_start = search_start + pos;
+            let lower_end = lower_start + lower_pattern.len();
+            let match_start = spans[lower_start].0;
+            let match_end = spans[lower_end - 1].1;
+            let ctx_start = chars_before(text, match_start, CONTEXT_CHARS);
+            let ctx_end = chars_after(text, match_end, CONTEXT_CHARS);
             let snippet = text[ctx_start..ctx_end].replace('\n', " ");
             let mut formatted = String::new();
             if ctx_start > 0 {
@@ -52,7 +95,7 @@ fn find_matches(doc: &Document, pattern: &str, page_filter: Option<&PageSpec>) -
                 formatted.push_str("...");
             }
             snippets.push(formatted);
-            search_start = abs_pos + pattern.len();
+            search_start = lower_end;
         }
 
         if !snippets.is_empty() {
@@ -245,6 +288,41 @@ mod tests {
         let v: serde_json::Value = serde_json::from_str(&out).unwrap();
         assert!(v["match_count"].as_u64().unwrap() >= 2);
         assert!(v["pages"].as_array().unwrap().len() >= 2);
+    }
+
+    #[test]
+    fn find_text_case_fold_that_grows_does_not_panic() {
+        // bug-0010: İ (2 bytes) folds to "i\u{307}" (3 bytes).
+        let doc = build_page_doc_with_content("BT (İaİb) Tj ET".as_bytes());
+        let out = output_of(|w| print_find_text(w, &doc, "İ", None));
+        assert!(out.contains("Found \"İ\" 2 times on 1 page"), "{out}");
+    }
+
+    #[test]
+    fn find_text_case_fold_that_shrinks_does_not_panic() {
+        // bug-0010: ẞ (3 bytes) folds to ß (2 bytes).
+        let doc = build_page_doc_with_content("BT (ẞxẞ) Tj ET".as_bytes());
+        let out = output_of(|w| print_find_text(w, &doc, "ẞ", None));
+        assert!(out.contains("Found \"ẞ\" 2 times on 1 page"), "{out}");
+    }
+
+    #[test]
+    fn find_text_snippet_contains_match_after_length_changing_fold() {
+        // bug-0010: offsets in the folded text used to be applied to the
+        // original, so 50 İs before the match pushed the snippet past it.
+        let text = format!("BT ({}needle tail) Tj ET", "İ".repeat(50));
+        let doc = build_page_doc_with_content(text.as_bytes());
+        let v = find_text_json_value(&doc, "needle", None);
+        let snippet = v["pages"][0]["matches"][0].as_str().unwrap();
+        assert!(snippet.contains("needle tail"), "{snippet}");
+        assert!(snippet.starts_with(&format!("...{}", "İ".repeat(CONTEXT_CHARS))));
+    }
+
+    #[test]
+    fn fold_case_maps_each_folded_byte_to_its_source_char() {
+        let (folded, spans) = fold_case("Aİ");
+        assert_eq!(folded, "ai\u{307}");
+        assert_eq!(spans, vec![(0, 1), (1, 3), (1, 3), (1, 3)]);
     }
 
     #[test]
