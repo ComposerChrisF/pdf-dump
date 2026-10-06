@@ -2,6 +2,8 @@
 in*.txt
 out*.txt
 *.pdf
+# Bug evidence is part of the bug and is committed (bug-reports rule 3).
+!bugs/**/*.pdf
 *.ttf
 .publish-bin.toml
 .install-bin.toml
