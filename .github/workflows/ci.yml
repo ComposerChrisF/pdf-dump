@@ -43,3 +43,53 @@ jobs:
         with:
           toolchain: "1.91.0"
       - run: cargo check
+
+  # A static Linux binary for the KCS server, whose ai@ mail gate reads PDF
+  # attachments with pdf-dump (Obsidian-Brain plan-0014).  Same treatment as
+  # eml-tool's linux-binary job: download the artifact, never build on the box.
+  linux-binary:
+    name: linux binary (musl, static)
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Install Rust toolchain (musl target)
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: x86_64-unknown-linux-musl
+
+      - name: Install musl-tools
+        run: sudo apt-get update && sudo apt-get install -y --no-install-recommends musl-tools
+
+      - name: Cache cargo registry + target
+        uses: actions/cache@v5
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: cargo-musl-${{ hashFiles('Cargo.lock') }}
+          restore-keys: |
+            cargo-musl-
+
+      - name: cargo build (release, musl)
+        run: cargo build --release --target x86_64-unknown-linux-musl
+
+      # A dynamically-linked binary would defeat the artifact's purpose
+      # and fail only at deploy time — assert static before uploading.
+      - name: Assert the binary is static
+        run: |
+          file target/x86_64-unknown-linux-musl/release/pdf-dump
+          if ldd target/x86_64-unknown-linux-musl/release/pdf-dump 2>&1 | grep -vq "not a dynamic executable\|statically linked"; then
+            echo "expected a static binary; ldd says otherwise" >&2
+            exit 1
+          fi
+
+      - name: Upload pdf-dump (linux musl) artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: pdf-dump-linux-x86_64-musl
+          path: target/x86_64-unknown-linux-musl/release/pdf-dump
+          if-no-files-found: error
+
