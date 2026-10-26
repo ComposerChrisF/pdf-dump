@@ -48,6 +48,10 @@ pdf-dump f.pdf --extract-image 12 --output page1-img.png
 - Pin each colour space and filter with a fixture PDF, and assert the decoded pixels, not only the exit code.
 - **Exit codes,** per the portfolio table: 0 written; 1 not an image, not present, or not convertible (each named); 2 a malformed argument.
 
+## Not in This Plan
+
+**Rendering a page.**  The KCS check reads an image as stored, so a scan stored upside down, and turned upright by the page, OCRs to noise.  Chris accepted that gap for now (25-Oct-2026, Obsidian-Brain ask 0022, B), until pdf-dump can render a page as it is shown.  That is a rasterizer, a far larger change than exporting an image, and a plan of its own when it is wanted.
+
 ## Why Not a Workaround
 
 Decoding PDF image formats is PDF knowledge, which is pdf-dump’s domain: palettes, CMYK, decode arrays, fax and JBIG2.  A script in the caller would duplicate it beside the tool, and drift from it.  The KCS check wraps only the two formats that need no PDF knowledge, 8-bit grey and RGB, in a one-line image header; everything else waits for this plan, and is held for a reviewer meanwhile.
