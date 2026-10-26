@@ -18,6 +18,10 @@ A caller that wants to look at the image, or OCR it, must therefore know the wid
 
 So today the KCS check (Obsidian-Brain `webapp/deploy/kcs-mail/mailgate.py`) can OCR only JPEGs and 8-bit grey or RGB images.  It holds any other file for a reviewer, as unreadable.  That is correct, since a file it could not read must not pass as clean, but it holds every PDF that carries, say, a palette logo or a fax-coded scan.
 
+Two more gaps surfaced in the review of that check (25-Oct-2026):
+- **Predictors are not undone.**  `--extract-stream` leaves a PNG predictor’s row-tag bytes in place, so 8×8 samples come out as 72 bytes, not 64.  A TIFF predictor (`/Predictor 2`) leaves horizontal differences of exactly the right length.  So a caller cannot tell a predicted image from a plain one by its length.  The check now refuses any `/Predictor` other than 1, and any `/Decode` array, reading them from `--object N --json`.
+- **Inline images (`BI … ID … EI`) are not listed** by `--images`, and have no object number to extract.  The check finds them with `--search 'regex=(?s)(^|\s)BI\s.*?\sID\s'`, which also reaches form XObjects, and holds the file.
+
 ## Proposed Change
 
 A mode that writes one image XObject as a file an ordinary viewer or OCR engine opens:
@@ -35,6 +39,8 @@ pdf-dump f.pdf --extract-image 12 --output page1-img.png
 - **Fax and JBIG2:** `CCITTFaxDecode` is decoded (a crate exists, or it is a modest decoder); `JBIG2Decode` is decoded if a maintained crate allows, else refused.
 - **A refusal is loud and specific:** a filter or colour space it cannot convert exits **1**, naming what it is.  It never writes a partial or wrong image, and never exits 0 with nothing written.
 - **`--json`** reports the written path, the format, the pixel size and the source colour space and filter.
+- **Predictors and `/Decode`** are applied, so the written image is the picture as drawn.
+- **Inline images** are listed by `--images`, with their page and position in the content stream, and can be exported the same way, addressed by page and index rather than object number.
 
 ## Implementation Notes
 
