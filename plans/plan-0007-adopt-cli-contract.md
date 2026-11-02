@@ -16,7 +16,7 @@ Depend on `cli-contract = "0.6"` from crates.io, with no `path`.  Then:
 
 - **Exit codes:** `cli_contract::{OK, TOOL_ERROR, USAGE, FINDINGS}` in place of the literals.  pdf-dump’s own exit table in `after_long_help` (`src/types.rs:94`) stays, since it says what each code means in pdf-dump’s terms.  Check it against `cli_contract::HELP_BLOCK` so that the two cannot disagree.
 - **BrokenPipe:** every pdf-dump mode is read-only, which is the case `cli_contract::reset_sigpipe()` exists for: call it once in `run`, and the macros reduce to a plain `writeln!` with the non-pipe error path.  Or keep the macros and have them use `cli_contract::is_broken_pipe`.  Either way, a `pdf-dump … | head -1` test pins exit 0 and an empty stderr.
-- **`--extract-stream --output`:** run `cli_contract::check_output_file` before the document is loaded, and `prepare_output_file` before the write.  Whether an existing file is overwritten (`Clobber::Allow`, today’s behavior) or refused (`Clobber::Deny`, or behind a flag) is the one contract decision in this plan; it is Chris’s.
+- **`--extract-stream --output`:** run `cli_contract::check_output_file` before the document is loaded, and `prepare_output_file` before the write, both with `Clobber::Allow`: an existing file is overwritten, today’s behavior.  Chris ruled this on 2-Nov-2026.  The file is named explicitly on the command line, which is when tools commonly replace without asking, and a stream can always be extracted again.
 
 ## Implementation Notes
 
