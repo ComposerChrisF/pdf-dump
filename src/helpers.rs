@@ -1,3 +1,4 @@
+use lopdf::xref::XrefEntry;
 use lopdf::{Document, Object, ObjectId};
 use serde_json::Value;
 use std::collections::BTreeSet;
@@ -312,6 +313,49 @@ pub(crate) fn page_content_ids(doc: &Document, page: &lopdf::Dictionary) -> Opti
     }
 }
 
+/// The object a number on the command line means: its only generation, or, with several, the one
+/// the cross-reference table says is live.  A freed and reused number can leave a stale copy at
+/// generation 0 beside the live object, so generation 0 is not to be assumed (bug-0020).  `Err` says
+/// why there is no such object, naming the generations when they are the reason.
+pub(crate) fn find_object(doc: &Document, num: u32) -> Result<(ObjectId, &Object), String> {
+    let generations: Vec<u16> = doc
+        .objects
+        .range((num, 0)..=(num, u16::MAX))
+        .map(|(&(_, generation), _)| generation)
+        .collect();
+    let live = match doc.reference_table.entries.get(&num) {
+        Some(XrefEntry::Normal { generation, .. }) => Some(*generation),
+        Some(XrefEntry::Compressed { .. }) => Some(0),
+        _ => None,
+    };
+    let generation = match generations.as_slice() {
+        [] => return Err(format!("Object {num} not found.")),
+        [only] => *only,
+        several => match live.filter(|g| several.contains(g)) {
+            Some(live) => live,
+            None => {
+                let list: Vec<String> = several.iter().map(u16::to_string).collect();
+                return Err(format!(
+                    "Object {num} has generations {}, and nothing says which is live.",
+                    list.join(", ")
+                ));
+            }
+        },
+    };
+    let id = (num, generation);
+    doc.get_object(id)
+        .map(|object| (id, object))
+        .map_err(|_| format!("Object {num} {generation} is a reference that cannot be followed."))
+}
+
+/// An object as a message names it, with its generation when that is not the usual 0.
+pub(crate) fn object_label(id: ObjectId) -> String {
+    match id {
+        (num, 0) => format!("object {num}"),
+        (num, generation) => format!("object {num} generation {generation}"),
+    }
+}
+
 /// Decoded content stream bytes and any warnings encountered during decoding.
 pub(crate) struct ContentStreamData {
     pub bytes: Vec<u8>,
@@ -399,6 +443,43 @@ mod tests {
     use lopdf::Object;
     use lopdf::{Dictionary, Stream, StringFormat};
     use pretty_assertions::assert_eq;
+
+    #[test]
+    fn a_number_means_its_only_generation_or_the_live_one() {
+        let mut doc = lopdf::Document::new();
+        doc.objects.insert((5, 0), Object::Integer(1));
+        doc.objects.insert((7, 1), Object::Integer(3));
+        doc.objects.insert((8, 1), Object::Integer(4));
+        doc.objects.insert((8, 2), Object::Integer(5));
+        doc.objects.insert((6, 0), Object::Integer(6));
+        doc.objects.insert((6, 1), Object::Integer(7));
+        doc.objects.insert((4, 0), Object::Reference((99, 0)));
+        let id = |doc: &lopdf::Document, n| find_object(doc, n).map(|(id, _)| id);
+        assert_eq!(id(&doc, 5), Ok((5, 0)));
+        assert_eq!(id(&doc, 7), Ok((7, 1)));
+        assert_eq!(id(&doc, 9), Err("Object 9 not found.".to_string()));
+        assert!(id(&doc, 8).unwrap_err().contains("generations 1, 2"));
+        assert!(id(&doc, 6).unwrap_err().contains("generations 0, 1"));
+        assert!(id(&doc, 4).unwrap_err().contains("cannot be followed"));
+
+        doc.reference_table.entries.insert(
+            6,
+            XrefEntry::Normal {
+                offset: 0,
+                generation: 1,
+            },
+        );
+        assert_eq!(id(&doc, 6), Ok((6, 1)));
+        // A table naming a generation that is not there settles nothing.
+        doc.reference_table.entries.insert(
+            8,
+            XrefEntry::Normal {
+                offset: 0,
+                generation: 5,
+            },
+        );
+        assert!(id(&doc, 8).is_err());
+    }
 
     #[test]
     fn build_page_list_huge_range_stops_at_the_first_absent_page() {

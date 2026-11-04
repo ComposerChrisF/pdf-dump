@@ -47,4 +47,4 @@ Showing the object’s own stored value (a reference) rather than its dereferenc
 structure dumper must do, and it makes the object-display modes agree with `--list`.
 
 ## Related
-[[bug-0020-object-generation-not-addressable]] (both concern faithful object addressing/display).
+bug-0020 (fixed in the commit that names it; it too concerned faithful object addressing).

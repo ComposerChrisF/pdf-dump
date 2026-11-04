@@ -321,9 +321,8 @@ fn dispatch_standalone(
             obj_num,
             ref output,
         } => {
-            let object_id = (obj_num, 0);
-            match doc.get_object(object_id) {
-                Ok(Object::Stream(s)) => {
+            match helpers::find_object(doc, obj_num) {
+                Ok((object_id, Object::Stream(s))) => {
                     let (decoded_content, warning) = stream::decode_stream(doc, s);
                     if let Some(warn) = &warning {
                         eprintln!("Warning: {}", warn);
@@ -342,21 +341,21 @@ fn dispatch_standalone(
                     }
                     wln!(
                         out,
-                        "Successfully extracted object {} to '{}'.",
-                        obj_num,
+                        "Successfully extracted {} to '{}'.",
+                        helpers::object_label(object_id),
                         output.display()
                     );
                     false
                 }
-                Ok(_) => {
+                Ok((_, _)) => {
                     eprintln!(
                         "Error: Object {} is not a stream and cannot be extracted to a file.",
                         obj_num
                     );
                     std::process::exit(TOOL_ERROR.into());
                 }
-                Err(_) => {
-                    eprintln!("Error: Object {} not found in the document.", obj_num);
+                Err(reason) => {
+                    eprintln!("Error: {reason}");
                     std::process::exit(TOOL_ERROR.into());
                 }
             }
@@ -365,17 +364,17 @@ fn dispatch_standalone(
             obj_num,
             ref output,
         } => {
-            let stream = match doc.get_object((obj_num, 0)) {
-                Ok(Object::Stream(s)) => s,
+            let (object_id, stream) = match helpers::find_object(doc, obj_num) {
+                Ok((id, Object::Stream(s))) => (id, s),
                 Ok(_) => tool_error(format!(
                     "Object {obj_num} is not an image: it is not a stream."
                 )),
-                Err(_) => tool_error(format!("Object {obj_num} not found in the document.")),
+                Err(reason) => tool_error(reason),
             };
             // Whatever --images lists can be exported: an image, or a mask with no /Subtype.
             if !images::collect_images(doc)
                 .iter()
-                .any(|i| i.object_id == (obj_num, 0))
+                .any(|i| i.object_id == object_id)
             {
                 tool_error(format!(
                     "Object {obj_num} is not an image: its /Subtype is not /Image."
@@ -387,8 +386,17 @@ fn dispatch_standalone(
                 resources: None,
                 inline: false,
             };
-            let what = format!("object {obj_num}");
-            write_exported_image(out, doc, &source, output, &what, config, recovery);
+            let what = helpers::object_label(object_id);
+            write_exported_image(
+                out,
+                doc,
+                &source,
+                output,
+                &what,
+                Some(object_id),
+                config,
+                recovery,
+            );
             false
         }
         StandaloneMode::ExtractInlineImage {
@@ -428,6 +436,7 @@ fn dispatch_standalone(
                 &image.as_source(),
                 output,
                 &what,
+                None,
                 config,
                 recovery,
             );
@@ -496,12 +505,14 @@ fn tool_error(message: String) -> ! {
 }
 
 /// Exports one image and writes it.  A refusal names what stopped it, and nothing is written.
+#[allow(clippy::too_many_arguments)]
 fn write_exported_image(
     out: &mut impl Write,
     doc: &Document,
     source: &ImageSource,
     output: &std::path::Path,
     what: &str,
+    object: Option<lopdf::ObjectId>,
     config: &DumpConfig,
     recovery: Option<&Value>,
 ) {
@@ -534,6 +545,8 @@ fn write_exported_image(
         print_json_with_recovery(
             out,
             json!({
+                "object_number": object.map(|id| id.0),
+                "generation": object.map(|id| id.1),
                 "path": output.display().to_string(),
                 "format": image.format.name(),
                 "width": image.width,

@@ -1139,7 +1139,7 @@ fn object_missing_json_exits_1_and_names_the_object() {
     assert_eq!(output.status.code(), Some(1));
     let v: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
     assert_eq!(v["object_number"], 9999);
-    assert_eq!(v["generation"], 0);
+    assert_eq!(v.get("generation"), None);
     assert!(v["error"].as_str().unwrap().contains("not found"));
 }
 
@@ -1170,7 +1170,7 @@ fn inspect_missing_object_json_exits_1() {
     let output = run_args(&pdf, &["--inspect", "9999", "--json"]);
     assert_eq!(output.status.code(), Some(1));
     let v: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
-    assert_eq!(v["error"], "not found");
+    assert_eq!(v["error"], "Object 9999 not found.");
 }
 
 #[test]
@@ -4222,4 +4222,85 @@ fn validate_reads_a_pages_streams_as_one() {
         !String::from_utf8_lossy(&validate.stdout).contains("invalid syntax"),
         "{validate:?}"
     );
+}
+
+/// bug-0020: a listed object is reachable, whatever its generation.
+#[test]
+fn an_object_at_another_generation_is_reachable() {
+    let mut doc = Document::with_version("1.7");
+    let catalog = doc.add_object(Dictionary::from_iter(vec![(
+        "Type",
+        Object::Name(b"Catalog".to_vec()),
+    )]));
+    doc.trailer.set("Root", Object::Reference(catalog));
+    let image = Dictionary::from_iter(vec![
+        ("Type", Object::Name(b"XObject".to_vec())),
+        ("Subtype", Object::Name(b"Image".to_vec())),
+        ("Width", Object::Integer(1)),
+        ("Height", Object::Integer(1)),
+        ("BitsPerComponent", Object::Integer(8)),
+        ("ColorSpace", Object::Name(b"DeviceGray".to_vec())),
+    ]);
+    doc.objects
+        .insert((7, 1), Object::Stream(Stream::new(image, vec![127])));
+    let tmp = tempfile::NamedTempFile::new().unwrap();
+    doc.save(tmp.path()).unwrap();
+
+    let list = String::from_utf8_lossy(&run_args(&tmp, &["--list"]).stdout).into_owned();
+    assert!(
+        list.contains("7    1  Stream"),
+        "the fixture lost its generation: {list}"
+    );
+
+    let object = run_args(&tmp, &["--object", "7"]);
+    assert_eq!(object.status.code(), Some(0), "{object:?}");
+    assert!(String::from_utf8_lossy(&object.stdout).contains("Object 7 1 ("));
+
+    let json = run_args(&tmp, &["--object", "7", "--json"]);
+    let value: serde_json::Value = serde_json::from_slice(&json.stdout).unwrap();
+    assert_eq!(value["generation"], 1);
+
+    let range = run_args(&tmp, &["--object", "7-8"]);
+    assert_eq!(range.status.code(), Some(0), "{range:?}");
+    assert!(String::from_utf8_lossy(&range.stdout).contains("Object 7 1 ("));
+
+    let inspect = run_args(&tmp, &["--inspect", "7", "--json"]);
+    assert_eq!(inspect.status.code(), Some(0), "{inspect:?}");
+    let value: serde_json::Value = serde_json::from_slice(&inspect.stdout).unwrap();
+    assert_eq!(value["generation"], 1);
+
+    let inspect = run_args(&tmp, &["--inspect", "7"]);
+    assert_eq!(inspect.status.code(), Some(0), "{inspect:?}");
+    assert!(String::from_utf8_lossy(&inspect.stdout).contains("Object 7 1 ("));
+
+    let range = run_args(&tmp, &["--object", "1,7", "--json"]);
+    let value: serde_json::Value = serde_json::from_slice(&range.stdout).unwrap();
+    assert_eq!(value["objects"][1]["generation"], 1);
+
+    let out = tempfile::Builder::new().suffix(".bin").tempfile().unwrap();
+    let extract = run_args(
+        &tmp,
+        &[
+            "--extract-stream",
+            "7",
+            "--output",
+            out.path().to_str().unwrap(),
+        ],
+    );
+    assert_eq!(extract.status.code(), Some(0), "{extract:?}");
+    assert_eq!(std::fs::read(out.path()).unwrap(), [127]);
+
+    let png = tempfile::Builder::new().suffix(".png").tempfile().unwrap();
+    let export = run_args(
+        &tmp,
+        &[
+            "--extract-image",
+            "7",
+            "--output",
+            png.path().to_str().unwrap(),
+        ],
+    );
+    assert_eq!(export.status.code(), Some(0), "{export:?}");
+    assert!(String::from_utf8_lossy(&export.stdout).contains("object 7 generation 1"));
+    assert!(String::from_utf8_lossy(&extract.stdout).contains("object 7 generation 1"));
 }

@@ -5,6 +5,17 @@ All notable changes to `pdf-dump` are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0/).
 
+## [0.31.6] - 2026-11-04
+### Fixed
+- **An object at a generation other than 0 can be reached, and the live one is what a number
+  means.**  `--list` and `--search` showed such an object, while `--object`, `--inspect`,
+  `--extract-stream` and `--extract-image` said it was not there.  And on a number freed
+  and reused, they showed the stale copy at generation 0 with exit 0, while the page used
+  the live one.  A number now means its only generation, or, with several, the one the
+  cross-reference table says is live, and the output names it.  If nothing says which, it
+  exits 1 naming them, in a range too.  In `--json`, an `error` entry has no `generation`
+  key.  (bug-0020)
+
 ## [0.31.5] - 2026-11-04
 ### Added
 - `DEBUGGING_WITH_PDF_DUMP.md` § What pdf-dump does not read gathers the limits, and adds

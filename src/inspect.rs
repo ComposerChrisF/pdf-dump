@@ -5,7 +5,7 @@ use std::io::Write;
 
 #[cfg(test)]
 use crate::helpers::json_pretty;
-use crate::helpers::{format_color_space, format_dict_value, format_filter};
+use crate::helpers::{find_object, format_color_space, format_dict_value, format_filter};
 use crate::object::{deref_summary, object_header_label, object_to_json, print_object};
 use crate::refs::{
     collect_forward_refs_json, collect_references_in_object, collect_refs_with_paths,
@@ -79,9 +79,10 @@ pub(crate) fn classify_object(
                 };
             }
             Some("Page") => {
+                let target = find_object(doc, obj_num).ok().map(|(id, _)| id);
                 let page_num = pages
                     .iter()
-                    .find(|(_, id)| **id == (obj_num, 0))
+                    .find(|(_, id)| Some(**id) == target)
                     .map(|(n, _)| *n);
                 let mut details = Vec::new();
                 if let Some(n) = page_num {
@@ -487,7 +488,9 @@ pub(crate) fn find_page_associations(
     obj_num: u32,
     pages: &BTreeMap<u32, ObjectId>,
 ) -> Vec<u32> {
-    let target_id: ObjectId = (obj_num, 0); // Generation 0 assumed — tool convention
+    let Ok((target_id, _)) = find_object(doc, obj_num) else {
+        return Vec::new();
+    };
     let mut result = Vec::new();
 
     for (&page_num, &page_id) in pages {
@@ -520,11 +523,10 @@ pub(crate) fn find_page_associations(
 }
 
 pub(crate) fn print_info(writer: &mut impl Write, doc: &Document, obj_num: u32) {
-    let obj_id = (obj_num, 0); // Generation 0 assumed — tool convention
-    let object = match doc.get_object(obj_id) {
-        Ok(obj) => obj,
-        Err(_) => {
-            eprintln!("Error: Object {} not found.", obj_num);
+    let (obj_id, object) = match find_object(doc, obj_num) {
+        Ok(found) => found,
+        Err(reason) => {
+            eprintln!("Error: {reason}");
             return;
         }
     };
@@ -562,8 +564,9 @@ pub(crate) fn print_info(writer: &mut impl Write, doc: &Document, obj_num: u32) 
     };
     wln!(
         writer,
-        "\nObject {} 0 ({}):",
+        "\nObject {} {} ({}):",
         obj_num,
+        obj_id.1,
         object_header_label(object)
     );
     let visited = BTreeSet::new();
@@ -604,7 +607,7 @@ pub(crate) fn print_info(writer: &mut impl Write, doc: &Document, obj_num: u32) 
     }
 
     // Reverse references
-    let rev_refs = collect_reverse_refs(doc, (obj_num, 0));
+    let rev_refs = collect_reverse_refs(doc, obj_id);
     wln!(writer, "\nReferenced by:");
     if rev_refs.is_empty() {
         wln!(writer, "  (none)");
@@ -638,13 +641,12 @@ pub(crate) fn print_info_json(
 }
 
 pub(crate) fn inspect_json_value(doc: &Document, obj_num: u32, config: &DumpConfig) -> Value {
-    let obj_id = (obj_num, 0); // Generation 0 assumed — tool convention
-    let object = match doc.get_object(obj_id) {
-        Ok(obj) => obj,
-        Err(_) => {
+    let (obj_id, object) = match find_object(doc, obj_num) {
+        Ok(found) => found,
+        Err(reason) => {
             return json!({
                 "object_number": obj_num,
-                "error": "not found",
+                "error": reason,
             });
         }
     };
@@ -662,7 +664,7 @@ pub(crate) fn inspect_json_value(doc: &Document, obj_num: u32, config: &DumpConf
         raw: false,
     };
     let refs_to = collect_forward_refs_json(doc, object);
-    let referenced_by = reverse_refs_to_json(&collect_reverse_refs(doc, (obj_num, 0)));
+    let referenced_by = reverse_refs_to_json(&collect_reverse_refs(doc, obj_id));
     let page_assoc = find_page_associations(doc, obj_num, &pages);
 
     let details_map: serde_json::Map<String, Value> = cls
@@ -673,7 +675,7 @@ pub(crate) fn inspect_json_value(doc: &Document, obj_num: u32, config: &DumpConf
 
     let output = json!({
         "object_number": obj_num,
-        "generation": 0,
+        "generation": obj_id.1,
         "role": cls.role,
         "description": cls.description,
         "kind": object.enum_variant(),
@@ -1825,7 +1827,7 @@ mod tests {
         let out = output_of(|w| print_info_json(w, &doc, 999, &config));
         let val: Value = serde_json::from_str(&out).unwrap();
         assert_eq!(val["object_number"], 999);
-        assert_eq!(val["error"], "not found");
+        assert_eq!(val["error"], "Object 999 not found.");
     }
 
     #[test]

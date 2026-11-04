@@ -6,7 +6,7 @@ use std::io::Write;
 
 #[cfg(test)]
 use crate::helpers::json_pretty;
-use crate::helpers::{format_dict_value, format_operation, object_type_label};
+use crate::helpers::{find_object, format_dict_value, format_operation, object_type_label};
 use crate::stream::{decode_stream, format_hex_dump, get_filter_names, is_binary_stream};
 use crate::types::{DumpConfig, ObjectSpec};
 
@@ -319,13 +319,13 @@ pub(crate) fn print_single_object(
     obj_num: u32,
     config: &DumpConfig,
 ) {
-    let obj_id = (obj_num, 0);
-    match doc.get_object(obj_id) {
-        Ok(object) => {
+    match find_object(doc, obj_num) {
+        Ok((obj_id, object)) => {
             wln!(
                 writer,
-                "Object {} 0 ({}):",
+                "Object {} {} ({}):",
                 obj_num,
+                obj_id.1,
                 object_header_label(object)
             );
             let visited = BTreeSet::new();
@@ -342,8 +342,8 @@ pub(crate) fn print_single_object(
             );
             wln!(writer);
         }
-        Err(_) => {
-            eprintln!("Error: Object {} not found.", obj_num);
+        Err(reason) => {
+            eprintln!("Error: {reason}");
         }
     }
 }
@@ -376,11 +376,11 @@ pub(crate) fn print_objects_json(
     );
 }
 
-/// The requested object numbers (generation 0) the document does not contain.
+/// The requested object numbers the document does not contain.
 pub(crate) fn missing_objects(doc: &Document, nums: &[u32]) -> Vec<u32> {
     nums.iter()
         .copied()
-        .filter(|&n| doc.get_object((n, 0)).is_err())
+        .filter(|&n| find_object(doc, n).is_err())
         .collect()
 }
 
@@ -404,7 +404,6 @@ pub(crate) fn resolve_object_spec(doc: &Document, spec: &ObjectSpec) -> ObjectSe
         let mut present = doc
             .objects
             .range((start, 0)..=(end, u16::MAX))
-            .filter(|((_, generation), _)| *generation == 0)
             .map(|(&(num, _), _)| num)
             .peekable();
         if present.peek().is_none() {
@@ -446,18 +445,7 @@ pub(crate) fn selection_json_value(
 pub(crate) fn objects_json_value(doc: &Document, nums: &[u32], config: &DumpConfig) -> Value {
     if nums.len() == 1 {
         let obj_num = nums[0];
-        match doc.get_object((obj_num, 0)) {
-            Ok(object) => json!({
-                "object_number": obj_num,
-                "generation": 0,
-                "object": object_to_json(object, doc, config),
-            }),
-            Err(_) => json!({
-                "object_number": obj_num,
-                "generation": 0,
-                "error": format!("Object {} not found.", obj_num),
-            }),
-        }
+        object_json_entry(doc, obj_num, config)
     } else {
         json!({"objects": object_list_items(doc, nums, config)})
     }
@@ -465,27 +453,24 @@ pub(crate) fn objects_json_value(doc: &Document, nums: &[u32], config: &DumpConf
 
 /// One `{"objects": [...]}` entry per number, with an `error` for any missing.
 fn object_list_items(doc: &Document, nums: &[u32], config: &DumpConfig) -> Vec<Value> {
-    let mut items = Vec::new();
-    for &obj_num in nums {
-        let obj_id = (obj_num, 0);
-        match doc.get_object(obj_id) {
-            Ok(object) => {
-                items.push(json!({
-                    "object_number": obj_num,
-                    "generation": 0,
-                    "object": object_to_json(object, doc, config),
-                }));
-            }
-            Err(_) => {
-                items.push(json!({
-                    "object_number": obj_num,
-                    "generation": 0,
-                    "error": "not found",
-                }));
-            }
-        }
+    nums.iter()
+        .map(|&obj_num| object_json_entry(doc, obj_num, config))
+        .collect()
+}
+
+/// One object's JSON, or an `error` saying why there is none.
+fn object_json_entry(doc: &Document, obj_num: u32, config: &DumpConfig) -> Value {
+    match find_object(doc, obj_num) {
+        Ok((obj_id, object)) => json!({
+            "object_number": obj_num,
+            "generation": obj_id.1,
+            "object": object_to_json(object, doc, config),
+        }),
+        Err(reason) => json!({
+            "object_number": obj_num,
+            "error": reason,
+        }),
     }
-    items
 }
 
 // ── JSON output (Phase 1) ────────────────────────────────────────────
@@ -2452,11 +2437,14 @@ mod tests {
     }
 
     #[test]
-    fn resolve_range_ignores_nonzero_generations() {
+    fn resolve_range_counts_every_generation() {
         let mut doc = doc_with_objects(&[]);
         doc.objects.insert((4, 1), Object::Null);
+        doc.objects.insert((4, 2), Object::Null);
         let spec = crate::types::parse_object_spec("3-5").unwrap();
-        assert_eq!(resolve_object_spec(&doc, &spec).empty_ranges, vec![(3, 5)]);
+        let selection = resolve_object_spec(&doc, &spec);
+        assert!(selection.empty_ranges.is_empty());
+        assert_eq!(selection.nums, vec![4]);
     }
 
     #[test]
@@ -2496,7 +2484,7 @@ mod tests {
         let out = output_of(|w| print_objects_json(w, &doc, &[1, 99], &config));
         let parsed: Value = serde_json::from_str(&out).unwrap();
         let objs = parsed["objects"].as_array().unwrap();
-        assert_eq!(objs[1]["error"].as_str().unwrap(), "not found");
+        assert_eq!(objs[1]["error"].as_str().unwrap(), "Object 99 not found.");
     }
 
     #[test]

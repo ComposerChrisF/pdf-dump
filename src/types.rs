@@ -166,7 +166,8 @@ Exit codes:
       document lacks (a caller-claim/world mismatch): --page beyond the end
       (naming the real count), or an --object, --inspect, --extract-stream or
       --extract-image object, or an --extract-inline-image page or index, that
-      is not there, or an image export that cannot be done: not an image, a
+      is not there, or that has several generations with nothing to say which is
+      live (even in a range), or an image export that cannot be done: not an image, a
       filter or colour space it cannot convert, data that will not decode, or
       an output named for another format than the image is written in.  Nothing
       is written then.  With --object, an explicit number that is
@@ -251,7 +252,8 @@ pub(crate) struct Args {
 
     // ── Objects ──────────────────────────────────────────────────────
     /// Print one or more objects by number (e.g. 5, 1,5,12, 3-7, 1,5,10-15).
-    /// A range prints the objects present in it; gaps are skipped
+    /// A range prints the objects present in it; gaps are skipped.  A number means its only
+    /// generation, or the one the cross-reference table says is live
     #[arg(short = 'o', long, help_heading = "Objects")]
     pub object: Option<String>,
 

@@ -76,7 +76,7 @@ Broken references, unreachable objects, missing required keys (`/MediaBox`, `/Pa
 | Catalog | `/Pages`, `/AcroForm`, `/Outlines`, `/Names`, `/OCProperties`, `/StructTreeRoot`, `/PageLabels` | Document-level structures |
 | Page | `/MediaBox`, `/Contents`, `/Resources`, `/Annots` | Dimensions, drawing instructions, fonts/images, annotations |
 | Content stream | `BT`/`ET`, `Tf`, `Tj`/`TJ`, `Td`, `Do` | Drawing operators (text, graphics, images) |
-| Objects | `N G R` (e.g. `5 0 R`) | Numbered; generation usually 0; pdf-dump assumes gen 0 for all CLI args |
+| Objects | `N G R` (e.g. `5 0 R`) | Numbered; generation usually 0.  A number on the command line means the object’s only generation, or, with several, the one the cross-reference table says is live, and the output names it.  If nothing says which, it exits 1 naming them, in a range too |
 
 Object types: null, boolean, integer, real, name (`/Type`), string (`(Hello)`), array, dictionary, stream (dict + bytes), reference.
 
@@ -156,7 +156,7 @@ When a content stream declares a wrong `/Length`, a strict parser drops its body
 - `inline_image_warnings` names anything that could not be walked: a stream that would not decode, nesting too deep, an inline image with no `EI` or whose end had to be guessed, a page tree declaring more pages than could be walked, or a scan stopped after 1 GiB of decoded content.  Any of them makes the run exit **3**, since each is a place an image may be.
 
 **Extract image** (`--extract-image N --output f --json`, `--extract-inline-image PAGE:INDEX --output f --json`):
-`{path, format, width, height, color_space, bits_per_component, filter, mask, mask_applied}`
+`{object_number, generation, path, format, width, height, color_space, bits_per_component, filter, mask, mask_applied}`, the first two `null` for an inline image
 
 `width` and `height` are the file's pixels, which a mask larger than its image raises.  For a JPEG they are checked against its frame; for a JPEG 2000 they are the dictionary's.  `mask` is `none`, `smask`, `explicit` or `color_key`.  `mask_applied` is false only for a JPEG or JPEG 2000 written as it is, which also warns on stderr, and exits 0: the picture as drawn needs that mask, so a caller reading the file must read the mask too, which `--images` lists as an image of its own.
 

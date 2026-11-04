@@ -25,8 +25,6 @@ contract violation · **[MED]** correctness/robustness on unusual input · **[LO
 These need a decision from Chris; the report lists the options and a recommendation.  Do the
 decision here, then implement in the phase noted. **Do not just “fix the code”.**
 
-- [ ] **bug-0020** [MED] Object generation not addressable (fallback lookup vs a `--object N:G`
-      syntax?).  Gates Phase 3 fix. `bugs/bug-0020-object-generation-not-addressable.md`
 - [ ] **bug-0033** [MED] UTF-16BE / non-UTF-8 text strings mishandled in display + search (decode
       per spec, and/or lossless byte fallback — scope?).  Narrowed by v0.30.0: only `--object`,
       `--inspect` and `--search` remain.  Gates Phase 2 fix.
@@ -86,8 +84,6 @@ decision here, then implement in the phase noted. **Do not just “fix the code�
       `bugs/bug-0027-reverse-refs-skip-trailer.md`
 - [ ] **bug-0035** [MED] `--validate` false positive: every `/Type /ObjStm` flagged “unreachable”
       (extend the XRef-stream skip). `bugs/bug-0035-validate-objstm-false-positive.md`
-- [ ] **bug-0020** [MED] (code fix, after Phase 0 decision) Address objects by their real
-      generation. `bugs/bug-0020-object-generation-not-addressable.md`
 - [ ] **bug-0032** [MED] `--strict` (and default recovery) silently skip on a re-read I/O error →
       exit 0 on a malformed file.  Report + non-zero. `bugs/bug-0032-strict-reread-error-silently-ignored.md`
 - [ ] **bug-0016** [LOW] `--inspect --deref` honored in JSON, ignored in text. `bugs/bug-0016-inspect-deref-ignored-in-text-mode.md`
