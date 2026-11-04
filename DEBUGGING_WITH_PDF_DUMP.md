@@ -123,7 +123,7 @@ Add `--json` to any mode.  All schemas below show the structure of a single mode
 **Text** (`--text --json`):
 `{pages: [{page_number, text, warnings?: [str]}], reliability: {verdict: "reliable"|"degraded"|"unreliable", total_codes, unmapped_codes, unmapped_ratio, fonts: [{name, base_font, subtype, classification, has_to_unicode, reason}]}}`
 
-Text extraction is font-aware: show-strings are decoded through each font’s `/ToUnicode` CMap (the fix for CID/Type0 mojibake) and through WinAnsiEncoding/MacRomanEncoding tables for simple fonts lacking ToUnicode; undecodable fonts fall back to raw byte passthrough.  A loud reliability banner prints to **stderr** (stdout stays clean for piping) when a document is not fully reliable, and `--text` exits **3** whenever the verdict is not `reliable`: `unreliable` (a CID/Type0 font with no ToUnicode map) or `degraded` (partly-known encoding, or more than 20 % of shown codes undecodable).  The text is still printed and `--json` still emits on exit 3.  Through v0.24.x only `unreliable` exited 3.
+Text extraction is font-aware: show-strings are decoded through each font’s `/ToUnicode` CMap (the fix for CID/Type0 mojibake) and through WinAnsiEncoding/MacRomanEncoding tables for simple fonts lacking ToUnicode; undecodable fonts fall back to raw byte passthrough.  A loud reliability banner prints to **stderr** (stdout stays clean for piping) when a document is not fully reliable, and `--text` exits **3** whenever the verdict is not `reliable`: `unreliable` (a CID/Type0 font with no ToUnicode map) or `degraded` (partly-known encoding, more than 20 % of shown codes undecodable, or a content stream not read to its end).  The text is still printed and `--json` still emits on exit 3.  Through v0.24.x only `unreliable` exited 3.
 
 **Recovery** (any mode, `--json`, present only when a malformed stream was found):
 `{repaired: bool, strict: bool, count: N, streams: [{object, generation, file_offset, declared_length: int|null, actual_length}]}`
@@ -228,7 +228,7 @@ Unsupported (reported as warnings, decoding stops): DCTDecode, JPXDecode, JBIG2D
 
 ## Exporting images
 
-`--extract-image` writes the picture as drawn:
+`--extract-image` writes the picture as drawn, in its stored orientation: the page's rotation and the image's placement are not applied, so a scan stored upside down comes out upside down.
 
 - **PNG for decoded pixels; the stream as it is for DCTDecode (`.jpg`, `.jpeg`) and JPXDecode (`.jp2`).**  Filters before them are undone.
 - **Exit codes.**  An extension that is none of those is **2**, wrong whatever the document holds.  An extension for another format than this image is written in is **1**, naming the right one: only the document can tell, so it is a mismatch with the world, not with the command.  `export_format` says which to ask for.
@@ -237,6 +237,18 @@ Unsupported (reported as warnings, decoding stops): DCTDecode, JPXDecode, JBIG2D
 - **Filters:** all of the above, with `/Predictor` and `/EarlyChange`, and CCITTFaxDecode and JBIG2Decode.  Both bilevel codecs decode strictly, because a lenient decode reports success over a damaged line or missing globals.  That catches a damaged fax line, a page missing its globals, and a stream cut short of its declared length.  It cannot catch damaged arithmetic-coded JBIG2 data, which decodes to something from any bytes.
 - **Masks are composited onto white,** the colour of paper: `/SMask`, which overrides `/Mask`; `/Mask` as a stencil or a colour key; and `/ImageMask`, which paints black.  The file takes the larger of the image's and the mask's size, since a mixed-raster scan keeps its words in a full-size mask over a tiny colour image.  An image with `/SMask` keeps `/Matte`'s tint at the edges.
 - **Refused, exit 1, nothing written:** what is above, plus data shorter than the image needs, a palette index past the palette, a `/Decode` that would change a JPEG or JPEG 2000, an Indexed JPEG, a JPEG whose frame is not the image's size, a mask pdf-dump cannot decode, a light image whose mask would leave a blank file on white, data in an external file (`/F`), a `/DecodeParms` value of the wrong type, and anything past 256 MiB of decoded pixels or samples.
+
+## What pdf-dump does not read
+
+pdf-dump reads a PDF's structure and draws nothing.  Exit 0 means a mode did what it says over what it reads, not that every word a viewer shows was read; `--help` lists what exit 3 reports.  This list gathers the limits named above and adds the first three.  It is not exhaustive.
+
+- **Text in pixels:** a scan's words are in an image.  Export it with `--extract-image` and OCR the file.
+- **Lettering drawn as vector paths:** it is neither text nor an image, so `--text` and `--images` come back empty with exit 0.  Only rendering the page and OCR reads it.
+- **Whether text shows:** `--text` reports the text in a page's content, which can include text a viewer would not show: invisible, clipped, covered, off the page, or on a hidden layer.
+- **Images:** a JPEG's or JPEG 2000's mask stays unapplied in its file, though the mask exports on its own, and a JPEG's `/ColorTransform` is not applied, so a viewer of the file follows the file's own markers.  Inline images in Type 3 glyph procedures, and in forms and patterns nothing invokes, are not listed.  Exports keep their stored orientation.
+- **Forms:** only fields `/AcroForm /Fields` reaches, and only `/V` and `/RV`: not `/DV`, `/Opt`, `/TU` or `/MK`.  Of XFA, only the character data of the datasets packets.
+- **Annotations:** only `/AP /N` of the appearances, and not an annotation's `/T`, `/Subj`, or Hidden and NoView flags.
+- **Attachments:** `--detail embedded` lists them; what they hold is not read.
 
 ## Content stream operators
 

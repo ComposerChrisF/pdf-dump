@@ -5,6 +5,12 @@ All notable changes to `pdf-dump` are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0/).
 
+## [0.31.5] - 2026-11-04
+### Added
+- `DEBUGGING_WITH_PDF_DUMP.md` § What pdf-dump does not read gathers the limits, and adds
+  vector lettering, text a viewer would not show, a JPEG's `/ColorTransform`, and stored
+  orientation.  `--help` says that exit 0 does not mean every visible word was read.
+
 ## [0.31.4] - 2026-11-04
 ### Fixed
 Found by Fable, Sol and Opus, reviewing what v0.30.0 to v0.31.3 promise, and by

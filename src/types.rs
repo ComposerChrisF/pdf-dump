@@ -156,6 +156,9 @@ would drop its body and silently lose page content), pdf-dump recovers the body,
 warns loudly on stderr, and—in --json mode—adds a top-level \"recovery\" object.
 Use --strict to refuse the repair and exit 3 instead (a hard gate for CI).
 
+pdf-dump reads a PDF's structure and draws nothing, so exit 0 does not mean every word a
+viewer shows was read: text in images or drawn as paths needs rendering and OCR.
+
 Exit codes:
   0   Success (or validation passed with no errors)
   1   Tool error: the input could not be read (file not found, IO failure,
@@ -277,7 +280,7 @@ pub(crate) struct Args {
 
     /// Write an image XObject as a file a viewer or OCR engine opens: PNG for decoded
     /// pixels, the stream as it is for DCTDecode (.jpg) and JPXDecode (.jp2).  The picture
-    /// as drawn: predictors, /Decode and palettes applied, CMYK converted naively, masks
+    /// as drawn, in its stored orientation: predictors, /Decode and palettes applied, CMYK converted naively, masks
     /// composited onto white, except that a JPEG's or JPEG 2000's mask is left unapplied,
     /// with a warning.  --output's extension must match; --images --json gives each image's
     /// export_format
