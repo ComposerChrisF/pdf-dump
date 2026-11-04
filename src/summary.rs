@@ -245,7 +245,7 @@ fn collect_stream_stats(doc: &Document, decode: bool) -> StreamStats {
                 decoded_total += decoded.len();
             }
 
-            for filter in get_filter_names(stream) {
+            for filter in get_filter_names(doc, stream) {
                 let name = String::from_utf8_lossy(filter).into_owned();
                 *filter_counts.entry(name).or_insert(0) += 1;
             }

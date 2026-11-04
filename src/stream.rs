@@ -373,18 +373,30 @@ fn paeth(left: u8, up: u8, up_left: u8) -> u8 {
     }
 }
 
-pub(crate) fn get_filter_names(stream: &lopdf::Stream) -> Vec<&[u8]> {
-    match stream.dict.get(b"Filter").ok() {
-        Some(filter_obj) => {
-            if let Ok(name) = filter_obj.as_name() {
-                vec![name]
-            } else if let Ok(arr) = filter_obj.as_array() {
-                arr.iter().filter_map(|obj| obj.as_name().ok()).collect()
-            } else {
-                vec![]
-            }
-        }
+pub(crate) fn get_filter_names<'a>(doc: &'a Document, stream: &'a lopdf::Stream) -> Vec<&'a [u8]> {
+    let name = |obj: &'a Object| deref(doc, obj).and_then(|o| o.as_name().ok());
+    match stream.dict.get(b"Filter").ok().and_then(|f| deref(doc, f)) {
+        Some(Object::Array(items)) => items.iter().filter_map(name).collect(),
+        Some(single) => single.as_name().ok().into_iter().collect(),
         None => vec![],
+    }
+}
+
+/// Why `/Filter` cannot say how to decode a stream, when it cannot.  Guessing would present
+/// still-encoded bytes as decoded, or apply part of a chain.  A `/Filter` that refers to nothing is
+/// null, which is no filter (§ 7.3.10), but an array entry cannot be null and mean anything.
+fn unusable_filter(doc: &Document, stream: &lopdf::Stream) -> Option<String> {
+    let filter = stream.dict.get(b"Filter").ok()?;
+    match follow(doc, filter) {
+        Err(reason) => Some(format!("a /Filter: {reason}")),
+        Ok(None | Some(Object::Name(_))) => None,
+        Ok(Some(Object::Array(items))) => {
+            let all_names = items
+                .iter()
+                .all(|item| matches!(follow(doc, item), Ok(Some(Object::Name(_)))));
+            (!all_names).then(|| "a /Filter array entry that is not a name".to_string())
+        }
+        Ok(Some(_)) => Some("a /Filter that is neither a name nor an array".to_string()),
     }
 }
 
@@ -506,7 +518,10 @@ pub(crate) fn decode_stream<'a>(
     doc: &Document,
     stream: &'a lopdf::Stream,
 ) -> (Cow<'a, [u8]>, Option<String>) {
-    let filters = get_filter_names(stream);
+    if let Some(reason) = unusable_filter(doc, stream) {
+        return (Cow::Borrowed(&stream.content), Some(reason));
+    }
+    let filters = get_filter_names(doc, stream);
     if filters.is_empty() {
         return (Cow::Borrowed(&stream.content), None);
     }
@@ -1318,10 +1333,11 @@ mod tests {
     }
 
     #[test]
-    fn decode_stream_filter_is_integer_ignored() {
-        // Filter that's neither Name nor Array → treated as no filter
+    fn decode_stream_filter_is_integer_warned_of() {
+        // Filter that's neither Name nor Array → the bytes as stored, with a warning
         let stream = make_stream(Some(Object::Integer(42)), b"raw bytes".to_vec());
-        let (result, _warning) = decode_stream(&empty_doc(), &stream);
+        let (result, warning) = decode_stream(&empty_doc(), &stream);
+        assert!(warning.is_some());
         assert!(matches!(result, Cow::Borrowed(_)));
         assert_eq!(&*result, b"raw bytes");
     }
@@ -1381,18 +1397,18 @@ mod tests {
 
     #[test]
     fn decode_stream_filter_array_with_non_name_elements() {
-        // Array with a non-Name object (e.g., Integer) mixed in → filter_map skips it
+        // bug-0015: applying what is left of a chain would be a guess, so the bytes stay as stored.
         let compressed = zlib_compress(b"mixed types");
         let stream = make_stream(
             Some(Object::Array(vec![
-                Object::Integer(42), // not a Name, should be skipped
+                Object::Integer(42),
                 Object::Name(b"FlateDecode".to_vec()),
             ])),
-            compressed,
+            compressed.clone(),
         );
-        let (result, _warning) = decode_stream(&empty_doc(), &stream);
-        assert!(matches!(result, Cow::Owned(_)));
-        assert_eq!(&*result, b"mixed types");
+        let (result, warning) = decode_stream(&empty_doc(), &stream);
+        assert_eq!(&*result, &compressed[..]);
+        assert!(warning.is_some_and(|w| w.contains("/Filter")));
     }
 
     #[test]
@@ -1936,15 +1952,62 @@ mod tests {
     }
 
     #[test]
+    fn decode_stream_follows_an_indirect_filter() {
+        let mut doc = empty_doc();
+        doc.objects.insert((8, 0), flate());
+        doc.objects
+            .insert((9, 0), Object::Array(vec![Object::Reference((8, 0))]));
+        for filter in [
+            Object::Reference((8, 0)),
+            Object::Reference((9, 0)),
+            Object::Array(vec![Object::Reference((8, 0))]),
+        ] {
+            let stream = stream_with(filter.clone(), None, zlib(b"SecretPayload"));
+            let (data, warning) = decode_stream(&doc, &stream);
+            assert_eq!(&*data, b"SecretPayload", "{filter:?}");
+            assert_eq!(warning, None, "{filter:?}");
+            assert_eq!(get_filter_names(&doc, &stream), [b"FlateDecode"]);
+        }
+    }
+
+    #[test]
+    fn decode_stream_warns_of_a_filter_it_cannot_use() {
+        let mut doc = empty_doc();
+        doc.objects.insert((9, 0), Object::Reference((9, 0)));
+        for filter in [
+            Object::Integer(42),
+            Object::Reference((9, 0)), // a cycle
+            Object::Array(vec![flate(), Object::Integer(42)]),
+            Object::Array(vec![flate(), Object::Reference((99, 0))]),
+            Object::Array(vec![Object::Null, flate()]),
+        ] {
+            let content = zlib(b"SecretPayload");
+            let stream = stream_with(filter.clone(), None, content.clone());
+            let (data, warning) = decode_stream(&doc, &stream);
+            assert_eq!(&*data, &content[..], "{filter:?}");
+            assert!(warning.is_some_and(|w| w.contains("/Filter")), "{filter:?}");
+        }
+    }
+
+    #[test]
+    fn a_filter_that_refers_to_nothing_is_no_filter() {
+        let stream = stream_with(Object::Reference((99, 0)), None, b"text".to_vec());
+        let (data, warning) = decode_stream(&empty_doc(), &stream);
+        assert_eq!(&*data, b"text");
+        assert_eq!(warning, None);
+    }
+
+    #[test]
     fn get_filter_names_no_filter_key() {
         let stream = make_stream(None, vec![]);
-        assert!(get_filter_names(&stream).is_empty());
+        assert!(get_filter_names(&empty_doc(), &stream).is_empty());
     }
 
     #[test]
     fn get_filter_names_single_name() {
         let stream = make_stream(Some(Object::Name(b"FlateDecode".to_vec())), vec![]);
-        let names = get_filter_names(&stream);
+        let doc = empty_doc();
+        let names = get_filter_names(&doc, &stream);
         assert_eq!(names.len(), 1);
         assert_eq!(names[0], b"FlateDecode");
     }
@@ -1958,7 +2021,8 @@ mod tests {
             ])),
             vec![],
         );
-        let names = get_filter_names(&stream);
+        let doc = empty_doc();
+        let names = get_filter_names(&doc, &stream);
         assert_eq!(names.len(), 2);
         assert_eq!(names[0], b"ASCIIHexDecode");
         assert_eq!(names[1], b"FlateDecode");
@@ -1968,7 +2032,7 @@ mod tests {
     fn get_filter_names_non_name_filter() {
         // Filter is an integer (invalid) -> empty list
         let stream = make_stream(Some(Object::Integer(42)), vec![]);
-        assert!(get_filter_names(&stream).is_empty());
+        assert!(get_filter_names(&empty_doc(), &stream).is_empty());
     }
 
     #[test]
@@ -1982,7 +2046,8 @@ mod tests {
             ])),
             vec![],
         );
-        let names = get_filter_names(&stream);
+        let doc = empty_doc();
+        let names = get_filter_names(&doc, &stream);
         assert_eq!(names.len(), 2);
         assert_eq!(names[0], b"FlateDecode");
         assert_eq!(names[1], b"LZWDecode");

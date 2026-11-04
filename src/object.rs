@@ -22,7 +22,7 @@ pub(crate) fn print_stream_content(
     is_contents: bool,
 ) {
     let (decoded_content, warning) = decode_stream(doc, stream);
-    let filters = get_filter_names(stream);
+    let filters = get_filter_names(doc, stream);
     let description = if warning.is_none() && !filters.is_empty() {
         "decoded"
     } else {

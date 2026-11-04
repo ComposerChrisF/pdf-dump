@@ -169,14 +169,14 @@ pub(crate) fn format_color_space(obj: &Object, doc: &Document) -> String {
     }
 }
 
-pub(crate) fn format_filter(obj: &Object) -> String {
-    match obj {
-        Object::Name(n) => String::from_utf8_lossy(n).into_owned(),
-        Object::Array(arr) => {
+pub(crate) fn format_filter(doc: &Document, obj: &Object) -> String {
+    match crate::stream::deref(doc, obj) {
+        Some(Object::Name(n)) => String::from_utf8_lossy(n).into_owned(),
+        Some(Object::Array(arr)) => {
             let names: Vec<String> = arr
                 .iter()
-                .map(|item| match item {
-                    Object::Name(n) => String::from_utf8_lossy(n).into_owned(),
+                .map(|item| match crate::stream::deref(doc, item) {
+                    Some(Object::Name(n)) => String::from_utf8_lossy(n).into_owned(),
                     _ => "?".to_string(),
                 })
                 .collect();
@@ -660,9 +660,20 @@ mod tests {
     }
 
     #[test]
+    fn format_filter_follows_references() {
+        let mut doc = Document::new();
+        doc.objects
+            .insert((8, 0), Object::Name(b"DCTDecode".to_vec()));
+        let direct = Object::Reference((8, 0));
+        assert_eq!(format_filter(&doc, &direct), "DCTDecode");
+        let entry = Object::Array(vec![Object::Reference((8, 0))]);
+        assert_eq!(format_filter(&doc, &entry), "DCTDecode");
+    }
+
+    #[test]
     fn format_filter_name() {
         let obj = Object::Name(b"DCTDecode".to_vec());
-        assert_eq!(format_filter(&obj), "DCTDecode");
+        assert_eq!(format_filter(&Document::new(), &obj), "DCTDecode");
     }
 
     #[test]
@@ -671,7 +682,10 @@ mod tests {
             Object::Name(b"FlateDecode".to_vec()),
             Object::Name(b"ASCII85Decode".to_vec()),
         ]);
-        assert_eq!(format_filter(&obj), "FlateDecode, ASCII85Decode");
+        assert_eq!(
+            format_filter(&Document::new(), &obj),
+            "FlateDecode, ASCII85Decode"
+        );
     }
 
     #[test]
@@ -704,7 +718,7 @@ mod tests {
     #[test]
     fn format_filter_unknown_type_shows_dash() {
         let obj = Object::Integer(42);
-        assert_eq!(format_filter(&obj), "-");
+        assert_eq!(format_filter(&Document::new(), &obj), "-");
     }
 
     #[test]
@@ -713,7 +727,7 @@ mod tests {
             Object::Name(b"FlateDecode".to_vec()),
             Object::Integer(99), // unusual
         ]);
-        assert_eq!(format_filter(&obj), "FlateDecode, ?");
+        assert_eq!(format_filter(&Document::new(), &obj), "FlateDecode, ?");
     }
 
     #[test]

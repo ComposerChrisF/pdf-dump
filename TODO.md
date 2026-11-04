@@ -60,8 +60,6 @@ decision here, then implement in the phase noted. **Do not just “fix the code�
       pdf-orchestrator session after its own bug-0039 shipped invalid dates in every document it ever
       produced, unnoticed because this tool printed them as though valid.
       `bugs/bug-0037-date-string-format-never-checked.md`
-- [ ] **bug-0015** [HIGH] Indirect `/Filter` (a reference) silently treated as unfiltered →
-      `--extract-stream` writes still-compressed bytes, exit 0. `bugs/bug-0015-indirect-filter-silently-unfiltered.md`
 - [ ] **bug-0029** [HIGH] `--search stream=`/`regex=` search raw bytes when decode fails → false
       hits and false “not found”, warning discarded. `bugs/bug-0029-search-raw-bytes-on-decode-failure.md`
 - [ ] **bug-0021** [MED] `--object N` on an indirect-reference object shows the _target’s_ content

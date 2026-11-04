@@ -5,6 +5,17 @@ All notable changes to `pdf-dump` are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0/).
 
+## [0.31.8] - 2026-11-04
+### Fixed
+- **An indirect `/Filter` is followed.**  It read as no filter, so `--extract-stream` wrote
+  still-compressed bytes with exit 0, `--object --decode` labelled them decoded, `--forms`
+  reported an encoded value as `value_decoded: true`, and an XFA packet could read as holding
+  no data.  A `/Filter` that cannot be used, such as an array entry that is not a name, is
+  now a warning with the bytes as stored, where part of the chain was applied silently.
+  `--images` and `--inspect` name it, where they showed `-`, and `--extract-image` refuses
+  a `/Filter` reference it cannot follow.
+  (bug-0015)
+
 ## [0.31.7] - 2026-11-04
 ### Fixed
 - **`--object`, `--inspect`, `--tree` and `--search` read text strings as the standard

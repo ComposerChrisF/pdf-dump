@@ -118,7 +118,16 @@ fn filter_chain<'a>(
     doc: &'a Document,
     src: &ImageSource<'a>,
 ) -> Result<Vec<FilterStep<'a>>, String> {
-    let Some(filter) = src.entry(doc, b"Filter", b"F") else {
+    let raw_filter = src
+        .dict
+        .get(b"Filter")
+        .ok()
+        .or_else(|| src.inline.then(|| src.dict.get(b"F").ok()).flatten());
+    let filter = match raw_filter {
+        Some(value) => follow(doc, value).map_err(|reason| format!("a /Filter: {reason}"))?,
+        None => None,
+    };
+    let Some(filter) = filter else {
         return Ok(vec![]);
     };
     let names: Vec<String> = match filter {
@@ -300,8 +309,8 @@ fn apply_predictor(
     )
 }
 
-/// A whole stream's bytes, every filter undone, by the walk this module trusts: it follows an indirect
-/// `/Filter`, as `stream::decode_stream` does not.  For
+/// A whole stream's bytes, every filter undone, by the walk this module trusts, which refuses what
+/// `stream::decode_stream` warns of and hands back.  For
 /// streams that are data rather than pictures: a palette, JBIG2 globals, a content stream.  An image
 /// codec in the chain is refused.
 pub(crate) fn decode_stream_fully(
@@ -1858,8 +1867,18 @@ mod tests {
     }
 
     #[test]
+    fn a_filter_reference_that_cannot_be_followed_is_refused() {
+        let mut doc = Document::new();
+        doc.objects.insert((8, 0), Object::Reference((8, 0)));
+        let mut dict = Dictionary::new();
+        dict.set("Filter", Object::Reference((8, 0)));
+        let stream = lopdf::Stream::new(dict, vec![1, 2, 3]);
+        assert!(decode_stream_fully(&doc, &stream).is_err());
+    }
+
+    #[test]
     fn a_palette_stream_gets_the_full_filter_walk() {
-        // An indirect /Filter, which decode_stream would take for no filter at all.
+        // An indirect /Filter.
         let mut doc = Document::new();
         doc.objects.insert((8, 0), name("FlateDecode"));
         let mut palette = Dictionary::new();

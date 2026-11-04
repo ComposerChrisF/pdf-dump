@@ -71,7 +71,7 @@ pub(crate) fn collect_images(doc: &Document) -> Vec<ImageInfo> {
         let filter = dict
             .get(b"Filter")
             .ok()
-            .map(format_filter)
+            .map(|f| format_filter(doc, f))
             .unwrap_or_else(|| "-".to_string());
         images.push(ImageInfo {
             object_id: obj_id,

@@ -4304,3 +4304,72 @@ fn an_object_at_another_generation_is_reachable() {
     assert!(String::from_utf8_lossy(&export.stdout).contains("object 7 generation 1"));
     assert!(String::from_utf8_lossy(&extract.stdout).contains("object 7 generation 1"));
 }
+
+/// bug-0015's reproduction.
+#[test]
+fn an_indirect_filter_is_followed() {
+    let mut encoder = flate2::write::ZlibEncoder::new(Vec::new(), flate2::Compression::default());
+    encoder.write_all(b"SecretPayload").unwrap();
+    let mut doc = Document::with_version("1.7");
+    let filter = doc.add_object(Object::Name(b"FlateDecode".to_vec()));
+    let id = doc.add_object(Object::Stream(Stream::new(
+        Dictionary::from_iter(vec![("Filter", Object::Reference(filter))]),
+        encoder.finish().unwrap(),
+    )));
+    let tmp = tempfile::NamedTempFile::new().unwrap();
+    doc.save(tmp.path()).unwrap();
+    let out = tempfile::NamedTempFile::new().unwrap();
+    let extract = run_args(
+        &tmp,
+        &[
+            "--extract-stream",
+            &id.0.to_string(),
+            "--output",
+            out.path().to_str().unwrap(),
+        ],
+    );
+    assert_eq!(extract.status.code(), Some(0), "{extract:?}");
+    assert_eq!(std::fs::read(out.path()).unwrap(), b"SecretPayload");
+    let object = run_args(&tmp, &["--object", &id.0.to_string(), "--decode"]);
+    assert!(String::from_utf8_lossy(&object.stdout).contains("SecretPayload"));
+}
+
+/// bug-0015 reached the form readers, where an encoded value read as decoded.
+#[test]
+fn a_form_value_with_an_indirect_filter_reads_as_itself() {
+    let mut doc = Document::with_version("1.7");
+    let filter = doc.add_object(Object::Name(b"ASCIIHexDecode".to_vec()));
+    let value = doc.add_object(Object::Stream(Stream::new(
+        Dictionary::from_iter(vec![("Filter", Object::Reference(filter))]),
+        b"736563726574>".to_vec(),
+    )));
+    let field = doc.add_object(Dictionary::from_iter(vec![
+        ("FT", Object::Name(b"Tx".to_vec())),
+        (
+            "T",
+            Object::String(b"a".to_vec(), lopdf::StringFormat::Literal),
+        ),
+        ("V", Object::Reference(value)),
+    ]));
+    let acroform = Dictionary::from_iter(vec![(
+        "Fields",
+        Object::Array(vec![Object::Reference(field)]),
+    )]);
+    let root = doc.add_object(Dictionary::from_iter(vec![
+        ("Type", Object::Name(b"Catalog".to_vec())),
+        ("AcroForm", Object::Dictionary(acroform)),
+    ]));
+    doc.trailer.set("Root", Object::Reference(root));
+    let tmp = tempfile::NamedTempFile::new().unwrap();
+    doc.save(tmp.path()).unwrap();
+    let forms = run_args(&tmp, &["--forms", "--json"]);
+    let json: serde_json::Value = serde_json::from_slice(&forms.stdout).unwrap();
+    assert!(
+        json["fields"][0]["value"]
+            .as_str()
+            .unwrap()
+            .contains("secret"),
+        "{json}"
+    );
+    assert_eq!(json["fields"][0]["value_decoded"], true);
+}

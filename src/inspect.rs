@@ -430,7 +430,7 @@ fn classify_image(
         .get(b"ColorSpace")
         .ok()
         .map(|v| format_color_space(v, doc));
-    let filter = dict.get(b"Filter").ok().map(format_filter);
+    let filter = dict.get(b"Filter").ok().map(|f| format_filter(doc, f));
     let stream_size = if let Object::Stream(s) = object {
         Some(s.content.len())
     } else {
