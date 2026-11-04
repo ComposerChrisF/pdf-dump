@@ -22,7 +22,7 @@ Validation:  no issues found
 
 ## How common is non-spec — the reason this is worth checking
 
-Surveyed **921 PDFs** carrying a `/CreationDate` across `~/Chris`, spanning many producers and roughly two decades:
+Surveyed **921 PDFs** carrying a `/CreationDate` across the maintainer’s own files, spanning many producers and roughly two decades:
 
 | Format | Count | Share |
 |---|---|---|

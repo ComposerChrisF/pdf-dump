@@ -21,7 +21,7 @@ The one residual is benign and optional.  A `/Differences` font whose glyph name
 
 ## Dependencies: lopdf
 
-**Done (2026-06-29):** the whole `~/Chris/App/Rust/Pdf/*` toolchain is on a single lopdf **0.42.0** (pdf-dump, pdf-maker, pdf-orchestrator, the medpdf workspace; font-dump has no lopdf).  A shared version keeps parse/encrypt behavior consistent; `tests/lopdf_canary.rs` is the tripwire for the encryption / xref / save_modern behaviors the toolchain depends on.
+**Done (2026-06-29):** the whole PDF toolchain is on a single lopdf **0.42.0** (pdf-dump, pdf-maker, pdf-orchestrator, the medpdf workspace; font-dump has no lopdf).  A shared version keeps parse/encrypt behavior consistent; `tests/lopdf_canary.rs` is the tripwire for the encryption / xref / save_modern behaviors the toolchain depends on.
 
 **Residual:** lopdf **0.43.0 is broken** — its default `time` feature references a nonexistent `FormatItem::StringLiteral`, so the crate will not compile.  Revisit 0.43.x once upstream fixes it; its only addition over 0.42 is an unused “encryption status in PdfMetadata” feature, so there is no urgency.  When bumping, retest the save_modern + encryption sentinel (see Completed): lopdf still mis-encrypts ObjStm-packed strings as of 0.42, which is why pdf-orchestrator uses traditional `save()` for encrypted output.
 
