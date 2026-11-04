@@ -1,0 +1,33 @@
+# Plan: Read More of Forms and Annotations
+
+## Problem
+
+`--forms` and `--annotations` report `/V`, `/RV`, `/Contents`, `/RC` and `/AP /N`.  A viewer shows more than that, and a caller screening a PDF’s text cannot hold on the rest without holding nearly every file: Obsidian-Brain’s `webapp/deploy/kcs-mail/mailgate.py` says holding on these would hold “every dropdown and every signed comment”.
+
+Four gaps, from Fable’s and Sol’s review of the reading limits (4-Nov-2026), and from Obsidian-Brain’s answer to its request `row:Proj/Obsidian-Brain/r0001`:
+
+1. **Strings a reader sees, not reported.**  An annotation’s `/T` and `/Subj`; a field’s `/TU`, `/DV` and `/Opt` display labels; `/MK`’s `/CA`, `/RC` and `/AC`.  Fable and Sol both asked for some of these, and differ on how many.
+2. **Whether an annotation shows.**  Its `/F` flags, Hidden and NoView above all, so that a caller can tell text a viewer shows from text it hides.  Both asked for this.  Sol also wants to know whether `/AP /D` and `/AP /R` exist; Obsidian-Brain wants what they say.
+3. **Walks that do not climb.**  A value on a parent reached only through a widget’s `/Parent`, and a comment reached only through a pop-up’s `/Parent`, are not reported.  macOS PDFKit shows both.  A `/Contents`-only comment behind a pop-up passes `mailgate.py` clean today.
+4. **Rich text.**  `strip_markup` leaves a named reference such as `&nbsp;` literal with `*_decoded: true`, and turns a tag outside its inline list into a line break, so `123-45-<tt>6789</tt>` loses its shape.
+
+## Proposed Change
+
+**How far gaps 1 and 2 go is Chris’s, asked as `row:App/Rust/Pdf/pdf-dump/0004`.**  This plan takes his answer as its scope.  Under the fullest answer:
+
+- `--annotations` gains `author` (`/T`), `subject` (`/Subj`), `flags`, `hidden` and `has_down_appearance` / `has_rollover_appearance`, or their text.
+- `--forms` gains `tooltip` (`/TU`), `default_value` (`/DV`), `options` (`/Opt`, as `{export, label}`), and `caption`, `rollover_caption` and `down_caption` (`/MK`).
+- Each string carries a `*_decoded` beside it, as the existing ones do, and one that will not decode exits 3.
+- A walk climbs `/Parent` from a widget or pop-up to an entry nothing else reported, naming how it was reached, with a depth limit and a guard against cycles.
+- `strip_markup` decodes the named references XHTML defines, and keeps unknown tags inline, so that text is not split where a viewer would not split it.
+
+## Implementation Notes
+
+- `src/forms.rs` (`FieldWalk`, `Inherited`, `own_entry`), `src/annotations.rs`, `src/text_string.rs` (`strip_markup`).  `text_string::read_text_value` already reads a string, stream or reference, and flags a wrong type.
+- A key’s absence must stay distinct from an empty value (`positive-evidence-of-absence.md`).  New keys only: `mailgate.py` reads `value` as a string and must keep working.
+- Graduates into `DEBUGGING_WITH_PDF_DUMP.md` § Mode-specific schemas and § What pdf-dump does not read, whose list shrinks by what lands.
+- Tell Obsidian-Brain as each key arrives: its `webapp/README.md` lists these gaps and will read them.
+
+## Why Not a Workaround
+
+A caller’s `--search` can find that a key exists, but not read its decoded text or say which field it belongs to, which is why `mailgate.py` can only hold.  Reading a PDF’s structure is pdf-dump’s domain, and every consumer would otherwise write the same decoding and the same walk.
