@@ -53,7 +53,7 @@ pub(crate) fn read_text_value(doc: &Document, obj: &Object) -> Option<TextString
     match target {
         Object::Null => None,
         Object::String(bytes, _) => Some(decode_text_string(bytes)),
-        Object::Stream(stream) => Some(read_text_stream(stream)),
+        Object::Stream(stream) => Some(read_text_stream(doc, stream)),
         other => Some(TextString {
             text: format_dict_value(other),
             decoded: false,
@@ -62,8 +62,8 @@ pub(crate) fn read_text_value(doc: &Document, obj: &Object) -> Option<TextString
 }
 
 /// A text stream: its decoded bytes, read as a text string.
-pub(crate) fn read_text_stream(stream: &lopdf::Stream) -> TextString {
-    let (bytes, warning) = decode_stream(stream);
+pub(crate) fn read_text_stream(doc: &Document, stream: &lopdf::Stream) -> TextString {
+    let (bytes, warning) = decode_stream(doc, stream);
     match warning {
         Some(_) => TextString::undecoded(&bytes),
         None => decode_text_string(&bytes),

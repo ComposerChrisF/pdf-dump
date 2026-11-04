@@ -27,9 +27,6 @@ decision here, then implement in the phase noted. **Do not just “fix the code�
 
 - [ ] **bug-0020** [MED] Object generation not addressable (fallback lookup vs a `--object N:G`
       syntax?).  Gates Phase 3 fix. `bugs/bug-0020-object-generation-not-addressable.md`
-- [ ] **bug-0004** [HIGH] `/DecodeParms` predictor ignored (apply the PNG/TIFF predictor, or emit a
-      “predictor not applied” warning?).  `stream::undo_predictor` exists since v0.31.0 for
-      `--extract-image`, so applying it in `decode_stream` is now a small change.  Gates Phase 2 fix. `bugs/bug-0004-decodeparms-predictor-ignored.md`
 - [ ] **bug-0033** [MED] UTF-16BE / non-UTF-8 text strings mishandled in display + search (decode
       per spec, and/or lossless byte fallback — scope?).  Narrowed by v0.30.0: only `--object`,
       `--inspect` and `--search` remain.  Gates Phase 2 fix.
@@ -73,11 +70,8 @@ decision here, then implement in the phase noted. **Do not just “fix the code�
       `--extract-stream` writes still-compressed bytes, exit 0. `bugs/bug-0015-indirect-filter-silently-unfiltered.md`
 - [ ] **bug-0029** [HIGH] `--search stream=`/`regex=` search raw bytes when decode fails → false
       hits and false “not found”, warning discarded. `bugs/bug-0029-search-raw-bytes-on-decode-failure.md`
-      _(related family with bug-0004: a decode “success” that is not the decoded content.)_
 - [ ] **bug-0021** [MED] `--object N` on an indirect-reference object shows the _target’s_ content
       under N’s header.  Display the stored value, not the deref. `bugs/bug-0021-object-indirect-reference-masquerade.md`
-- [ ] **bug-0004** [HIGH] (code fix, after Phase 0 decision) Apply predictor or warn on
-      `/DecodeParms`. `bugs/bug-0004-decodeparms-predictor-ignored.md`
 - [ ] **bug-0033** [MED] (code fix, after Phase 0 decision) Decode UTF-16BE text strings / lossless
       fallback, in display and search. `bugs/bug-0033-text-string-utf16be-mishandled.md`
 
@@ -178,7 +172,7 @@ corrupts the text that `--layout` positions or makes the reliability verdict its
    change regardless of everything else.  The other DoS items are independent one-liners/guards.
 3. **Phase 2 silent-wrong-output** — highest user harm after crashes.  Note the intra-phase
    dependencies: bug-0012 before bug-0011 (shared reliability verdict); bug-0034 with bug-0027
-   (shared trailer walk); bug-0004 and bug-0033 land here once their Phase 0 decisions are made.
+   (shared trailer walk); bug-0033 lands here once its Phase 0 decision is made.
 4. **Phase 3 correctness/robustness.**
 5. **Phase 4 docs last**, so they describe the behavior that actually shipped.  The pure-stale doc
    fixes (0006, 0007, 0008) are safe to start early but must be reconciled with any behavior change.

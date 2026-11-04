@@ -62,9 +62,9 @@ The tool is split across the modules in `src/`.  The flow is:
 | Module | Role |
 |--------|------|
 | `types.rs` | `Args`, `DumpConfig`, `ResolvedMode`, `PageSpec`, `DetailSub` |
-| `stream.rs` | `decode_stream` — filter pipeline: FlateDecode, ASCII85, ASCIIHex, LZW, RunLength; `undo_predictor`, which only `image_export` calls so far |
+| `stream.rs` | `decode_stream` — filter pipeline: FlateDecode, ASCII85, ASCIIHex, LZW, RunLength, with predictors and `/EarlyChange` |
 | `text_string.rs` | `decode_text_string` — the one decoder for PDF text strings (UTF-16BE and UTF-8 marks, else PDFDocEncoding; hex and `decoded: false` when it cannot), `read_text_value` (string, stream, or reference), `strip_markup` for `/RV`, `/RC` and XFA data.  `--object` and `--search` do not use it yet (bug-0033) |
-| `image_export.rs` | `export_image`: one image to PNG, or passed through for JPEG and JPEG 2000.  Its own filter walk, because `stream::decode_stream` neither follows an indirect `/Filter` nor undoes predictors (bug-0015, bug-0004).  CCITT and JBIG2 decode strictly, deliberately: a lenient decode reports success over damage |
+| `image_export.rs` | `export_image`: one image to PNG, or passed through for JPEG and JPEG 2000.  Its own filter walk, because `stream::decode_stream` does not follow an indirect `/Filter` (bug-0015).  CCITT and JBIG2 decode strictly, deliberately: a lenient decode reports success over damage |
 | `inline_image.rs` | A scanner of its own over decoded content, because `Content::decode` cannot be relied on for inline images (the module doc says why).  `scan_document`, `scan_page`.  `decode_content` is what everything else calls instead of `Content::decode`: never call that directly, since it stops silently at a syntax error and panics on an inline image with no `/CS` |
 | `helpers.rs` | Shared formatting utilities; `read_content_streams` (joins a page’s `/Contents` segments with a newline so tokens never fuse); `inherited_page_attr` (walks `/Parent` for `MediaBox`/`CropBox`/`Rotate`) |
 | `refs.rs` | Reference traversal, reverse ref lookup |

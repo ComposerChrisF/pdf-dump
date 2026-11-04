@@ -779,7 +779,7 @@ fn process_form(
             .and_then(|v| v.as_name().ok())
             == Some(b"Form".as_slice())
     {
-        let (decoded, warn) = crate::stream::decode_stream(stream);
+        let (decoded, warn) = crate::stream::decode_stream(doc, stream);
         if let Some(w) = warn {
             let reason = format!("Form XObject {} {}: {}", xobj_id.0, xobj_id.1, w);
             state.fonts.push(text::content_unread_record(&reason));

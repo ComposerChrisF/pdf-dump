@@ -304,7 +304,7 @@ pub(crate) fn appearance_text(
                 .push(format!("Appearance {} {} is not a stream", id.0, id.1));
             continue;
         };
-        let (decoded, warning) = crate::stream::decode_stream(stream);
+        let (decoded, warning) = crate::stream::decode_stream(doc, stream);
         if let Some(w) = warning {
             state
                 .warnings
@@ -605,7 +605,7 @@ fn recurse_into_form(
         return;
     }
 
-    let (decoded, warn) = crate::stream::decode_stream(stream);
+    let (decoded, warn) = crate::stream::decode_stream(doc, stream);
     if let Some(w) = warn {
         state.note_unread(&format!("Form XObject {} {}: {}", xobj_id.0, xobj_id.1, w));
     }
@@ -908,7 +908,7 @@ pub(crate) fn build_font_decoder(
         .and_then(|v| v.as_reference().ok())
         && let Ok(Object::Stream(stream)) = doc.get_object(tu_ref)
     {
-        let (bytes, _warn) = crate::stream::decode_stream(stream);
+        let (bytes, _warn) = crate::stream::decode_stream(doc, stream);
         let cmap = ToUnicodeCMap::parse(&bytes);
         if !cmap.is_empty() {
             // Carry the codespace decision into the decoder. A `Variable`

@@ -1,4 +1,5 @@
 use flate2::read::ZlibDecoder;
+use lopdf::{Dictionary, Document, Object};
 use std::borrow::Cow;
 use std::io::Read;
 
@@ -114,6 +115,7 @@ pub(crate) fn hex_digit(b: u8) -> Option<u8> {
     }
 }
 
+#[cfg(test)]
 pub(crate) fn decode_lzw(data: &[u8]) -> Result<Vec<u8>, String> {
     decode_lzw_capped(data, MAX_DECODED_SIZE, true)
 }
@@ -228,7 +230,7 @@ pub(crate) struct PredictorParams {
 
 /// Undoes a Flate or LZW predictor: `1` is none, `2` is TIFF, `10` to `15` are PNG, whose rows each
 /// carry their own tag, so which of those six is named does not matter (§ 7.4.4.4).
-pub(crate) fn undo_predictor(data: Vec<u8>, parms: PredictorParams) -> Result<Vec<u8>, String> {
+pub(crate) fn undo_predictor(data: &[u8], parms: PredictorParams) -> Result<Vec<u8>, String> {
     let PredictorParams {
         predictor,
         colors,
@@ -236,7 +238,7 @@ pub(crate) fn undo_predictor(data: Vec<u8>, parms: PredictorParams) -> Result<Ve
         columns,
     } = parms;
     if predictor == 1 {
-        return Ok(data);
+        return Ok(data.to_vec());
     }
     if !(predictor == 2 || (10..=15).contains(&predictor)) {
         return Err(format!("the unknown /Predictor {predictor}"));
@@ -257,14 +259,14 @@ pub(crate) fn undo_predictor(data: Vec<u8>, parms: PredictorParams) -> Result<Ve
     let pixel_bytes = pixel_bits.div_ceil(8) as usize;
     if predictor == 2 {
         undo_tiff_predictor(
-            data,
+            data.to_vec(),
             row_bytes,
             colors as usize,
             bits as u32,
             columns as usize,
         )
     } else {
-        undo_png_predictor(&data, row_bytes, pixel_bytes)
+        undo_png_predictor(data, row_bytes, pixel_bytes)
     }
 }
 
@@ -386,19 +388,128 @@ pub(crate) fn get_filter_names(stream: &lopdf::Stream) -> Vec<&[u8]> {
     }
 }
 
-pub(crate) fn decode_stream(stream: &lopdf::Stream) -> (Cow<'_, [u8]>, Option<String>) {
+/// A value the document holds directly or by reference.  `Ok(None)` is null; a reference that leads
+/// nowhere is an error, not null, since it cannot say what a stream's parameters were.
+fn follow<'a>(doc: &'a Document, value: &'a Object) -> Result<Option<&'a Object>, String> {
+    let value = match value {
+        Object::Reference(id) => doc
+            .get_object(*id)
+            .map_err(|_| format!("a reference to {} {}, which is not there", id.0, id.1))?,
+        other => other,
+    };
+    Ok((!matches!(value, Object::Null)).then_some(value))
+}
+
+/// The `/DecodeParms` of filter `index`: one dictionary, for the first filter, or an array with an
+/// entry per filter (§ 7.4).
+fn filter_parms<'a>(
+    doc: &'a Document,
+    stream: &'a lopdf::Stream,
+    index: usize,
+) -> Result<Option<&'a Dictionary>, String> {
+    let Ok(parms) = stream.dict.get(b"DecodeParms") else {
+        return Ok(None);
+    };
+    let entry = match follow(doc, parms)? {
+        Some(Object::Array(items)) => match items.get(index) {
+            Some(item) => follow(doc, item)?,
+            None => None,
+        },
+        Some(Object::Dictionary(_)) if index > 0 => None,
+        other => other,
+    };
+    match entry {
+        None => Ok(None),
+        Some(Object::Dictionary(parms)) => Ok(Some(parms)),
+        Some(_) => Err("a /DecodeParms entry that is not a dictionary".to_string()),
+    }
+}
+
+/// One `/DecodeParms` integer: its default when absent, an error when present and unusable.
+fn parm_int(
+    doc: &Document,
+    parms: Option<&Dictionary>,
+    key: &[u8],
+    default: i64,
+) -> Result<i64, String> {
+    let key_name = || String::from_utf8_lossy(key).into_owned();
+    let Some(value) = parms.and_then(|p| p.get(key).ok()) else {
+        return Ok(default);
+    };
+    match follow(doc, value).map_err(|reason| format!("/{}: {reason}", key_name()))? {
+        None => Ok(default),
+        Some(value) => value
+            .as_i64()
+            .map_err(|_| format!("a /{} that is not an integer", key_name())),
+    }
+}
+
+/// The predictor filter `index` names, or `None` when it names none.
+fn stream_predictor(
+    doc: &Document,
+    stream: &lopdf::Stream,
+    index: usize,
+) -> Result<Option<PredictorParams>, String> {
+    let parms = filter_parms(doc, stream, index)?;
+    let predictor = parm_int(doc, parms, b"Predictor", 1)?;
+    if predictor == 1 {
+        return Ok(None);
+    }
+    Ok(Some(PredictorParams {
+        predictor,
+        colors: parm_int(doc, parms, b"Colors", 1)?,
+        bits_per_component: parm_int(doc, parms, b"BitsPerComponent", 8)?,
+        columns: parm_int(doc, parms, b"Columns", 1)?,
+    }))
+}
+
+/// Undoes filter `index`'s predictor, if it names one.  On a failure the bytes come back as the
+/// filter left them, with the reason.
+fn undo_stream_predictor(
+    doc: &Document,
+    stream: &lopdf::Stream,
+    index: usize,
+    decoded: Vec<u8>,
+) -> (Vec<u8>, Option<String>) {
+    let undone = match stream_predictor(doc, stream, index) {
+        Ok(None) => return (decoded, None),
+        Ok(Some(parms)) => undo_predictor(&decoded, parms),
+        Err(reason) => Err(reason),
+    };
+    match undone {
+        Ok(data) => (data, None),
+        Err(reason) => (decoded, Some(format!("predictor not undone: {reason}"))),
+    }
+}
+
+/// LZW's `/EarlyChange`, which defaults to 1 (§ 7.4.4.3).  Only 0 turns it off.
+fn lzw_early_change(doc: &Document, stream: &lopdf::Stream, index: usize) -> Result<bool, String> {
+    Ok(parm_int(doc, filter_parms(doc, stream, index)?, b"EarlyChange", 1)? != 0)
+}
+
+pub(crate) fn decode_stream<'a>(
+    doc: &Document,
+    stream: &'a lopdf::Stream,
+) -> (Cow<'a, [u8]>, Option<String>) {
     let filters = get_filter_names(stream);
     if filters.is_empty() {
         return (Cow::Borrowed(&stream.content), None);
     }
 
-    let mut data: Cow<'_, [u8]> = Cow::Borrowed(&stream.content);
-    for filter in &filters {
+    let mut data: Cow<'a, [u8]> = Cow::Borrowed(&stream.content);
+    for (index, filter) in filters.iter().enumerate() {
+        let mut assumed = None;
         let result = match *filter {
             b"FlateDecode" => decode_flate(&data),
             b"ASCII85Decode" => decode_ascii85(&data),
             b"ASCIIHexDecode" => decode_asciihex(&data),
-            b"LZWDecode" => decode_lzw(&data),
+            b"LZWDecode" => {
+                let early = lzw_early_change(doc, stream, index).unwrap_or_else(|reason| {
+                    assumed = Some(format!("/EarlyChange taken as 1: {reason}"));
+                    true
+                });
+                decode_lzw_early(&data, early)
+            }
             b"RunLengthDecode" => decode_run_length(&data),
             other => {
                 let name = String::from_utf8_lossy(other);
@@ -408,9 +519,21 @@ pub(crate) fn decode_stream(stream: &lopdf::Stream) -> (Cow<'_, [u8]>, Option<St
                 );
             }
         };
-        match result {
-            Ok(decoded) => data = Cow::Owned(decoded),
+        let decoded = match result {
+            Ok(decoded) => decoded,
             Err(msg) => return (Cow::Owned(data.into_owned()), Some(msg)),
+        };
+        if assumed.is_some() {
+            return (Cow::Owned(decoded), assumed);
+        }
+        if matches!(*filter, b"FlateDecode" | b"LZWDecode") {
+            let (undone, warning) = undo_stream_predictor(doc, stream, index, decoded);
+            if warning.is_some() {
+                return (Cow::Owned(undone), warning);
+            }
+            data = Cow::Owned(undone);
+        } else {
+            data = Cow::Owned(decoded);
         }
     }
 
@@ -476,7 +599,7 @@ mod tests {
     fn png_predictor_undoes_every_row_tag() {
         // bug-0004's vector: Up rows of [1,2,3,4], then [+4,+4,+4,+4].
         assert_eq!(
-            undo_predictor(vec![2, 1, 2, 3, 4, 2, 4, 4, 4, 4], predictor(12, 1, 8, 4)).unwrap(),
+            undo_predictor(&[2, 1, 2, 3, 4, 2, 4, 4, 4, 4], predictor(12, 1, 8, 4)).unwrap(),
             vec![1, 2, 3, 4, 5, 6, 7, 8]
         );
         // None, then Sub, Average and Paeth over a known row.
@@ -486,7 +609,7 @@ mod tests {
             3, 5, 5, 5, // Average: 5+(0+1)/2=5, 5+(5+2)/2=8, 5+(8+3)/2=10
             4, 1, 1, 1, // Paeth
         ];
-        let out = undo_predictor(data, predictor(15, 1, 8, 3)).unwrap();
+        let out = undo_predictor(&data, predictor(15, 1, 8, 3)).unwrap();
         assert_eq!(&out[..9], &[10, 20, 30, 1, 2, 3, 5, 8, 10]);
         // Paeth: left 0, up 5, up-left 0 picks up: 6; then left 6, up 8, up-left 5 picks 8: 9.
         assert_eq!(&out[9..11], &[6, 9]);
@@ -496,30 +619,30 @@ mod tests {
     fn png_predictor_steps_by_whole_pixels() {
         // Three colours: Sub reaches back three bytes, not one.
         assert_eq!(
-            undo_predictor(vec![1, 1, 2, 3, 1, 1, 1], predictor(11, 3, 8, 2)).unwrap(),
+            undo_predictor(&[1, 1, 2, 3, 1, 1, 1], predictor(11, 3, 8, 2)).unwrap(),
             vec![1, 2, 3, 2, 3, 4]
         );
     }
 
     #[test]
     fn png_predictor_refuses_a_partial_row_and_an_unknown_tag() {
-        assert!(undo_predictor(vec![0, 1, 2], predictor(12, 1, 8, 4)).is_err());
-        assert!(undo_predictor(vec![9, 1], predictor(12, 1, 8, 1)).is_err());
+        assert!(undo_predictor(&[0, 1, 2], predictor(12, 1, 8, 4)).is_err());
+        assert!(undo_predictor(&[9, 1], predictor(12, 1, 8, 1)).is_err());
     }
 
     #[test]
     fn tiff_predictor_8_16_and_low_bits() {
         assert_eq!(
-            undo_predictor(vec![1, 1, 1, 5, 1, 1], predictor(2, 1, 8, 3)).unwrap(),
+            undo_predictor(&[1, 1, 1, 5, 1, 1], predictor(2, 1, 8, 3)).unwrap(),
             vec![1, 2, 3, 5, 6, 7]
         );
         assert_eq!(
-            undo_predictor(vec![0x01, 0xFF, 0x00, 0x01], predictor(2, 1, 16, 2)).unwrap(),
+            undo_predictor(&[0x01, 0xFF, 0x00, 0x01], predictor(2, 1, 16, 2)).unwrap(),
             vec![0x01, 0xFF, 0x02, 0x00]
         );
         // Four 2-bit samples 1, +1, +1, +1 are 1, 2, 3, 0.
         assert_eq!(
-            undo_predictor(vec![0b01_01_01_01], predictor(2, 1, 2, 4)).unwrap(),
+            undo_predictor(&[0b01_01_01_01], predictor(2, 1, 2, 4)).unwrap(),
             vec![0b01_10_11_00]
         );
     }
@@ -527,11 +650,221 @@ mod tests {
     #[test]
     fn predictor_1_is_nothing_and_an_unknown_one_is_refused() {
         assert_eq!(
-            undo_predictor(vec![1, 2], predictor(1, 1, 8, 1)).unwrap(),
+            undo_predictor(&[1, 2], predictor(1, 1, 8, 1)).unwrap(),
             vec![1, 2]
         );
-        assert!(undo_predictor(vec![1, 2], predictor(7, 1, 8, 1)).is_err());
-        assert!(undo_predictor(vec![1, 2], predictor(12, 0, 8, 1)).is_err());
+        assert!(undo_predictor(&[1, 2], predictor(7, 1, 8, 1)).is_err());
+        assert!(undo_predictor(&[1, 2], predictor(12, 0, 8, 1)).is_err());
+    }
+
+    fn stream_with(filter: Object, parms: Option<Object>, content: Vec<u8>) -> lopdf::Stream {
+        let mut dict = Dictionary::new();
+        dict.set("Filter", filter);
+        if let Some(parms) = parms {
+            dict.set("DecodeParms", parms);
+        }
+        lopdf::Stream::new(dict, content)
+    }
+
+    fn flate() -> Object {
+        Object::Name(b"FlateDecode".to_vec())
+    }
+
+    fn hex_filter() -> Object {
+        Object::Name(b"ASCIIHexDecode".to_vec())
+    }
+
+    fn parms_of(entries: Vec<(&str, i64)>) -> Object {
+        let mut parms = Dictionary::new();
+        for (key, value) in entries {
+            parms.set(key, Object::Integer(value));
+        }
+        Object::Dictionary(parms)
+    }
+
+    fn zlib(data: &[u8]) -> Vec<u8> {
+        crate::test_utils::zlib_compress(data)
+    }
+
+    fn hex_of(data: &[u8]) -> Vec<u8> {
+        data.iter()
+            .flat_map(|b| format!("{b:02X}").into_bytes())
+            .collect()
+    }
+
+    /// bug-0004's reproduction: true data 1..8, stored as Up rows with a tag each.
+    const PREDICTED: [u8; 10] = [2, 1, 2, 3, 4, 2, 4, 4, 4, 4];
+    const UNPREDICTED: [u8; 8] = [1, 2, 3, 4, 5, 6, 7, 8];
+
+    fn up_rows() -> Object {
+        parms_of(vec![("Predictor", 12), ("Columns", 4)])
+    }
+
+    #[test]
+    fn decode_stream_undoes_a_png_predictor() {
+        let stream = stream_with(flate(), Some(up_rows()), zlib(&PREDICTED));
+        let (data, warning) = decode_stream(&empty_doc(), &stream);
+        assert_eq!(&*data, &UNPREDICTED);
+        assert_eq!(warning, None);
+    }
+
+    #[test]
+    fn decode_stream_undoes_a_predictor_after_lzw() {
+        let encoded = weezl::encode::Encoder::with_tiff_size_switch(weezl::BitOrder::Msb, 8)
+            .encode(&PREDICTED)
+            .unwrap();
+        let lzw = Object::Name(b"LZWDecode".to_vec());
+        let stream = stream_with(lzw, Some(up_rows()), encoded);
+        let (data, warning) = decode_stream(&empty_doc(), &stream);
+        assert_eq!(&*data, &UNPREDICTED);
+        assert_eq!(warning, None);
+    }
+
+    #[test]
+    fn decode_stream_undoes_a_tiff_predictor_named_in_an_array() {
+        let stream = stream_with(
+            Object::Array(vec![hex_filter(), flate()]),
+            Some(Object::Array(vec![
+                Object::Null,
+                parms_of(vec![("Predictor", 2), ("Columns", 3)]),
+            ])),
+            hex_of(&zlib(&[1, 1, 1])),
+        );
+        let (data, warning) = decode_stream(&empty_doc(), &stream);
+        assert_eq!(&*data, &[1, 2, 3]);
+        assert_eq!(warning, None);
+    }
+
+    #[test]
+    fn decode_stream_follows_parameters_held_by_reference() {
+        let mut doc = empty_doc();
+        doc.objects.insert((9, 0), up_rows());
+        doc.objects.insert(
+            (10, 0),
+            Object::Array(vec![Object::Null, Object::Reference((9, 0))]),
+        );
+        doc.objects.insert((11, 0), Object::Integer(12));
+        let mut by_value = Dictionary::new();
+        by_value.set("Predictor", Object::Reference((11, 0)));
+        by_value.set("Columns", Object::Integer(4));
+        for (filter, parms, content) in [
+            (flate(), Object::Reference((9, 0)), zlib(&PREDICTED)),
+            (
+                Object::Array(vec![hex_filter(), flate()]),
+                Object::Reference((10, 0)),
+                hex_of(&zlib(&PREDICTED)),
+            ),
+            (flate(), Object::Dictionary(by_value), zlib(&PREDICTED)),
+        ] {
+            let stream = stream_with(filter, Some(parms.clone()), content);
+            let (data, warning) = decode_stream(&doc, &stream);
+            assert_eq!(&*data, &UNPREDICTED, "{parms:?}");
+            assert_eq!(warning, None, "{parms:?}");
+        }
+    }
+
+    #[test]
+    fn decode_stream_applies_a_lone_dictionary_only_to_the_first_filter() {
+        let mut doc = empty_doc();
+        doc.objects.insert((9, 0), up_rows());
+        for parms in [up_rows(), Object::Reference((9, 0))] {
+            let stream = stream_with(
+                Object::Array(vec![hex_filter(), flate()]),
+                Some(parms),
+                hex_of(&zlib(&[2, 1, 2])),
+            );
+            let (data, warning) = decode_stream(&doc, &stream);
+            assert_eq!(&*data, &[2, 1, 2]);
+            assert_eq!(warning, None);
+        }
+    }
+
+    #[test]
+    fn decode_stream_warns_when_it_cannot_undo_a_predictor() {
+        let predicted = [2, 1, 2];
+        for parms in [
+            up_rows(),                        // a partial row
+            parms_of(vec![("Predictor", 7)]), // an unknown predictor
+            Object::Reference((9, 0)),        // nothing there
+            Object::Array(vec![Object::Reference((9, 0))]),
+            Object::Integer(3),
+            {
+                let mut d = Dictionary::new();
+                d.set("Predictor", Object::Reference((9, 0)));
+                Object::Dictionary(d)
+            },
+            {
+                let mut d = Dictionary::new();
+                d.set("Predictor", Object::Integer(12));
+                d.set("Columns", Object::Name(b"Four".to_vec()));
+                Object::Dictionary(d)
+            },
+        ] {
+            let stream = stream_with(flate(), Some(parms.clone()), zlib(&predicted));
+            let (data, warning) = decode_stream(&empty_doc(), &stream);
+            assert_eq!(&*data, &predicted, "{parms:?}");
+            assert!(
+                warning
+                    .as_deref()
+                    .is_some_and(|w| w.starts_with("predictor not undone: ")),
+                "{parms:?}: {warning:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn decode_stream_warns_about_a_later_filters_unusable_parameters() {
+        let stream = stream_with(
+            Object::Array(vec![hex_filter(), flate()]),
+            Some(Object::Reference((9, 0))),
+            hex_of(&zlib(&[2, 1, 2])),
+        );
+        let (data, warning) = decode_stream(&empty_doc(), &stream);
+        assert_eq!(&*data, &[2, 1, 2]);
+        assert!(warning.is_some_and(|w| w.starts_with("predictor not undone: ")));
+    }
+
+    #[test]
+    fn decode_stream_ignores_unused_parameters_when_no_predictor_is_named() {
+        let mut d = Dictionary::new();
+        d.set("Columns", Object::Reference((9, 0)));
+        let stream = stream_with(flate(), Some(Object::Dictionary(d)), zlib(b"text"));
+        let (data, warning) = decode_stream(&empty_doc(), &stream);
+        assert_eq!(&*data, b"text");
+        assert_eq!(warning, None);
+    }
+
+    #[test]
+    fn decode_stream_honours_lzw_early_change() {
+        let data: Vec<u8> = (0u32..2000).map(|i| (i * i % 251) as u8).collect();
+        let encoded = weezl::encode::Encoder::new(weezl::BitOrder::Msb, 8)
+            .encode(&data)
+            .unwrap();
+        let stream = stream_with(
+            Object::Name(b"LZWDecode".to_vec()),
+            Some(parms_of(vec![("EarlyChange", 0)])),
+            encoded,
+        );
+        let (decoded, warning) = decode_stream(&empty_doc(), &stream);
+        assert_eq!(warning, None);
+        assert_eq!(&*decoded, &data[..]);
+    }
+
+    #[test]
+    fn decode_stream_decodes_lzw_with_the_default_when_early_change_is_unreadable() {
+        let encoded = weezl::encode::Encoder::with_tiff_size_switch(weezl::BitOrder::Msb, 8)
+            .encode(b"needle")
+            .unwrap();
+        let mut d = Dictionary::new();
+        d.set("EarlyChange", Object::Reference((9, 0)));
+        let stream = stream_with(
+            Object::Name(b"LZWDecode".to_vec()),
+            Some(Object::Dictionary(d)),
+            encoded,
+        );
+        let (data, warning) = decode_stream(&empty_doc(), &stream);
+        assert_eq!(&*data, b"needle");
+        assert!(warning.is_some_and(|w| w.starts_with("/EarlyChange taken as 1: ")));
     }
 
     #[test]
@@ -582,7 +915,7 @@ mod tests {
     #[test]
     fn decode_stream_no_filter() {
         let stream = make_stream(None, b"raw content".to_vec());
-        let (result, _warning) = decode_stream(&stream);
+        let (result, _warning) = decode_stream(&empty_doc(), &stream);
         assert!(matches!(result, Cow::Borrowed(_)));
         assert_eq!(&*result, b"raw content");
     }
@@ -591,7 +924,7 @@ mod tests {
     fn decode_stream_flatedecode_name() {
         let compressed = zlib_compress(b"hello pdf");
         let stream = make_stream(Some(Object::Name(b"FlateDecode".to_vec())), compressed);
-        let (result, _warning) = decode_stream(&stream);
+        let (result, _warning) = decode_stream(&empty_doc(), &stream);
         assert!(matches!(result, Cow::Owned(_)));
         assert_eq!(&*result, b"hello pdf");
     }
@@ -603,7 +936,7 @@ mod tests {
             Some(Object::Array(vec![Object::Name(b"FlateDecode".to_vec())])),
             compressed,
         );
-        let (result, _warning) = decode_stream(&stream);
+        let (result, _warning) = decode_stream(&empty_doc(), &stream);
         assert!(matches!(result, Cow::Owned(_)));
         assert_eq!(&*result, b"array filter");
     }
@@ -614,7 +947,7 @@ mod tests {
             Some(Object::Name(b"DCTDecode".to_vec())),
             b"jpeg data".to_vec(),
         );
-        let (result, warning) = decode_stream(&stream);
+        let (result, warning) = decode_stream(&empty_doc(), &stream);
         assert_eq!(&*result, b"jpeg data");
         assert!(warning.is_some(), "Unknown filter should produce a warning");
         assert!(warning.unwrap().contains("unsupported filter: DCTDecode"));
@@ -626,7 +959,7 @@ mod tests {
             Some(Object::Name(b"FlateDecode".to_vec())),
             b"not valid zlib".to_vec(),
         );
-        let (result, warning) = decode_stream(&stream);
+        let (result, warning) = decode_stream(&empty_doc(), &stream);
         // Falls back to original content with warning
         assert_eq!(&*result, b"not valid zlib");
         assert!(
@@ -644,7 +977,7 @@ mod tests {
     fn decode_stream_valid_flatedecode_no_warning() {
         let compressed = zlib_compress(b"hello pdf");
         let stream = make_stream(Some(Object::Name(b"FlateDecode".to_vec())), compressed);
-        let (result, warning) = decode_stream(&stream);
+        let (result, warning) = decode_stream(&empty_doc(), &stream);
         assert!(matches!(result, Cow::Owned(_)));
         assert_eq!(&*result, b"hello pdf");
         assert!(
@@ -656,7 +989,7 @@ mod tests {
     #[test]
     fn decode_stream_no_filter_no_warning() {
         let stream = make_stream(None, b"raw content".to_vec());
-        let (_result, warning) = decode_stream(&stream);
+        let (_result, warning) = decode_stream(&empty_doc(), &stream);
         assert!(warning.is_none(), "No filter should produce no warning");
     }
 
@@ -703,7 +1036,7 @@ mod tests {
             Some(Object::Name(b"ASCII85Decode".to_vec())),
             b"87cURDZ~>".to_vec(),
         );
-        let (result, warning) = decode_stream(&stream);
+        let (result, warning) = decode_stream(&empty_doc(), &stream);
         assert_eq!(&*result, b"Hello");
         assert!(warning.is_none());
     }
@@ -751,7 +1084,7 @@ mod tests {
             Some(Object::Name(b"ASCIIHexDecode".to_vec())),
             b"48656c6c6f>".to_vec(),
         );
-        let (result, warning) = decode_stream(&stream);
+        let (result, warning) = decode_stream(&empty_doc(), &stream);
         assert_eq!(&*result, b"Hello");
         assert!(warning.is_none());
     }
@@ -773,7 +1106,7 @@ mod tests {
         let mut encoder = weezl::encode::Encoder::with_tiff_size_switch(weezl::BitOrder::Msb, 8);
         let compressed = encoder.encode(original).unwrap();
         let stream = make_stream(Some(Object::Name(b"LZWDecode".to_vec())), compressed);
-        let (result, warning) = decode_stream(&stream);
+        let (result, warning) = decode_stream(&empty_doc(), &stream);
         assert_eq!(&*result, original.as_slice());
         assert!(warning.is_none());
     }
@@ -838,7 +1171,7 @@ mod tests {
     fn decode_run_length_stream_via_decode_stream() {
         let data = vec![4, b'H', b'e', b'l', b'l', b'o', 128];
         let stream = make_stream(Some(Object::Name(b"RunLengthDecode".to_vec())), data);
-        let (result, warning) = decode_stream(&stream);
+        let (result, warning) = decode_stream(&empty_doc(), &stream);
         assert_eq!(&*result, b"Hello");
         assert!(warning.is_none());
     }
@@ -857,7 +1190,7 @@ mod tests {
             ])),
             hex_bytes.into_bytes(),
         );
-        let (result, warning) = decode_stream(&stream);
+        let (result, warning) = decode_stream(&empty_doc(), &stream);
         assert_eq!(&*result, b"pipeline test");
         assert!(warning.is_none());
     }
@@ -872,7 +1205,7 @@ mod tests {
             ])),
             b"data".to_vec(),
         );
-        let (result, warning) = decode_stream(&stream);
+        let (result, warning) = decode_stream(&empty_doc(), &stream);
         assert_eq!(&*result, b"data");
         assert!(warning.is_some());
         assert!(warning.unwrap().contains("unsupported filter: JBIG2Decode"));
@@ -888,7 +1221,7 @@ mod tests {
             ])),
             b"not valid zlib".to_vec(),
         );
-        let (result, warning) = decode_stream(&stream);
+        let (result, warning) = decode_stream(&empty_doc(), &stream);
         assert_eq!(&*result, b"not valid zlib");
         assert!(warning.is_some());
         assert!(warning.unwrap().contains("FlateDecode"));
@@ -925,7 +1258,7 @@ mod tests {
     #[test]
     fn decode_stream_empty_content_no_filter() {
         let stream = make_stream(None, vec![]);
-        let (result, _warning) = decode_stream(&stream);
+        let (result, _warning) = decode_stream(&empty_doc(), &stream);
         assert!(matches!(result, Cow::Borrowed(_)));
         assert_eq!(&*result, b"");
     }
@@ -934,7 +1267,7 @@ mod tests {
     fn decode_stream_filter_is_integer_ignored() {
         // Filter that's neither Name nor Array → treated as no filter
         let stream = make_stream(Some(Object::Integer(42)), b"raw bytes".to_vec());
-        let (result, _warning) = decode_stream(&stream);
+        let (result, _warning) = decode_stream(&empty_doc(), &stream);
         assert!(matches!(result, Cow::Borrowed(_)));
         assert_eq!(&*result, b"raw bytes");
     }
@@ -950,7 +1283,7 @@ mod tests {
             ])),
             compressed,
         );
-        let (result, warning) = decode_stream(&stream);
+        let (result, warning) = decode_stream(&empty_doc(), &stream);
         assert_eq!(&*result, b"Hello");
         assert!(warning.is_none());
     }
@@ -965,7 +1298,7 @@ mod tests {
             ])),
             b"pass through".to_vec(),
         );
-        let (result, warning) = decode_stream(&stream);
+        let (result, warning) = decode_stream(&empty_doc(), &stream);
         assert_eq!(&*result, b"pass through");
         assert!(
             warning.is_some(),
@@ -977,7 +1310,7 @@ mod tests {
     #[test]
     fn decode_stream_empty_filter_array() {
         let stream = make_stream(Some(Object::Array(vec![])), b"no filters".to_vec());
-        let (result, _warning) = decode_stream(&stream);
+        let (result, _warning) = decode_stream(&empty_doc(), &stream);
         assert!(matches!(result, Cow::Borrowed(_)));
         assert_eq!(&*result, b"no filters");
     }
@@ -987,7 +1320,7 @@ mod tests {
         // Compressed empty content
         let compressed = zlib_compress(b"");
         let stream = make_stream(Some(Object::Name(b"FlateDecode".to_vec())), compressed);
-        let (result, _warning) = decode_stream(&stream);
+        let (result, _warning) = decode_stream(&empty_doc(), &stream);
         assert!(matches!(result, Cow::Owned(_)));
         assert_eq!(&*result, b"");
     }
@@ -1003,7 +1336,7 @@ mod tests {
             ])),
             compressed,
         );
-        let (result, _warning) = decode_stream(&stream);
+        let (result, _warning) = decode_stream(&empty_doc(), &stream);
         assert!(matches!(result, Cow::Owned(_)));
         assert_eq!(&*result, b"mixed types");
     }
@@ -1018,7 +1351,7 @@ mod tests {
             ])),
             b"raw data".to_vec(),
         );
-        let (result, _warning) = decode_stream(&stream);
+        let (result, _warning) = decode_stream(&empty_doc(), &stream);
         assert!(matches!(result, Cow::Borrowed(_)));
         assert_eq!(&*result, b"raw data");
     }
@@ -1029,7 +1362,7 @@ mod tests {
         let large: Vec<u8> = (0..10000).map(|i| (i % 256) as u8).collect();
         let compressed = zlib_compress(&large);
         let stream = make_stream(Some(Object::Name(b"FlateDecode".to_vec())), compressed);
-        let (result, _warning) = decode_stream(&stream);
+        let (result, _warning) = decode_stream(&empty_doc(), &stream);
         assert!(matches!(result, Cow::Owned(_)));
         assert_eq!(&*result, &large[..]);
     }
@@ -1169,7 +1502,7 @@ mod tests {
             Some(Object::Name(b"JPXDecode".to_vec())),
             b"jpeg2000 data".to_vec(),
         );
-        let (result, warning) = decode_stream(&stream);
+        let (result, warning) = decode_stream(&empty_doc(), &stream);
         assert_eq!(&*result, b"jpeg2000 data");
         assert!(warning.is_some());
         assert!(warning.unwrap().contains("unsupported filter: JPXDecode"));
@@ -1181,7 +1514,7 @@ mod tests {
             Some(Object::Name(b"CCITTFaxDecode".to_vec())),
             b"fax data".to_vec(),
         );
-        let (result, warning) = decode_stream(&stream);
+        let (result, warning) = decode_stream(&empty_doc(), &stream);
         assert_eq!(&*result, b"fax data");
         assert!(warning.is_some());
         assert!(
@@ -1213,7 +1546,7 @@ mod tests {
             ])),
             hex_bytes.into_bytes(),
         );
-        let (result, warning) = decode_stream(&stream);
+        let (result, warning) = decode_stream(&empty_doc(), &stream);
         assert_eq!(
             &*result,
             original.as_slice(),
@@ -1238,7 +1571,7 @@ mod tests {
             ])),
             compressed,
         );
-        let (result, warning) = decode_stream(&stream);
+        let (result, warning) = decode_stream(&empty_doc(), &stream);
         // Should have decompressed the FlateDecode part successfully
         assert_eq!(
             &*result, b"some data",
@@ -1258,7 +1591,7 @@ mod tests {
             ])),
             b"48656c6c6f>".to_vec(), // hex("Hello") -> "Hello" is not valid zlib
         );
-        let (result, warning) = decode_stream(&stream);
+        let (result, warning) = decode_stream(&empty_doc(), &stream);
         // ASCIIHexDecode produced "Hello", but FlateDecode on "Hello" fails
         assert_eq!(&*result, b"Hello", "Should return intermediate result");
         assert!(warning.is_some());
@@ -1288,7 +1621,7 @@ mod tests {
             ])),
             ascii85_data,
         );
-        let (result, warning) = decode_stream(&stream);
+        let (result, warning) = decode_stream(&empty_doc(), &stream);
         assert_eq!(
             &*result,
             original.as_slice(),
@@ -1316,7 +1649,7 @@ mod tests {
             ])),
             lzw_compressed,
         );
-        let (result, warning) = decode_stream(&stream);
+        let (result, warning) = decode_stream(&empty_doc(), &stream);
         assert_eq!(
             &*result,
             original.as_slice(),
@@ -1628,7 +1961,7 @@ mod tests {
         let original: Vec<u8> = vec![b'A'; 100_000];
         let compressed = zlib_compress(&original);
         let stream = make_stream(Some(Object::Name(b"FlateDecode".to_vec())), compressed);
-        let (result, warning) = decode_stream(&stream);
+        let (result, warning) = decode_stream(&empty_doc(), &stream);
         assert_eq!(&*result, &original[..]);
         assert!(warning.is_none(), "Normal-sized decode should not warn");
     }

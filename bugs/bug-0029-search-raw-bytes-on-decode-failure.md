@@ -84,7 +84,6 @@ Not matching against bytes the tool itself flagged as undecoded eliminates both 
 
 ## Related
 
-- [[bug-0004-decodeparms-predictor-ignored]] — the same search path is also defeated by predictor-coded streams, where decoding “succeeds” (no warning at all) yet the bytes are still not the decoded content.
 - Portfolio rule `positive-evidence-of-absence` — a stream the tool could not decode is Unknown, never “does not contain the text”; “Found 0” must mean “looked and it was not there”.
 - Portfolio rule `cli-exit-codes` — findings (the tool ran but could not fully examine the data) belong on exit 3, never silent 0.
 - No existing test pins the buggy behavior: every `StreamContains` test in `src/search.rs` (`search_stream_contains_matches` at `:614`, `search_stream_contains_case_insensitive` at `:630`, `search_stream_no_match` at `:641`, `search_stream_and_key_combined` at `:664`) uses an _unfiltered_ stream, so the decode-failure path is entirely uncovered.

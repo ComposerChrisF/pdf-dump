@@ -137,7 +137,7 @@ pdf-dump file.pdf --validate --json         # Validation results as JSON
 
 ## Supported Stream Filters
 
-FlateDecode, ASCII85Decode, ASCIIHexDecode, LZWDecode, RunLengthDecode — applied sequentially for multi-filter pipelines.  `--extract-image` also undoes predictors and decodes CCITTFaxDecode and JBIG2Decode.
+FlateDecode, ASCII85Decode, ASCIIHexDecode, LZWDecode, RunLengthDecode — applied sequentially for multi-filter pipelines, with `/Predictor` and `/EarlyChange`.  `--extract-image` also decodes CCITTFaxDecode and JBIG2Decode.
 
 ## Acknowledgments
 

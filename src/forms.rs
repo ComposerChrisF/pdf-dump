@@ -329,7 +329,7 @@ impl ValueRender<'_> {
         let doc = self.doc;
         match value {
             Object::String(bytes, _) => RenderedValue::text(decode_text_string(bytes)),
-            Object::Stream(stream) => RenderedValue::text(read_text_stream(stream)),
+            Object::Stream(stream) => RenderedValue::text(read_text_stream(doc, stream)),
             Object::Name(n) => RenderedValue::scalar(format!("/{}", String::from_utf8_lossy(n))),
             Object::Integer(i) => RenderedValue::scalar(i.to_string()),
             Object::Real(r) => RenderedValue::scalar(r.to_string()),
@@ -468,7 +468,7 @@ fn read_xfa_packet(doc: &Document, obj: &Object) -> Option<String> {
         },
         _ => return None,
     };
-    let (bytes, warning) = decode_stream(stream);
+    let (bytes, warning) = decode_stream(doc, stream);
     if warning.is_some() {
         return None;
     }

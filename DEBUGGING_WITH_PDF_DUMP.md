@@ -224,7 +224,7 @@ Every file, however it is reached: `reached_from` is `name_tree`; `filespec` (a 
 Supported (applied sequentially in pipelines): FlateDecode, ASCII85Decode, ASCIIHexDecode, LZWDecode, RunLengthDecode.
 Unsupported (reported as warnings, decoding stops): DCTDecode, JPXDecode, JBIG2Decode, CCITTFaxDecode.
 
-`--extract-stream` and `--object --decode` do not undo a `/Predictor`, so predicted samples come out still predicted (bug-0004), and they do not follow an indirect `/Filter` (bug-0015).  `--extract-image` does both.
+`--extract-stream` and `--object --decode` undo a `/Predictor` and honour `/EarlyChange`.  When a parameter is unusable or does not fit the data, they warn and hand back the bytes as the filter left them.  They do not follow an indirect `/Filter` (bug-0015); `--extract-image` does.
 
 ## Exporting images
 

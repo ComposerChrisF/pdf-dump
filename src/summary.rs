@@ -241,7 +241,7 @@ fn collect_stream_stats(doc: &Document, decode: bool) -> StreamStats {
             total_bytes += raw_bytes;
 
             if decode {
-                let (decoded, _) = decode_stream(stream);
+                let (decoded, _) = decode_stream(doc, stream);
                 decoded_total += decoded.len();
             }
 

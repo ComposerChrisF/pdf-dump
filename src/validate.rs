@@ -360,7 +360,7 @@ fn check_content_stream_syntax(
         };
         for content_id in content_ids {
             if let Ok(Object::Stream(stream)) = doc.get_object(content_id) {
-                let (decoded, _) = decode_stream(stream);
+                let (decoded, _) = decode_stream(doc, stream);
                 if decode_content(&decoded).map_or(true, |content| content.stopped_early) {
                     issues.push(ValidationIssue {
                         level: ValidationLevel::Warn,

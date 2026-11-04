@@ -5,7 +5,14 @@ All notable changes to `pdf-dump` are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0/).
 
-## [Unreleased]
+## [0.31.3] - 2026-11-04
+### Fixed
+- **`--object --decode`, `--extract-stream` and `--search stream=` undo predictors.**
+  A stream with a PNG or TIFF `/Predictor` in its `/DecodeParms` came out still
+  predictor-coded, labelled "decoded", with no warning.  This is how every Acrobat
+  cross-reference stream and much image data are stored.  `/EarlyChange 0` is honoured
+  too, and parameters held by reference are followed.  A predictor that is unusable, or
+  does not fit the data, is a warning, with the bytes as the filter left them.  (bug-0004)
 
 ## [0.31.2] - 2026-11-04
 ### Fixed

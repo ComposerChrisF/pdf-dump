@@ -58,4 +58,4 @@ as decoded content and stops a partial filter chain from being applied silently.
 ## Related
 `~/.claude/rules/positive-evidence-of-absence.md`: an unresolvable filter is Unknown, not “no
 filter”.  Same “decode success ≠ decoded content” family as
-[[bug-0004-decodeparms-predictor-ignored]].
+bug-0004 (predictors, fixed in the commit that names it).

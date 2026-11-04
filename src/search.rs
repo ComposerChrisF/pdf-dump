@@ -68,7 +68,7 @@ pub(crate) fn parse_search_expr(expr: &str) -> Result<Vec<SearchCondition>, Stri
     Ok(conditions)
 }
 
-pub(crate) fn object_matches(obj: &Object, conditions: &[SearchCondition]) -> bool {
+pub(crate) fn object_matches(doc: &Document, obj: &Object, conditions: &[SearchCondition]) -> bool {
     let dict = match obj {
         Object::Dictionary(d) => d,
         Object::Stream(s) => &s.dict,
@@ -84,7 +84,7 @@ pub(crate) fn object_matches(obj: &Object, conditions: &[SearchCondition]) -> bo
     });
     let decoded_content = if needs_stream {
         if let Object::Stream(stream) = obj {
-            let (decoded, _) = decode_stream(stream);
+            let (decoded, _) = decode_stream(doc, stream);
             Some(decoded)
         } else {
             None
@@ -177,7 +177,7 @@ pub(crate) fn search_objects(
     }
 
     for (&(obj_num, generation), object) in &doc.objects {
-        if object_matches(object, conditions) {
+        if object_matches(doc, object, conditions) {
             count += 1;
             if summary_mode {
                 let kind = object.enum_variant();
@@ -242,7 +242,7 @@ pub(crate) fn search_json_value(
 ) -> Value {
     let mut matches = Vec::new();
     for (&(obj_num, generation), object) in &doc.objects {
-        if object_matches(object, conditions) {
+        if object_matches(doc, object, conditions) {
             matches.push(json!({
                 "object_number": obj_num,
                 "generation": generation,
@@ -319,7 +319,11 @@ mod tests {
             key: b"Type".to_vec(),
             value: b"Font".to_vec(),
         }];
-        assert!(object_matches(&Object::Dictionary(dict), &conds));
+        assert!(object_matches(
+            &empty_doc(),
+            &Object::Dictionary(dict),
+            &conds
+        ));
     }
 
     #[test]
@@ -330,7 +334,11 @@ mod tests {
             key: b"Type".to_vec(),
             value: b"font".to_vec(),
         }];
-        assert!(object_matches(&Object::Dictionary(dict), &conds));
+        assert!(object_matches(
+            &empty_doc(),
+            &Object::Dictionary(dict),
+            &conds
+        ));
     }
 
     #[test]
@@ -340,7 +348,11 @@ mod tests {
         let conds = vec![SearchCondition::HasKey {
             key: b"MediaBox".to_vec(),
         }];
-        assert!(object_matches(&Object::Dictionary(dict), &conds));
+        assert!(object_matches(
+            &empty_doc(),
+            &Object::Dictionary(dict),
+            &conds
+        ));
     }
 
     #[test]
@@ -349,7 +361,11 @@ mod tests {
         let conds = vec![SearchCondition::HasKey {
             key: b"MediaBox".to_vec(),
         }];
-        assert!(!object_matches(&Object::Dictionary(dict), &conds));
+        assert!(!object_matches(
+            &empty_doc(),
+            &Object::Dictionary(dict),
+            &conds
+        ));
     }
 
     #[test]
@@ -359,7 +375,11 @@ mod tests {
         let conds = vec![SearchCondition::ValueContains {
             text: "helvet".to_string(),
         }];
-        assert!(object_matches(&Object::Dictionary(dict), &conds));
+        assert!(object_matches(
+            &empty_doc(),
+            &Object::Dictionary(dict),
+            &conds
+        ));
     }
 
     #[test]
@@ -367,7 +387,7 @@ mod tests {
         let conds = vec![SearchCondition::HasKey {
             key: b"Type".to_vec(),
         }];
-        assert!(!object_matches(&Object::Integer(42), &conds));
+        assert!(!object_matches(&empty_doc(), &Object::Integer(42), &conds));
     }
 
     #[test]
@@ -379,7 +399,11 @@ mod tests {
             key: b"Type".to_vec(),
             value: b"XObject".to_vec(),
         }];
-        assert!(object_matches(&Object::Stream(stream), &conds));
+        assert!(object_matches(
+            &empty_doc(),
+            &Object::Stream(stream),
+            &conds
+        ));
     }
 
     #[test]
@@ -397,7 +421,11 @@ mod tests {
                 value: b"Type1".to_vec(),
             },
         ];
-        assert!(object_matches(&Object::Dictionary(dict), &conds));
+        assert!(object_matches(
+            &empty_doc(),
+            &Object::Dictionary(dict),
+            &conds
+        ));
     }
 
     #[test]
@@ -414,7 +442,11 @@ mod tests {
                 value: b"Type1".to_vec(),
             },
         ];
-        assert!(!object_matches(&Object::Dictionary(dict), &conds));
+        assert!(!object_matches(
+            &empty_doc(),
+            &Object::Dictionary(dict),
+            &conds
+        ));
     }
 
     #[test]
@@ -497,7 +529,7 @@ mod tests {
             value: b"mytitle".to_vec(),
         }];
         assert!(
-            object_matches(&Object::Dictionary(dict), &conds),
+            object_matches(&empty_doc(), &Object::Dictionary(dict), &conds),
             "String matching should be case-insensitive"
         );
     }
@@ -512,7 +544,7 @@ mod tests {
             value: b"42".to_vec(),
         }];
         assert!(
-            !object_matches(&Object::Dictionary(dict), &conds),
+            !object_matches(&empty_doc(), &Object::Dictionary(dict), &conds),
             "Integer values should not match KeyEquals"
         );
     }
@@ -529,7 +561,7 @@ mod tests {
             text: "world".to_string(),
         }];
         assert!(
-            object_matches(&Object::Dictionary(dict), &conds),
+            object_matches(&empty_doc(), &Object::Dictionary(dict), &conds),
             "ValueContains should match String objects"
         );
     }
@@ -541,7 +573,11 @@ mod tests {
         let conds = vec![SearchCondition::ValueContains {
             text: "nonexistent".to_string(),
         }];
-        assert!(!object_matches(&Object::Dictionary(dict), &conds));
+        assert!(!object_matches(
+            &empty_doc(),
+            &Object::Dictionary(dict),
+            &conds
+        ));
     }
 
     #[test]
@@ -552,7 +588,11 @@ mod tests {
         let conds = vec![SearchCondition::ValueContains {
             text: "42".to_string(),
         }];
-        assert!(!object_matches(&Object::Dictionary(dict), &conds));
+        assert!(!object_matches(
+            &empty_doc(),
+            &Object::Dictionary(dict),
+            &conds
+        ));
     }
 
     #[test]
@@ -619,8 +659,13 @@ mod tests {
         let conditions = vec![SearchCondition::StreamContains {
             text: "world".to_string(),
         }];
-        assert!(object_matches(doc.get_object((1, 0)).unwrap(), &conditions));
+        assert!(object_matches(
+            &empty_doc(),
+            doc.get_object((1, 0)).unwrap(),
+            &conditions
+        ));
         assert!(!object_matches(
+            &empty_doc(),
             doc.get_object((2, 0)).unwrap(),
             &conditions
         ));
@@ -634,7 +679,11 @@ mod tests {
         let conditions = vec![SearchCondition::StreamContains {
             text: "flatedecode".to_string(),
         }];
-        assert!(object_matches(doc.get_object((1, 0)).unwrap(), &conditions));
+        assert!(object_matches(
+            &empty_doc(),
+            doc.get_object((1, 0)).unwrap(),
+            &conditions
+        ));
     }
 
     #[test]
@@ -646,6 +695,7 @@ mod tests {
             text: "XYZ".to_string(),
         }];
         assert!(!object_matches(
+            &empty_doc(),
             doc.get_object((1, 0)).unwrap(),
             &conditions
         ));
@@ -676,7 +726,11 @@ mod tests {
                 text: "cm".to_string(),
             },
         ];
-        assert!(object_matches(doc.get_object((1, 0)).unwrap(), &conditions));
+        assert!(object_matches(
+            &empty_doc(),
+            doc.get_object((1, 0)).unwrap(),
+            &conditions
+        ));
     }
 
     #[test]
@@ -688,6 +742,7 @@ mod tests {
             text: "anything".to_string(),
         }];
         assert!(!object_matches(
+            &empty_doc(),
             doc.get_object((1, 0)).unwrap(),
             &conditions
         ));
@@ -726,7 +781,11 @@ mod tests {
         dict.set("BaseFont", Object::Name(b"Helvetica-Bold".to_vec()));
         let re = Regex::new("Helvetica").unwrap();
         let conds = vec![SearchCondition::RegexMatch { pattern: re }];
-        assert!(object_matches(&Object::Dictionary(dict), &conds));
+        assert!(object_matches(
+            &empty_doc(),
+            &Object::Dictionary(dict),
+            &conds
+        ));
     }
 
     #[test]
@@ -735,7 +794,11 @@ mod tests {
         dict.set("MediaBox", Object::Integer(0));
         let re = Regex::new("^Media").unwrap();
         let conds = vec![SearchCondition::RegexMatch { pattern: re }];
-        assert!(object_matches(&Object::Dictionary(dict), &conds));
+        assert!(object_matches(
+            &empty_doc(),
+            &Object::Dictionary(dict),
+            &conds
+        ));
     }
 
     #[test]
@@ -747,7 +810,11 @@ mod tests {
         );
         let re = Regex::new(r"Chapter \d+").unwrap();
         let conds = vec![SearchCondition::RegexMatch { pattern: re }];
-        assert!(object_matches(&Object::Dictionary(dict), &conds));
+        assert!(object_matches(
+            &empty_doc(),
+            &Object::Dictionary(dict),
+            &conds
+        ));
     }
 
     #[test]
@@ -756,7 +823,11 @@ mod tests {
         dict.set("Type", Object::Name(b"Page".to_vec()));
         let re = Regex::new("Font").unwrap();
         let conds = vec![SearchCondition::RegexMatch { pattern: re }];
-        assert!(!object_matches(&Object::Dictionary(dict), &conds));
+        assert!(!object_matches(
+            &empty_doc(),
+            &Object::Dictionary(dict),
+            &conds
+        ));
     }
 
     #[test]
@@ -772,7 +843,11 @@ mod tests {
             },
             SearchCondition::RegexMatch { pattern: re },
         ];
-        assert!(object_matches(&Object::Dictionary(dict), &conds));
+        assert!(object_matches(
+            &empty_doc(),
+            &Object::Dictionary(dict),
+            &conds
+        ));
     }
 
     #[test]
@@ -782,7 +857,11 @@ mod tests {
         let stream = Stream::new(dict, b"BT /F1 12 Tf (Hello World) Tj ET".to_vec());
         let re = Regex::new("Hello").unwrap();
         let conds = vec![SearchCondition::RegexMatch { pattern: re }];
-        assert!(object_matches(&Object::Stream(stream), &conds));
+        assert!(object_matches(
+            &empty_doc(),
+            &Object::Stream(stream),
+            &conds
+        ));
     }
 
     #[test]
@@ -792,6 +871,10 @@ mod tests {
         dict.set("BaseFont", Object::Name(b"HELVETICA".to_vec()));
         let re = Regex::new("(?i)helvetica").unwrap();
         let conds = vec![SearchCondition::RegexMatch { pattern: re }];
-        assert!(object_matches(&Object::Dictionary(dict), &conds));
+        assert!(object_matches(
+            &empty_doc(),
+            &Object::Dictionary(dict),
+            &conds
+        ));
     }
 }

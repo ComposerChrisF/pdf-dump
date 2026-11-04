@@ -336,7 +336,7 @@ pub(crate) fn read_content_streams(doc: &Document, page_id: ObjectId) -> Option<
     for cid in &content_ids {
         match doc.get_object(*cid) {
             Ok(Object::Stream(stream)) => {
-                let (decoded, warning) = decode_stream(stream);
+                let (decoded, warning) = decode_stream(doc, stream);
                 if let Some(warn) = warning {
                     warnings.push(format!("Content stream {} {}: {}", cid.0, cid.1, warn));
                     unread = true;

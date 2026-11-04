@@ -276,7 +276,7 @@ fn apply_predictor(
     parms: Option<&Dictionary>,
 ) -> Result<Vec<u8>, String> {
     undo_predictor(
-        data,
+        &data,
         PredictorParams {
             predictor: parm_int(doc, parms, b"Predictor", 1)?,
             colors: parm_int(doc, parms, b"Colors", 1)?,
@@ -287,7 +287,7 @@ fn apply_predictor(
 }
 
 /// A whole stream's bytes, every filter undone, by the walk this module trusts: it follows an indirect
-/// `/Filter`, reads `/DecodeParms` and undoes predictors, as `stream::decode_stream` does not.  For
+/// `/Filter`, as `stream::decode_stream` does not.  For
 /// streams that are data rather than pictures: a palette, JBIG2 globals, a content stream.  An image
 /// codec in the chain is refused.
 pub(crate) fn decode_stream_fully(

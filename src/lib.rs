@@ -324,7 +324,7 @@ fn dispatch_standalone(
             let object_id = (obj_num, 0);
             match doc.get_object(object_id) {
                 Ok(Object::Stream(s)) => {
-                    let (decoded_content, warning) = stream::decode_stream(s);
+                    let (decoded_content, warning) = stream::decode_stream(doc, s);
                     if let Some(warn) = &warning {
                         eprintln!("Warning: {}", warn);
                     }

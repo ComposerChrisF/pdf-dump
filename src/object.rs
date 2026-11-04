@@ -12,12 +12,13 @@ use crate::types::{DumpConfig, ObjectSpec};
 
 pub(crate) fn print_stream_content(
     writer: &mut impl Write,
+    doc: &Document,
     stream: &lopdf::Stream,
     indent_str: &str,
     config: &DumpConfig,
     is_contents: bool,
 ) {
-    let (decoded_content, warning) = decode_stream(stream);
+    let (decoded_content, warning) = decode_stream(doc, stream);
     let filters = get_filter_names(stream);
     let description = if warning.is_none() && !filters.is_empty() {
         "decoded"
@@ -205,7 +206,7 @@ pub(crate) fn print_object(
                     None,
                 );
             } else if config.decode {
-                print_stream_content(writer, stream, &indent_str, config, is_contents);
+                print_stream_content(writer, doc, stream, &indent_str, config, is_contents);
             }
         }
         Object::Dictionary(dict) => {
@@ -535,7 +536,7 @@ pub(crate) fn object_to_json(obj: &Object, doc: &Document, config: &DumpConfig) 
                     val["raw_content_binary"] = json!(format!("<binary, {} bytes>", content.len()));
                 }
             } else if config.decode {
-                let (decoded, warning) = decode_stream(stream);
+                let (decoded, warning) = decode_stream(doc, stream);
                 if let Some(warn) = &warning {
                     val["decode_warning"] = json!(warn);
                 }
@@ -1195,7 +1196,7 @@ mod tests {
         let stream = make_stream(None, b"raw stream bytes".to_vec());
         let config = default_config();
         let out = output_of(|w| {
-            print_stream_content(w, &stream, "  ", &config, false);
+            print_stream_content(w, &empty_doc(), &stream, "  ", &config, false);
         });
         assert!(out.contains("raw"));
         assert!(out.contains("raw stream bytes"));
@@ -1207,7 +1208,7 @@ mod tests {
         let stream = make_stream(Some(Object::Name(b"FlateDecode".to_vec())), compressed);
         let config = default_config();
         let out = output_of(|w| {
-            print_stream_content(w, &stream, "  ", &config, false);
+            print_stream_content(w, &empty_doc(), &stream, "  ", &config, false);
         });
         assert!(out.contains("decoded"));
         assert!(out.contains("decoded content"));
@@ -1228,7 +1229,7 @@ mod tests {
             raw: false,
         };
         let out = output_of(|w| {
-            print_stream_content(w, &stream, "", &config, false);
+            print_stream_content(w, &empty_doc(), &stream, "", &config, false);
         });
         assert!(out.contains("truncated to 100"));
     }
@@ -1239,7 +1240,7 @@ mod tests {
         let stream = make_stream(None, content.to_vec());
         let config = default_config();
         let out = output_of(|w| {
-            print_stream_content(w, &stream, "  ", &config, true);
+            print_stream_content(w, &empty_doc(), &stream, "  ", &config, true);
         });
         assert!(out.contains("Parsed Content Stream"));
     }
@@ -1473,7 +1474,7 @@ mod tests {
         let stream = make_stream(Some(Object::Name(b"FlateDecode".to_vec())), compressed);
         let config = default_config();
         let out = output_of(|w| {
-            print_stream_content(w, &stream, "  ", &config, true);
+            print_stream_content(w, &empty_doc(), &stream, "  ", &config, true);
         });
         assert!(
             out.contains("Parsed Content Stream"),
@@ -1490,7 +1491,7 @@ mod tests {
         );
         let config = default_config();
         let out = output_of(|w| {
-            print_stream_content(w, &stream, "", &config, false);
+            print_stream_content(w, &empty_doc(), &stream, "", &config, false);
         });
         assert!(
             out.contains("raw"),
@@ -1505,7 +1506,7 @@ mod tests {
         let stream = make_stream(Some(Object::Name(b"FlateDecode".to_vec())), compressed);
         let config = default_config();
         let out = output_of(|w| {
-            print_stream_content(w, &stream, "", &config, false);
+            print_stream_content(w, &empty_doc(), &stream, "", &config, false);
         });
         assert!(
             out.contains("decoded"),
@@ -1518,7 +1519,7 @@ mod tests {
         let stream = make_stream(None, b"plain".to_vec());
         let config = default_config();
         let out = output_of(|w| {
-            print_stream_content(w, &stream, "", &config, false);
+            print_stream_content(w, &empty_doc(), &stream, "", &config, false);
         });
         assert!(out.contains("raw"), "No filter should show 'raw'");
     }
@@ -2229,7 +2230,7 @@ mod tests {
         let stream = Stream::new(dict, b"not zlib data at all".to_vec());
         let config = default_config();
         let out = output_of(|w| {
-            print_stream_content(w, &stream, "  ", &config, false);
+            print_stream_content(w, &empty_doc(), &stream, "  ", &config, false);
         });
         assert!(
             out.contains("[WARNING: FlateDecode decompression failed]"),
@@ -2249,7 +2250,7 @@ mod tests {
         let stream = Stream::new(dict, b"jbig2 data".to_vec());
         let config = default_config();
         let out = output_of(|w| {
-            print_stream_content(w, &stream, "", &config, false);
+            print_stream_content(w, &empty_doc(), &stream, "", &config, false);
         });
         assert!(
             out.contains("[WARNING: unsupported filter: JBIG2Decode]"),
@@ -2266,7 +2267,7 @@ mod tests {
         let stream = Stream::new(dict, compressed);
         let config = default_config();
         let out = output_of(|w| {
-            print_stream_content(w, &stream, "", &config, false);
+            print_stream_content(w, &empty_doc(), &stream, "", &config, false);
         });
         assert!(
             !out.contains("WARNING"),

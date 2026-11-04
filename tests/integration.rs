@@ -4058,3 +4058,43 @@ fn layout_agrees_with_pdftotext_word_order_where_installed() {
         words(&String::from_utf8_lossy(&theirs.stdout), false)
     );
 }
+
+/// bug-0004's reproduction, by way of the modes the report names.
+#[test]
+fn a_predicted_stream_comes_out_with_its_predictor_undone() {
+    let mut encoder = flate2::write::ZlibEncoder::new(Vec::new(), flate2::Compression::default());
+    encoder.write_all(&[2, 1, 2, 3, 4, 2, 4, 4, 4, 4]).unwrap();
+    let mut doc = Document::with_version("1.7");
+    let parms = doc.add_object(Dictionary::from_iter(vec![
+        ("Predictor", Object::Integer(12)),
+        ("Columns", Object::Integer(4)),
+    ]));
+    let id = doc.add_object(Object::Stream(Stream::new(
+        Dictionary::from_iter(vec![
+            ("Filter", Object::Name(b"FlateDecode".to_vec())),
+            ("DecodeParms", Object::Reference(parms)),
+        ]),
+        encoder.finish().unwrap(),
+    )));
+    let tmp = tempfile::NamedTempFile::new().unwrap();
+    doc.save(tmp.path()).unwrap();
+
+    let out = tempfile::NamedTempFile::new().unwrap();
+    let extract = run_args(
+        &tmp,
+        &[
+            "--extract-stream",
+            &id.0.to_string(),
+            "--output",
+            out.path().to_str().unwrap(),
+        ],
+    );
+    assert_eq!(extract.status.code(), Some(0), "{extract:?}");
+    assert!(extract.stderr.is_empty(), "{extract:?}");
+    assert_eq!(std::fs::read(out.path()).unwrap(), [1, 2, 3, 4, 5, 6, 7, 8]);
+
+    let object = run_args(&tmp, &["--object", &id.0.to_string(), "--decode"]);
+    let stdout = String::from_utf8_lossy(&object.stdout);
+    assert!(stdout.contains("decoded, 8 bytes"), "{stdout}");
+    assert!(!stdout.contains("WARNING"), "{stdout}");
+}
