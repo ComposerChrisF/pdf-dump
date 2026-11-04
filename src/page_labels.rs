@@ -2,9 +2,7 @@ use lopdf::{Document, Object};
 use serde_json::{Value, json};
 use std::io::Write;
 
-use crate::helpers::{
-    get_catalog, name_to_string, obj_to_string_lossy, resolve_dict, walk_number_tree,
-};
+use crate::helpers::{get_catalog, name_to_string, obj_to_text, resolve_dict, walk_number_tree};
 
 pub(crate) struct PageLabelEntry {
     pub physical_page: u32,
@@ -114,11 +112,7 @@ pub(crate) fn collect_page_labels(doc: &Document) -> Vec<PageLabelEntry> {
                         .ok()
                         .and_then(name_to_string)
                         .unwrap_or_else(|| "-".to_string());
-                    let p = d
-                        .get(b"P")
-                        .ok()
-                        .and_then(obj_to_string_lossy)
-                        .unwrap_or_default();
+                    let p = d.get(b"P").ok().and_then(obj_to_text).unwrap_or_default();
                     let st = d
                         .get(b"St")
                         .ok()

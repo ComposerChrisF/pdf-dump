@@ -7,6 +7,41 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.30.0] - 2026-11-03
+### Added
+- **`--forms` reports every value** (plan-0006).  A list value is a JSON array in
+  `values`; a stream value is decoded; a value inherited from a parent field is
+  reported with `inherited: true`, and a parent holding its own value is an entry
+  too; `/RV` is reported as text in `rich_value`, markup removed; a signature's
+  text is reported.  `value` stays a string in every case.
+- **`--forms` reports XFA:** `xfa`, `xfa_packets`, `xfa_datasets_text`, `xfa_decoded`.
+- **`--annotations` reads each appearance:** `appearance_text`, `appearance_state`,
+  `appearance_reliability`, `appearance_warnings`, through the extractor `--text`
+  uses.  `/RC` is reported as text in `rich_contents`.  A widget with no `/Resources`
+  of its own uses the form's `/DR`.
+- **`--annotations` lists direct annotations** as well as indirect ones
+  (`object_number` is then `null`), and `/Annots` held in an indirect array.
+- **`--detail embedded` counts every attachment:** every filespec with `/EF`
+  wherever it is reached (a direct filespec, a `Launch` or `GoToE` action, a
+  `FileAttachment` annotation), every stream in `/EF` or `/RF`, and any
+  `/Type /EmbeddedFile` stream no `/EF` names.
+  `reached_from` says which; `filespec_object` is `null` for a direct filespec.
+### Changed
+- **Text strings are decoded as the standard says** in `--forms`, `--annotations`,
+  `--detail`, `--bookmarks`, `--tags` and the overview's metadata: the UTF-16BE mark,
+  the UTF-8 mark, otherwise PDFDocEncoding, with language escapes removed.  A string
+  that cannot be decoded prints as hex, never passed through lossily, and `--forms`,
+  `--annotations` and `--detail embedded` also flag it in `--json`
+  (`value_decoded: false` and its kin).  Raw UTF-8 with no mark, which is invalid, now
+  reads as mojibake rather than looking correct.  `--object`, `--inspect` and
+  `--search` are unchanged (bug-0033).
+- **Behavior change (exit codes): `--forms` and `--annotations` can exit 3.**  A value
+  or comment that will not decode, malformed rich text, unreadable XFA data, or an
+  appearance verdict other than `reliable` is a finding, and `--json` still emits.  A
+  checkbox's or radio button's state is excused when all it fails on is Symbol or
+  ZapfDingbats, since it draws a mark, not text.
+- `--forms` prints a value in full rather than cut to 20 characters.
+
 ## [0.29.1] - 2026-11-03
 ### Changed
 - **`--extract-stream --output` checks its output path before the document is

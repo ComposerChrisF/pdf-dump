@@ -497,6 +497,112 @@ fn object_flag_nonexistent_object_fails() {
     );
 }
 
+/// Saves a one-page PDF with `annot` on the page and `extra` as further objects; the catalog takes
+/// `acroform` when it is given.
+fn pdf_with_annot(annot: Dictionary, acroform: Option<Dictionary>) -> tempfile::NamedTempFile {
+    let mut doc = Document::with_version("1.7");
+    let annot_id = doc.add_object(annot);
+    let page = doc.add_object(Dictionary::from_iter(vec![
+        ("Type", Object::Name(b"Page".to_vec())),
+        ("Annots", Object::Array(vec![Object::Reference(annot_id)])),
+    ]));
+    let pages = doc.add_object(Dictionary::from_iter(vec![
+        ("Type", Object::Name(b"Pages".to_vec())),
+        ("Count", Object::Integer(1)),
+        ("Kids", Object::Array(vec![Object::Reference(page)])),
+    ]));
+    if let Ok(Object::Dictionary(d)) = doc.get_object_mut(page) {
+        d.set("Parent", Object::Reference(pages));
+    }
+    let mut catalog = Dictionary::from_iter(vec![
+        ("Type", Object::Name(b"Catalog".to_vec())),
+        ("Pages", Object::Reference(pages)),
+    ]);
+    if let Some(form) = acroform {
+        catalog.set("AcroForm", Object::Dictionary(form));
+    }
+    let root = doc.add_object(catalog);
+    doc.trailer.set("Root", Object::Reference(root));
+    let tmp = tempfile::NamedTempFile::new().unwrap();
+    doc.save(tmp.path()).unwrap();
+    tmp
+}
+
+fn hex_string(bytes: &[u8]) -> Object {
+    Object::String(bytes.to_vec(), lopdf::StringFormat::Hexadecimal)
+}
+
+#[test]
+fn undecodable_comment_exits_3_and_still_emits_json() {
+    let pdf = pdf_with_annot(
+        Dictionary::from_iter(vec![
+            ("Subtype", Object::Name(b"Text".to_vec())),
+            ("Contents", hex_string(&[0xFE, 0xFF, 0x00])),
+        ]),
+        None,
+    );
+    let output = run_args(&pdf, &["--annotations", "--json"]);
+    assert_eq!(output.status.code(), Some(3));
+    let v: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(v["annotations"][0]["contents"], "<FEFF00>");
+    assert_eq!(v["annotations"][0]["contents_decoded"], false);
+    assert!(String::from_utf8_lossy(&output.stderr).contains("could not be read"));
+
+    let text = run_args(&pdf, &["--annotations"]);
+    assert_eq!(text.status.code(), Some(3));
+}
+
+#[test]
+fn decoded_comment_and_value_exit_0_through_the_whole_tool() {
+    let mut utf16 = vec![0xFE, 0xFF];
+    utf16.extend("Kōkua".encode_utf16().flat_map(u16::to_be_bytes));
+    let form = Dictionary::from_iter(vec![(
+        "Fields",
+        Object::Array(vec![Object::Dictionary(Dictionary::from_iter(vec![
+            ("T", Object::string_literal("name")),
+            ("FT", Object::Name(b"Tx".to_vec())),
+            ("V", hex_string(&utf16)),
+        ]))]),
+    )]);
+    let pdf = pdf_with_annot(
+        Dictionary::from_iter(vec![
+            ("Subtype", Object::Name(b"Text".to_vec())),
+            ("Contents", hex_string(&utf16)),
+        ]),
+        Some(form),
+    );
+    let output = run_args(
+        &pdf,
+        &["--forms", "--annotations", "--detail", "embedded", "--json"],
+    );
+    assert_eq!(output.status.code(), Some(0), "{output:?}");
+    let v: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(v["annotations"]["annotations"][0]["contents"], "Kōkua");
+    assert_eq!(v["forms"]["fields"][0]["value"], "\"Kōkua\"");
+    assert_eq!(v["forms"]["xfa"], false);
+    assert_eq!(v["embedded_files"]["embedded_file_count"], 0);
+}
+
+#[test]
+fn undecodable_form_value_exits_3() {
+    let form = Dictionary::from_iter(vec![(
+        "Fields",
+        Object::Array(vec![Object::Dictionary(Dictionary::from_iter(vec![
+            ("T", Object::string_literal("x")),
+            ("V", hex_string(&[0xFE, 0xFF, 0x00])),
+        ]))]),
+    )]);
+    let pdf = pdf_with_annot(
+        Dictionary::from_iter(vec![("Subtype", Object::Name(b"Link".to_vec()))]),
+        Some(form),
+    );
+    assert_eq!(run_args(&pdf, &["--forms"]).status.code(), Some(3));
+    assert_eq!(
+        run_args(&pdf, &["--forms", "--json"]).status.code(),
+        Some(3)
+    );
+}
+
 /// A PDF whose `--list` output is far larger than a pipe's buffer, so a writer whose reader has
 /// gone must meet the closed pipe instead of finishing inside the buffer.
 fn create_pdf_with_many_objects() -> tempfile::NamedTempFile {

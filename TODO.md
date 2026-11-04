@@ -5,7 +5,7 @@
 A portfolio-style adversarial review found **35 bugs**, filed as `bugs/bug-0001`…`bugs/bug-0035`.
 Each report carries a reproduction (test-ready), a suggested fix, and why the fix works.
 Bugs surfaced _after_ that hunt are slotted into the same phases rather than kept in a separate
-list — the phases are an ordering index, not a record of one review.  So far: **bug-0036**, **bug-0037**.
+list — the phases are an ordering index, not a record of one review.  So far: **bug-0036**, **bug-0037**, **bug-0039**.
 Several are **SPEC DECISIONs** — a downstream instance must NOT code-fix them blindly; resolve
 the decision first (they are gathered in Phase 0 and gate their dependent code fixes).
 
@@ -30,7 +30,8 @@ decision here, then implement in the phase noted. **Do not just “fix the code�
 - [ ] **bug-0004** [HIGH] `/DecodeParms` predictor ignored (apply the PNG/TIFF predictor, or emit a
       “predictor not applied” warning?).  Gates Phase 2 fix. `bugs/bug-0004-decodeparms-predictor-ignored.md`
 - [ ] **bug-0033** [MED] UTF-16BE / non-UTF-8 text strings mishandled in display + search (decode
-      per spec, and/or lossless byte fallback — scope?).  Gates Phase 2 fix.
+      per spec, and/or lossless byte fallback — scope?).  Narrowed by v0.30.0: only `--object`,
+      `--inspect` and `--search` remain.  Gates Phase 2 fix.
       `bugs/bug-0033-text-string-utf16be-mishandled.md`
 - [ ] **bug-0009** [LOW] `--extract-stream` ignores `--json` (emit a JSON summary, or scope the
       docs?).  Gates the Phase 4 doc/behavior fix. `bugs/bug-0009-extract-stream-ignores-json.md`
@@ -51,6 +52,9 @@ decision here, then implement in the phase noted. **Do not just “fix the code�
 
 ### Phase 2 — Silent wrong output (the tool’s core sin)
 
+- [ ] **bug-0039** [HIGH] A syntax error in a content stream silently ends text extraction, with
+      verdict `reliable` and exit 0; `Content::decode` returns `Ok` with what it had.
+      `bugs/bug-0039-content-syntax-error-silently-ends-extraction.md`
 - [ ] **bug-0026** [HIGH] Recovery truncates at the first embedded `endstream` byte-match and
       reports the truncation as a successful repair. `bugs/bug-0026-recovery-truncates-at-embedded-endstream.md`
 - [ ] **bug-0031** [HIGH] `--detail security` reads a key-length from the _next object_ (reports
@@ -138,6 +142,10 @@ graduate (a contract violated is a bug; a contract that should grow is a plan):
   only scans marked-content OCGs (misses XObject/annotation `/OC`).  Under-reports `pages`.
 - `structure.rs` inline-`Dictionary` `/K` elements don’t recurse and drop `page`/`title`/`alt`;
   `/RoleMap` is not applied.  Incompleteness.
+- `--forms` reads what `/Fields` reaches and `/V` and `/RV` only, and `--annotations` reads `/AP /N`
+  only: a widget no field lists, `/DV`, `/Opt`, `/TU`, `/MK`, XFA attributes and template, `/D`, `/R`
+  and the Hidden and NoView flags are out of scope, by plan-0006’s wording.  Documented in
+  `DEBUGGING_WITH_PDF_DUMP.md`.  Each would be a plan if a caller needs it.
 - Inline images (`BI`/`ID`/`EI`) are not counted by `--images` (nothing claims they are).
 - **Test-suite repairs (do alongside the relevant fix):** `tests/integration.rs` `object_flag_nonexistent_object_fails` asserts only stderr text, not the exit status (bug-0019); revisit
   `parse_object_spec_zero` and `multi_object_missing_reports_error_in_json` (bug-0019); the existing

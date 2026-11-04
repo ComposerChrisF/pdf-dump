@@ -3,6 +3,8 @@ use serde_json::{Value, json};
 use std::collections::BTreeSet;
 use std::io::Write;
 
+use crate::text_string::decode_text_string;
+
 use crate::helpers::get_catalog;
 
 pub(crate) struct OutlineItem {
@@ -40,7 +42,7 @@ fn collect_outline_items_inner(
             .get(b"Title")
             .ok()
             .map(|v| match v {
-                Object::String(bytes, _) => String::from_utf8_lossy(bytes).into_owned(),
+                Object::String(bytes, _) => decode_text_string(bytes).text,
                 _ => "(untitled)".to_string(),
             })
             .unwrap_or_else(|| "(untitled)".to_string());

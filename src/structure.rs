@@ -3,7 +3,7 @@ use serde_json::{Value, json};
 use std::collections::{BTreeMap, BTreeSet};
 use std::io::Write;
 
-use crate::helpers::{get_catalog, obj_to_string_lossy, resolve_dict};
+use crate::helpers::{get_catalog, obj_to_text, resolve_dict};
 use crate::types::DumpConfig;
 
 pub(crate) struct StructElemInfo {
@@ -98,9 +98,9 @@ fn collect_struct_children(
 
                     let mcid = extract_mcid(child_dict);
 
-                    let title = child_dict.get(b"T").ok().and_then(obj_to_string_lossy);
+                    let title = child_dict.get(b"T").ok().and_then(obj_to_text);
 
-                    let alt = child_dict.get(b"Alt").ok().and_then(obj_to_string_lossy);
+                    let alt = child_dict.get(b"Alt").ok().and_then(obj_to_text);
 
                     let children = collect_struct_children(doc, child_dict, page_lookup, visited);
 

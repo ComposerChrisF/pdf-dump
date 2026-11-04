@@ -14,6 +14,7 @@ use crate::layers::collect_layers;
 use crate::page_labels::collect_page_labels;
 use crate::stream::{decode_stream, get_filter_names};
 use crate::structure::collect_structure_tree;
+use crate::text_string::decode_text_string;
 use crate::validate::validate_pdf;
 
 pub(crate) fn print_list(writer: &mut impl Write, doc: &Document) {
@@ -158,7 +159,7 @@ pub(crate) fn metadata_info(
             if let Ok(Object::String(bytes, _)) = info_dict.get(key) {
                 info.insert(
                     String::from_utf8_lossy(key).into_owned(),
-                    json!(String::from_utf8_lossy(bytes)),
+                    json!(decode_text_string(bytes).text),
                 );
             }
         }
@@ -175,7 +176,7 @@ pub(crate) fn metadata_info(
             if let Ok(val) = cat.get(key) {
                 let text = match val {
                     Object::Name(n) => format!("/{}", String::from_utf8_lossy(n)),
-                    Object::String(bytes, _) => String::from_utf8_lossy(bytes).into_owned(),
+                    Object::String(bytes, _) => decode_text_string(bytes).text,
                     _ => continue,
                 };
                 catalog.insert(String::from_utf8_lossy(key).into_owned(), json!(text));

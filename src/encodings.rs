@@ -55,6 +55,25 @@ fn latin1_str(b: u8) -> &'static str {
     &LATIN1_HIGH[i..i + 2]
 }
 
+/// PDFDocEncoding (ISO 32000-1 Annex D, Table D.2) for text strings outside content streams:
+/// `0x18..=0x1F` and `0x80..=0xA0` differ from Latin-1.  `None` for a byte the table leaves undefined,
+/// which is every other control code, `0x7F`, `0x9F`, and `0xAD`.
+pub(crate) fn pdfdoc(b: u8) -> Option<char> {
+    const LOW: [char; 8] = ['˘', 'ˇ', 'ˆ', '˙', '˝', '˛', '˚', '˜'];
+    const HIGH: [char; 31] = [
+        '•', '†', '‡', '…', '—', '–', 'ƒ', '⁄', '‹', '›', '−', '‰', '„', '“', '”', '‘', '’', '‚',
+        '™', 'ﬁ', 'ﬂ', 'Ł', 'Œ', 'Š', 'Ÿ', 'Ž', 'ı', 'ł', 'œ', 'š', 'ž',
+    ];
+    match b {
+        b'\t' | b'\n' | b'\r' | 0x20..=0x7E => Some(b as char),
+        0x18..=0x1F => Some(LOW[(b - 0x18) as usize]),
+        0x80..=0x9E => Some(HIGH[(b - 0x80) as usize]),
+        0xA0 => Some('€'),
+        0xA1..=0xFF if b != 0xAD => Some(b as char),
+        _ => None,
+    }
+}
+
 /// The CP1252 high range `0x80..=0x9F`. The five unassigned slots
 /// (`0x81`, `0x8D`, `0x8F`, `0x90`, `0x9D`) are `None`.
 static HIGH_80_9F: [Option<&str>; 32] = [
@@ -532,6 +551,39 @@ pub(crate) fn macexpert(b: u8) -> Option<&'static str> {
         0xBC => "\u{00DE}", // Thornsmall Þ
         _ => return None,
     })
+}
+
+#[cfg(test)]
+mod pdfdoc_tests {
+    use super::pdfdoc;
+
+    #[test]
+    fn pdfdoc_control_characters_table_d2_defines() {
+        assert_eq!(pdfdoc(b'\t'), Some('\t'));
+        assert_eq!(pdfdoc(b'\n'), Some('\n'));
+        assert_eq!(pdfdoc(b'\r'), Some('\r'));
+    }
+
+    /// lopdf carries its own Table D.2: an independent transcription to hold this one against.
+    #[test]
+    fn pdfdoc_agrees_with_lopdfs_table_on_every_defined_byte() {
+        for b in 0..=255u8 {
+            let Some(ours) = pdfdoc(b) else { continue };
+            let string = lopdf::Object::string_literal(vec![b]);
+            let theirs = lopdf::decode_text_string(&string).unwrap();
+            // lopdf's table omits tab, line feed and carriage return, which Table D.2 defines.
+            if !theirs.is_empty() {
+                assert_eq!(theirs, ours.to_string(), "byte 0x{b:02X}");
+            }
+        }
+    }
+
+    #[test]
+    fn pdfdoc_undefined_bytes() {
+        for b in [0x00, 0x08, 0x0B, 0x0C, 0x17, 0x7F, 0x9F, 0xAD] {
+            assert_eq!(pdfdoc(b), None, "byte 0x{b:02X}");
+        }
+    }
 }
 
 #[cfg(test)]

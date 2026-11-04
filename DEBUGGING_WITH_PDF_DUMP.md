@@ -59,6 +59,10 @@ Conditions are ANDed.  Case-insensitive on values.
 | `stream=Text` | `stream=BT` | Decoded stream content containing text |
 | `regex=Pattern` | `regex=D:20(23\|24)` | Regex match across keys, values, and streams |
 
+## Text strings
+
+`--forms`, `--annotations`, `--detail`, `--bookmarks`, `--tags`, and the overview's metadata decode a PDF text string as the standard says: by its UTF-16BE (`FE FF`) or UTF-8 (`EF BB BF`) mark, otherwise as PDFDocEncoding, with any language escape removed.  So raw UTF-8 with no mark, which is invalid, reads as mojibake here, as it does in a viewer.  A string that cannot be decoded prints as lossless hex (`<FEFF00>`), never as replacement characters.  `--forms`, `--annotations` and `--detail embedded` also flag it in `--json`; the others show only the hex.  `--object`, `--inspect` and `--search` still show and match raw bytes (bug-0033).
+
 ## Validation checks (10)
 
 Broken references, unreachable objects, missing required keys (`/MediaBox`, `/Pages`), stream length mismatches, page tree integrity, content stream syntax, font requirements (`/BaseFont`, `/Widths` consistency), page tree cycles, names tree structure, duplicate objects.  Severity levels: `[ERROR]`, `[WARN]`, `[INFO]`, `[OK]`.
@@ -148,13 +152,25 @@ When a content stream declares a wrong `/Length`, a strict parser drops its body
 `{error_count, warning_count, info_count, issues: [{level, message}]}`
 
 **Forms** (`--forms --json`):
-`{acroform_object, need_appearances, field_count, fields: [{object_number, generation, field_name, field_type, value, flags, page_number}]}`
+`{acroform_object, need_appearances, xfa, xfa_packets: [name], xfa_datasets_text, xfa_decoded, field_count, fields: [{object_number, generation, field_name, field_name_decoded, field_type, value, values, value_decoded, inherited, rich_value, rich_value_inherited, rich_value_decoded, has_field_kids, flags, page_number}]}`
+
+- `value` is always one string: `"text"` quoted, `/Name`, a number, `[…]` for a list, `<<…>>` for a dictionary, `<FEFF00>` hex for a string that would not decode, `(empty)`, or, flagged, `(unresolvable reference)` or `(nested too deeply to read)`.  A signature's `<<…>>` leaves out `/ByteRange`, `/Cert`, `/Contents` and `/Reference`.  `values` is a list as a JSON array of decoded items, else `null`.
+- `inherited` is true when `/V` came from an ancestor, and `rich_value_inherited` when `/RV` did.  A parent field holding a value of its own is an entry too, with `has_field_kids: true`, so a value is seen even when every kid overrides it.
+- `rich_value` is `/RV` with its markup removed; malformed markup comes back whole and flagged.  `xfa_datasets_text` is the same for an XFA form's datasets: the character data of every datasets packet or element.
+- **What this does not read.**  The walk starts from `/Fields`, so a widget that no field lists is not an entry, though its appearance is in `--annotations`.  Only `/V` and `/RV` are values: `/DV`, `/Opt`, `/TU` and `/MK` are not reported.  Of XFA, attribute values and the template and form packets are not read, so `xfa: true` with `xfa_decoded: true` does not say the form was read in full; `xfa_packets` is empty when `/XFA` is one stream.
+- `object_number` and `generation` are `null` for a field written directly in `/Fields` or `/Kids`.
+- A `*_decoded: false` on a value, a rich value, or the XFA data makes the run exit **3**, with a stderr warning; the JSON still emits.  `field_name_decoded: false` is only a flag.
 
 **Bookmarks** (`--bookmarks --json`):
 `{bookmark_count, bookmarks: [{object_number, title, destination, children: [...]}]}`
 
 **Annotations** (`--annotations --json`):
-`{annotation_count, annotations: [{page_number, object_number, generation, subtype, rect, contents, link_type?, target?}]}`
+`{annotation_count, annotations: [{page_number, object_number, generation, subtype, rect, contents, contents_decoded, rich_contents, rich_contents_decoded, link_type, target, appearance_text, appearance_state, appearance_reliability, appearance_warnings}]}`
+
+- Every entry in `/Annots` is listed, direct or indirect; `object_number` and `generation` are `null` for a direct one.
+- `rich_contents` is `/RC` with its markup removed.
+- `appearance_text` is what `/AP /N` shows, read by the extractor `--text` uses; `null` when there is none.  `/D`, `/R` and an annotation's Hidden and NoView flags are not read.  `appearance_reliability` has the shape of `--text`'s `reliability`, except that only the fonts the appearance selects count, and it is `unreliable` when a stream could not be read, or text is shown in a font no `Tf` named, or a `gs` sets one.  For a state dictionary `appearance_state` is the `/AS` selected; with no `/AS`, every state is read, since nothing says which one shows.  A widget with no `/Resources` uses the form's `/DR`; any other annotation, the page's.
+- The run exits **3**, with a stderr warning, on `contents_decoded: false`, `rich_contents_decoded: false`, or an appearance verdict other than `reliable`.  A checkbox's or radio button's state is excused when all it fails on is Symbol or ZapfDingbats, since it draws a mark, not text.
 
 **Tree** (`--tree --json`):
 `{tree: {node: "Trailer", children: [{key, object, label, status?, children: [...]}]}}`
@@ -166,7 +182,9 @@ When a content stream declares a wrong `/Length`, a strict parser drops its body
 `{encrypted, algorithm, version, revision, key_length, permissions_raw, permissions: {Print, Modify, "Copy/extract text", Annotate, "Fill forms", "Accessibility extract", Assemble, "Print high quality"}, encrypt_object}`
 
 **Detail embedded** (`--detail embedded --json`):
-`{embedded_file_count, embedded_files: [{name, filename, mime_type, size, object_number, filespec_object, filespec_generation}]}`
+`{embedded_file_count, embedded_files: [{name, filename, filename_decoded, mime_type, size, object_number, filespec_object, filespec_generation, reached_from}]}`
+
+Every file, however it is reached: `reached_from` is `name_tree`; `filespec` (a filespec with `/EF` anywhere else, such as behind a `Launch` or `GoToE` action or an annotation's `/FS`); or `orphan` (a `/Type /EmbeddedFile` stream no `/EF` names).  A stream reached twice is one file, and each distinct stream in one `/EF` or `/RF` is its own file.  `filespec_object` is `null` for a direct filespec or an orphan.
 
 **Detail labels** (`--detail labels --json`):
 `{page_count, page_labels: [{physical_page, label, style, prefix, start}]}`

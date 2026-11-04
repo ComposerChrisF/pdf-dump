@@ -44,10 +44,10 @@ The tool is split across the modules in `src/`.  The flow is:
 | `--find-text` | `find_text.rs` | `print_find_text`, `find_text_json_value` |
 | `--fonts` | `fonts.rs` | `print_fonts`, `fonts_json_value` |
 | `--images` | `images.rs` | `print_images`, `images_json_value` |
-| `--forms` | `forms.rs` | `print_forms`, `forms_json_value` |
+| `--forms` | `forms.rs` | `print_forms`, `forms_json_value_with_status`, `collect_xfa` |
 | `--validate` | `validate.rs` | `print_validation`, `validation_json_value` |
 | `--bookmarks` | `bookmarks.rs` | `print_bookmarks`, `bookmarks_json_value` |
-| `--annotations` | `annotations.rs` | `print_annotations`, `annotations_json_value` |
+| `--annotations` | `annotations.rs` | `print_annotations`, `annotations_json_value_with_status`; appearance text via `text::appearance_text` |
 | `--tree` | `tree.rs` | `print_tree`, `tree_json_value` |
 | `--tags` | `structure.rs` | `print_structure`, `structure_json_value` |
 | `--detail security` | `security.rs` | `print_security`, `security_json_value` |
@@ -62,6 +62,7 @@ The tool is split across the modules in `src/`.  The flow is:
 |--------|------|
 | `types.rs` | `Args`, `DumpConfig`, `ResolvedMode`, `PageSpec`, `DetailSub` |
 | `stream.rs` | `decode_stream` — filter pipeline: FlateDecode, ASCII85, ASCIIHex, LZW, RunLength |
+| `text_string.rs` | `decode_text_string` — the one decoder for PDF text strings (UTF-16BE and UTF-8 marks, else PDFDocEncoding; hex and `decoded: false` when it cannot), `read_text_value` (string, stream, or reference), `strip_markup` for `/RV`, `/RC` and XFA data.  `--object` and `--search` do not use it yet (bug-0033) |
 | `helpers.rs` | Shared formatting utilities; `read_content_streams` (joins a page’s `/Contents` segments with a newline so tokens never fuse); `inherited_page_attr` (walks `/Parent` for `MediaBox`/`CropBox`/`Rotate`) |
 | `refs.rs` | Reference traversal, reverse ref lookup |
 | `resources.rs` | Page resource extraction (fonts, XObjects, ExtGState, ColorSpaces) |

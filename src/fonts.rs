@@ -2,9 +2,7 @@ use lopdf::{Document, Object, ObjectId};
 use serde_json::{Value, json};
 use std::io::Write;
 
-use crate::helpers::{
-    find_font_file_id, name_to_string, obj_to_string_lossy, resolve_array, resolve_dict,
-};
+use crate::helpers::{find_font_file_id, name_to_string, obj_to_text, resolve_array, resolve_dict};
 
 pub(crate) struct FontInfo {
     pub object_id: ObjectId,
@@ -185,12 +183,12 @@ pub(crate) fn extract_cid_system_info(doc: &Document, dict: &lopdf::Dictionary) 
     let registry = csi_dict
         .get(b"Registry")
         .ok()
-        .and_then(obj_to_string_lossy)
+        .and_then(obj_to_text)
         .unwrap_or_else(|| "?".to_string());
     let ordering = csi_dict
         .get(b"Ordering")
         .ok()
-        .and_then(obj_to_string_lossy)
+        .and_then(obj_to_text)
         .unwrap_or_else(|| "?".to_string());
     let supplement = csi_dict
         .get(b"Supplement")

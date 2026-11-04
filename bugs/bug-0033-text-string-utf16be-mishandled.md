@@ -32,6 +32,10 @@ So it does not merely fail to decode; it produces a confident wrong answer in bo
 
 **Suggested addition to the fix:** when a string carries the `FE FF` BOM, decode it _and_ make the encoding visible (e.g. `Title: Aia i ka La‘i (F. 183)  [UTF-16BE]`), so the reader can tell “decoded from UTF-16BE” from “was ASCII all along”.  That distinction is what would have made the pdf-orchestrator defect visible on sight instead of invisible for the tool’s whole history.
 
+## Amendment — 3-Nov-2026: narrowed by plan-0006
+
+v0.30.0 added `text_string::decode_text_string` and uses it in `--forms`, `--annotations`, `--detail`, `--bookmarks`, `--tags` and the overview’s metadata, so the `/Title` case in the amendment above now reads correctly there.  Still open, and still the decision this report asks for: `--object`, `--inspect` and `--search`, which show and match raw bytes.
+
 ## Affected code
 Display:
 - `src/object.rs:139-148` — text mode: literal strings printed lossy.

@@ -3,9 +3,7 @@ use serde_json::{Value, json};
 use std::collections::{BTreeMap, BTreeSet};
 use std::io::Write;
 
-use crate::helpers::{
-    get_catalog, name_to_string, obj_to_string_lossy, resolve_array, resolve_dict,
-};
+use crate::helpers::{get_catalog, name_to_string, obj_to_text, resolve_array, resolve_dict};
 
 pub(crate) struct OcgInfo {
     pub object_id: ObjectId,
@@ -89,7 +87,7 @@ pub(crate) fn collect_layers(doc: &Document) -> Vec<OcgInfo> {
         let name = ocg_dict
             .get(b"Name")
             .ok()
-            .and_then(obj_to_string_lossy)
+            .and_then(obj_to_text)
             .unwrap_or_else(|| "(unnamed)".to_string());
 
         let default_state = if off_set.contains(&ocg_id) {

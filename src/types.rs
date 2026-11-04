@@ -134,9 +134,10 @@ Exit codes:
       (--validate found errors; the text that --text printed or --find-text
        searched was degraded or unreliable, e.g. a CID/Type0 font without a
        ToUnicode map or >20% of codes undecodable, and the output is still
-       printed; --strict detected a
-       malformed stream /Length; or the PDF is encrypted and could not be
-       decrypted — supply --password to read it)
+       printed; a --forms value, rich value or XFA data, or an --annotations
+       comment or rich comment, could not be read, or an annotation's appearance
+       text is not reliable; --strict detected a malformed stream /Length; or the PDF is encrypted
+       and could not be decrypted — supply --password to read it)
 ")]
 pub(crate) struct Args {
     /// Path to the PDF file
@@ -189,11 +190,15 @@ pub(crate) struct Args {
     pub tags: bool,
 
     // ── Annotations & Forms ──────────────────────────────────────────
-    /// Show annotations with link targets (all pages, or filtered with --page)
+    /// Show every annotation: link targets, comments, rich text, and the text its
+    /// appearance shows with a reliability verdict (all pages, or filtered with --page).
+    /// Exits 3 when any of that text could not be read reliably
     #[arg(long, help_heading = "Annotations & Forms")]
     pub annotations: bool,
 
-    /// List form fields (AcroForm)
+    /// List the fields under /AcroForm /Fields, with every /V and /RV: lists, stream
+    /// values, inherited values, rich text, and XFA datasets.  Exits 3 when one could
+    /// not be read
     #[arg(long, help_heading = "Annotations & Forms")]
     pub forms: bool,
 

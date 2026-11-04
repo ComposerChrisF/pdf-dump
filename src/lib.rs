@@ -62,6 +62,7 @@ pub(crate) mod stream;
 pub(crate) mod structure;
 pub(crate) mod summary;
 pub(crate) mod text;
+pub(crate) mod text_string;
 pub(crate) mod tree;
 pub(crate) mod types;
 pub(crate) mod validate;
@@ -457,9 +458,9 @@ fn build_mode_json_value(
         DocMode::Validate => validate::validation_json_value_with_status(doc),
         DocMode::Fonts => (fonts::fonts_json_value(doc), false),
         DocMode::Images => (images::images_json_value(doc), false),
-        DocMode::Forms => (forms::forms_json_value(doc), false),
+        DocMode::Forms => forms::forms_json_value_with_status(doc),
         DocMode::Bookmarks => (bookmarks::bookmarks_json_value(doc), false),
-        DocMode::Annotations => (annotations::annotations_json_value(doc, page_spec), false),
+        DocMode::Annotations => annotations::annotations_json_value_with_status(doc, page_spec),
         DocMode::Text if args.layout => layout::layout_json_value(doc, page_spec, args.layout_cell),
         DocMode::Text => text::text_json_value(doc, page_spec),
         DocMode::Operators => (operators::operators_json_value(doc, page_spec), false),
@@ -480,7 +481,7 @@ fn build_mode_json_value(
     }
 }
 
-/// Returns `true` if the mode reported issues (currently only `--validate`).
+/// Returns `true` if the mode reported issues (findings, exit 3).
 fn dispatch_mode_text(
     out: &mut impl Write,
     mode: &DocMode,
@@ -503,18 +504,12 @@ fn dispatch_mode_text(
             images::print_images(out, doc);
             false
         }
-        DocMode::Forms => {
-            forms::print_forms(out, doc);
-            false
-        }
+        DocMode::Forms => forms::print_forms(out, doc),
         DocMode::Bookmarks => {
             bookmarks::print_bookmarks(out, doc);
             false
         }
-        DocMode::Annotations => {
-            annotations::print_annotations(out, doc, page_spec);
-            false
-        }
+        DocMode::Annotations => annotations::print_annotations(out, doc, page_spec),
         DocMode::Text if args.layout => layout::print_layout(out, doc, page_spec, args.layout_cell),
         DocMode::Text => text::print_text(out, doc, page_spec),
         DocMode::Operators => {

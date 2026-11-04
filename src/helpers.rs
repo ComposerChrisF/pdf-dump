@@ -3,6 +3,7 @@ use serde_json::Value;
 use std::collections::BTreeSet;
 
 use crate::stream::decode_stream;
+use crate::text_string::decode_text_string;
 use crate::types::PageSpec;
 
 pub(crate) fn build_page_list(
@@ -79,6 +80,14 @@ pub(crate) fn resolve_dict<'a>(
     }
 }
 
+/// A page's `/Annots` entries, direct or indirect, however the array itself is stored.
+pub(crate) fn page_annots<'a>(doc: &'a Document, page: &'a lopdf::Dictionary) -> &'a [Object] {
+    page.get(b"Annots")
+        .ok()
+        .and_then(|annots| resolve_array(doc, annots))
+        .unwrap_or(&[])
+}
+
 pub(crate) fn resolve_array<'a>(doc: &'a Document, obj: &'a Object) -> Option<&'a [Object]> {
     match obj {
         Object::Array(a) => Some(a),
@@ -90,10 +99,10 @@ pub(crate) fn resolve_array<'a>(doc: &'a Document, obj: &'a Object) -> Option<&'
     }
 }
 
-/// Extracts a String from an Object::String or Object::Name (lossy UTF-8 conversion).
-pub(crate) fn obj_to_string_lossy(obj: &Object) -> Option<String> {
+/// The text of a text string (decoded per the standard, hex when it cannot be) or a name.
+pub(crate) fn obj_to_text(obj: &Object) -> Option<String> {
     match obj {
-        Object::String(bytes, _) => Some(String::from_utf8_lossy(bytes).into_owned()),
+        Object::String(bytes, _) => Some(decode_text_string(bytes).text),
         Object::Name(n) => Some(String::from_utf8_lossy(n).into_owned()),
         _ => None,
     }
@@ -205,7 +214,7 @@ fn walk_name_tree_inner(
         let mut i = 0;
         while i + 1 < names.len() {
             let key = match &names[i] {
-                Object::String(bytes, _) => String::from_utf8_lossy(bytes).into_owned(),
+                Object::String(bytes, _) => decode_text_string(bytes).text,
                 _ => {
                     i += 2;
                     continue;
@@ -607,6 +616,19 @@ mod tests {
             Object::Integer(99), // unusual
         ]);
         assert_eq!(format_filter(&obj), "FlateDecode, ?");
+    }
+
+    #[test]
+    fn obj_to_text_decodes_a_text_string_and_keeps_a_name() {
+        let mut bytes = vec![0xFE, 0xFF];
+        bytes.extend("La‘i".encode_utf16().flat_map(u16::to_be_bytes));
+        let s = Object::String(bytes, StringFormat::Hexadecimal);
+        assert_eq!(obj_to_text(&s).as_deref(), Some("La‘i"));
+        assert_eq!(
+            obj_to_text(&Object::Name(b"N".to_vec())).as_deref(),
+            Some("N")
+        );
+        assert_eq!(obj_to_text(&Object::Integer(1)), None);
     }
 
     #[test]

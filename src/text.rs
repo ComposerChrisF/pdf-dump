@@ -43,7 +43,7 @@ impl Reliability {
         self != Reliability::Reliable
     }
 
-    fn as_str(self) -> &'static str {
+    pub(crate) fn as_str(self) -> &'static str {
         match self {
             Reliability::Reliable => "reliable",
             Reliability::Degraded => "degraded",
@@ -140,6 +140,10 @@ struct ExtractState {
     /// Whether the next `BT` is the first one seen (no leading newline). Shared
     /// across the recursion so form text joins page text consistently.
     first_bt: bool,
+    /// The records of the fonts a `Tf` actually selected, each from its own stream's resources.
+    used_fonts: Vec<FontReliabilityRecord>,
+    /// Text was shown with no font this walk could name, or a `gs` set one it does not model.
+    unknown_font_shown: bool,
 }
 
 impl ExtractState {
@@ -151,6 +155,8 @@ impl ExtractState {
             unmapped_codes: 0,
             fonts: Vec::new(),
             first_bt: true,
+            used_fonts: Vec::new(),
+            unknown_font_shown: false,
         }
     }
 
@@ -217,6 +223,103 @@ pub(crate) fn extract_text_from_page_with_warnings(
     state.into_result()
 }
 
+/// Whether a named graphics state sets a font (`/Font [font size]`, § 8.4.5), which the walk does not
+/// follow.
+fn extgstate_sets_font(doc: &Document, resources: Option<&lopdf::Dictionary>, name: &[u8]) -> bool {
+    resources
+        .and_then(|r| r.get(b"ExtGState").ok())
+        .and_then(|o| helpers::resolve_dict(doc, o))
+        .and_then(|d| d.get(name).ok())
+        .and_then(|o| helpers::resolve_dict(doc, o))
+        .is_some_and(|d| d.has(b"Font"))
+}
+
+/// The text an annotation's appearance streams show, with their reliability verdict.
+pub(crate) struct AppearanceText {
+    pub text: String,
+    pub verdict: Reliability,
+    pub reliability: Value,
+    pub warnings: Vec<String>,
+    /// Everything is readable apart from Symbol or ZapfDingbats, which draw marks.  What excuses a
+    /// checkbox's verdict, and nothing else does: a state that will not decode is still unread.
+    pub only_symbols_unread: bool,
+}
+
+/// The standard-14 symbolic fonts, embedded subsets (`ABCDEF+ZapfDingbats`) included.
+fn is_symbol_font(base_font: &str) -> bool {
+    let name = base_font.rsplit('+').next().unwrap_or(base_font);
+    name == "Symbol" || name == "ZapfDingbats"
+}
+
+/// Reads appearance streams (`/AP /N`) with the extractor `--text` uses.  `fallback_resources` serve
+/// a stream with no `/Resources` of its own.
+///
+/// The verdict differs from `--text`'s in one way: only the fonts a stream selects count.  A widget's
+/// appearance commonly declares its form's whole `/DR`, and ZapfDingbats sitting unused beside
+/// Helvetica says nothing about the text shown.  That reading rests on knowing which font drew the
+/// text, so text shown with no named font, a font set by `gs`, and a stream that could not be read
+/// each make the verdict `Unreliable`.
+pub(crate) fn appearance_text(
+    doc: &Document,
+    streams: &[ObjectId],
+    fallback_resources: Option<&lopdf::Dictionary>,
+) -> AppearanceText {
+    let mut state = ExtractState::new();
+    let mut visited = HashSet::new();
+    for &id in streams {
+        let Ok(Object::Stream(stream)) = doc.get_object(id) else {
+            state
+                .warnings
+                .push(format!("Appearance {} {} is not a stream", id.0, id.1));
+            continue;
+        };
+        let (decoded, warning) = crate::stream::decode_stream(stream);
+        if let Some(w) = warning {
+            state
+                .warnings
+                .push(format!("Appearance {} {}: {}", id.0, id.1, w));
+            continue;
+        }
+        let resources = stream
+            .dict
+            .get(b"Resources")
+            .ok()
+            .and_then(|r| helpers::resolve_dict(doc, r))
+            .or(fallback_resources);
+        visited.insert(id);
+        process_content(doc, &decoded, resources, None, &mut state, &mut visited, 0);
+        visited.remove(&id);
+    }
+    if state.unknown_font_shown {
+        state
+            .warnings
+            .push("Text is shown in a font this reader cannot name".to_string());
+    }
+
+    let used = dedup_font_records(std::mem::take(&mut state.used_fonts));
+    let verdict = if state.warnings.is_empty() {
+        document_verdict(&used, state.total_codes, state.unmapped_codes)
+    } else {
+        Reliability::Unreliable
+    };
+    let not_symbols: Vec<FontReliabilityRecord> = used
+        .iter()
+        .filter(|f| !is_symbol_font(&f.base_font))
+        .cloned()
+        .collect();
+    let only_symbols_unread =
+        state.warnings.is_empty() && !document_verdict(&not_symbols, 0, 0).is_finding();
+    let mut reliability = reliability_json_value(&used, state.total_codes, state.unmapped_codes);
+    reliability["verdict"] = json!(verdict.as_str());
+    AppearanceText {
+        text: state.text,
+        verdict,
+        reliability,
+        warnings: state.warnings,
+        only_symbols_unread,
+    }
+}
+
 /// Walk one decoded content stream's operations, appending decoded text and
 /// reliability data to `state`. Recurses into form XObjects invoked via `Do`,
 /// resolving each form's own `/Resources` (or inheriting the caller's) and
@@ -242,6 +345,8 @@ fn process_content(
         Some(res) => build_font_table(doc, res),
         None => (std::collections::HashMap::new(), Vec::new()),
     };
+    let scope_start = state.fonts.len();
+    let scope_len = fonts.len();
     state.fonts.append(&mut fonts);
 
     if bytes.is_empty() {
@@ -264,7 +369,17 @@ fn process_content(
     // restores than saves) is ignored rather than clearing the font.
     let mut saved_fonts: Vec<Option<&FontDecoder>> = Vec::new();
     for op in &operations {
+        if current_font.is_none() && matches!(op.operator.as_str(), "Tj" | "TJ" | "'" | "\"") {
+            state.unknown_font_shown = true;
+        }
         match op.operator.as_str() {
+            "gs" => {
+                if let Some(Object::Name(n)) = op.operands.first()
+                    && extgstate_sets_font(doc, resources, n)
+                {
+                    state.unknown_font_shown = true;
+                }
+            }
             "q" => saved_fonts.push(current_font),
             "Q" => {
                 if let Some(f) = saved_fonts.pop() {
@@ -281,6 +396,11 @@ fn process_content(
                 // Select the active font by resource name (e.g. /F1 12 Tf).
                 if let Some(Object::Name(n)) = op.operands.first() {
                     let key = String::from_utf8_lossy(n);
+                    let record_name = format!("/{key}");
+                    let scope = &state.fonts[scope_start..scope_start + scope_len];
+                    if let Some(record) = scope.iter().find(|f| f.name == record_name) {
+                        state.used_fonts.push(record.clone());
+                    }
                     current_font = font_table.get(key.as_ref());
                 }
             }
