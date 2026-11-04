@@ -1,8 +1,11 @@
 use lopdf::{Document, Object, ObjectId};
 use serde_json::{Value, json};
+use std::collections::BTreeSet;
 use std::io::Write;
 
 use crate::helpers::{format_color_space, format_filter};
+use crate::image_export::{ImageSource, export_format, full_filter_name};
+use crate::inline_image::{InlineImage, InlineScan, scan_document};
 
 pub(crate) struct ImageInfo {
     pub object_id: ObjectId,
@@ -12,66 +15,133 @@ pub(crate) struct ImageInfo {
     pub bits_per_component: i64,
     pub filter: String,
     pub size: usize,
+    /// What `--extract-image` would write; `None` when the image's filters cannot be read.
+    pub export_format: Option<&'static str>,
 }
 
 pub(crate) fn collect_images(doc: &Document) -> Vec<ImageInfo> {
+    let is_image = |dict: &lopdf::Dictionary| {
+        let subtype = dict.get(b"Subtype").ok().map(|v| match v {
+            Object::Reference(id) => doc.get_object(*id).ok(),
+            other => Some(other),
+        });
+        matches!(subtype, Some(Some(Object::Name(n))) if n == b"Image")
+    };
+    let mut wanted: BTreeSet<ObjectId> = doc
+        .objects
+        .iter()
+        .filter(|(_, object)| matches!(object, Object::Stream(s) if is_image(&s.dict)))
+        .map(|(&id, _)| id)
+        .collect();
+    // A mask is an image whatever its /Subtype says, and poppler draws one that has none.  A caller
+    // reading every image must get it, since a scan may keep its words there.
+    let masks: Vec<ObjectId> = wanted
+        .iter()
+        .filter_map(|id| match doc.objects.get(id) {
+            Some(Object::Stream(s)) => Some(s),
+            _ => None,
+        })
+        .flat_map(|s| [s.dict.get(b"SMask"), s.dict.get(b"Mask")])
+        .filter_map(|mask| mask.ok()?.as_reference().ok())
+        .filter(|id| matches!(doc.get_object(*id), Ok(Object::Stream(_))))
+        .collect();
+    wanted.extend(masks);
+
     let mut images = Vec::new();
-    for (&obj_id, object) in &doc.objects {
-        let (dict, content_len) = match object {
-            Object::Stream(s) => (&s.dict, s.content.len()),
-            _ => continue,
-        };
-
-        let is_image = dict
-            .get(b"Subtype")
-            .ok()
-            .is_some_and(|v| v.as_name().ok().is_some_and(|n| n == b"Image"));
-        if !is_image {
+    for obj_id in wanted {
+        let Some(Object::Stream(stream)) = doc.objects.get(&obj_id) else {
             continue;
-        }
-
-        let width = dict
-            .get(b"Width")
-            .ok()
-            .and_then(|v| v.as_i64().ok())
-            .unwrap_or(0);
-        let height = dict
-            .get(b"Height")
-            .ok()
-            .and_then(|v| v.as_i64().ok())
-            .unwrap_or(0);
+        };
+        let dict = &stream.dict;
+        let number = |key: &[u8]| {
+            dict.get(key)
+                .ok()
+                .and_then(|v| match v {
+                    Object::Reference(id) => doc.get_object(*id).ok(),
+                    other => Some(other),
+                })
+                .and_then(|v| v.as_i64().ok())
+                .unwrap_or(0)
+        };
         let color_space = dict
             .get(b"ColorSpace")
             .ok()
             .map(|v| format_color_space(v, doc))
             .unwrap_or_else(|| "-".to_string());
-        let bits_per_component = dict
-            .get(b"BitsPerComponent")
-            .ok()
-            .and_then(|v| v.as_i64().ok())
-            .unwrap_or(0);
         let filter = dict
             .get(b"Filter")
             .ok()
             .map(format_filter)
             .unwrap_or_else(|| "-".to_string());
-
         images.push(ImageInfo {
             object_id: obj_id,
-            width,
-            height,
+            width: number(b"Width"),
+            height: number(b"Height"),
             color_space,
-            bits_per_component,
+            bits_per_component: number(b"BitsPerComponent"),
             filter,
-            size: content_len,
+            size: stream.content.len(),
+            export_format: export_format(
+                doc,
+                &ImageSource {
+                    dict,
+                    data: &[],
+                    resources: None,
+                    inline: false,
+                },
+            )
+            .map(|f| f.name()),
         });
     }
-
-    images.sort_by_key(|i| i.object_id);
     images
 }
 
-pub(crate) fn print_images(writer: &mut impl Write, doc: &Document) {
+/// An inline image's dictionary entry under either spelling of its key.
+fn inline_entry<'a>(image: &'a InlineImage, long: &[u8], short: &[u8]) -> Option<&'a Object> {
+    image.dict.get(long).or_else(|_| image.dict.get(short)).ok()
+}
+
+fn inline_filter(image: &InlineImage) -> String {
+    match inline_entry(image, b"Filter", b"F") {
+        Some(Object::Name(n)) => full_filter_name(n),
+        Some(Object::Array(items)) => items
+            .iter()
+            .map(|item| match item {
+                Object::Name(n) => full_filter_name(n),
+                _ => "?".to_string(),
+            })
+            .collect::<Vec<_>>()
+            .join(", "),
+        _ => "-".to_string(),
+    }
+}
+
+/// The dictionary's own text, abbreviations spelled out.  A name from the resources stays a name.
+fn inline_color_space(doc: &Document, image: &InlineImage) -> String {
+    let Some(space) = inline_entry(image, b"ColorSpace", b"CS") else {
+        return "-".to_string();
+    };
+    match space {
+        Object::Name(n) if n == b"G" => "DeviceGray".to_string(),
+        Object::Name(n) if n == b"RGB" => "DeviceRGB".to_string(),
+        Object::Name(n) if n == b"CMYK" => "DeviceCMYK".to_string(),
+        other => format_color_space(other, doc),
+    }
+}
+
+fn inline_number(image: &InlineImage, long: &[u8], short: &[u8]) -> Option<i64> {
+    inline_entry(image, long, short)?.as_i64().ok()
+}
+
+fn warn_unwalked(scan: &InlineScan) -> bool {
+    for warning in &scan.warnings {
+        eprintln!("Warning: looking for inline images, {warning}");
+    }
+    !scan.warnings.is_empty()
+}
+
+/// Returns `true` when part of a page could not be walked for inline images (a finding, exit 3).
+pub(crate) fn print_images(writer: &mut impl Write, doc: &Document) -> bool {
     let images = collect_images(doc);
     wln!(writer, "{} images found\n", images.len());
     wln!(
@@ -98,9 +168,49 @@ pub(crate) fn print_images(writer: &mut impl Write, doc: &Document) {
             img.size
         );
     }
+
+    let scan = scan_document(doc);
+    if !scan.images.is_empty() {
+        wln!(writer, "\n{} inline images found\n", scan.images.len());
+        wln!(
+            writer,
+            "  {:>10}  {:<10} {:>8}  {:>5}  {:>6}  {:<18} {:>3}  {:<18} {:>8}",
+            "PAGE:INDEX",
+            "Source",
+            "Offset",
+            "Width",
+            "Height",
+            "ColorSpace",
+            "BPC",
+            "Filter",
+            "Size"
+        );
+        for image in &scan.images {
+            wln!(
+                writer,
+                "  {:>10}  {:<10} {:>8}  {:>5}  {:>6}  {:<18} {:>3}  {:<18} {:>8}",
+                format!("{}:{}", image.page, image.index),
+                image.source,
+                image.offset,
+                inline_number(image, b"Width", b"W").unwrap_or(0),
+                inline_number(image, b"Height", b"H").unwrap_or(0),
+                inline_color_space(doc, image),
+                inline_number(image, b"BitsPerComponent", b"BPC").unwrap_or(0),
+                inline_filter(image),
+                image.size
+            );
+        }
+    }
+    warn_unwalked(&scan)
 }
 
+#[cfg(test)]
 pub(crate) fn images_json_value(doc: &Document) -> Value {
+    images_json_value_with_status(doc).0
+}
+
+/// Returns the JSON and whether part of a page could not be walked for inline images.
+pub(crate) fn images_json_value_with_status(doc: &Document) -> (Value, bool) {
     let images = collect_images(doc);
     let items: Vec<Value> = images
         .iter()
@@ -114,13 +224,42 @@ pub(crate) fn images_json_value(doc: &Document) -> Value {
                 "bits_per_component": img.bits_per_component,
                 "filter": img.filter,
                 "size": img.size,
+                "export_format": img.export_format,
             })
         })
         .collect();
-    json!({
-        "image_count": items.len(),
-        "images": items,
-    })
+    let scan = scan_document(doc);
+    let inline: Vec<Value> = scan
+        .images
+        .iter()
+        .map(|image| {
+            json!({
+                "page_number": image.page,
+                "index": image.index,
+                "source": image.source,
+                "source_object": image.source_object.map(|id| id.0),
+                "offset": image.offset,
+                "width": inline_number(image, b"Width", b"W"),
+                "height": inline_number(image, b"Height", b"H"),
+                "color_space": inline_color_space(doc, image),
+                "bits_per_component": inline_number(image, b"BitsPerComponent", b"BPC"),
+                "filter": inline_filter(image),
+                "size": image.size,
+                "export_format": export_format(doc, &image.as_source()).map(|f| f.name()),
+            })
+        })
+        .collect();
+    let had_issues = warn_unwalked(&scan);
+    (
+        json!({
+            "image_count": items.len(),
+            "images": items,
+            "inline_image_count": inline.len(),
+            "inline_images": inline,
+            "inline_image_warnings": scan.warnings,
+        }),
+        had_issues,
+    )
 }
 
 #[cfg(test)]
@@ -131,6 +270,23 @@ mod tests {
     use lopdf::{Dictionary, Stream};
     use pretty_assertions::assert_eq;
     use serde_json::Value;
+
+    #[test]
+    fn a_mask_with_no_subtype_is_listed_and_an_indirect_subtype_is_followed() {
+        let mut doc = Document::new();
+        doc.objects.insert((8, 0), Object::Name(b"Image".to_vec()));
+        let mut image = Dictionary::new();
+        image.set("Subtype", Object::Reference((8, 0)));
+        image.set("SMask", Object::Reference((2, 0)));
+        doc.objects
+            .insert((1, 0), Object::Stream(Stream::new(image, vec![0])));
+        doc.objects.insert(
+            (2, 0),
+            Object::Stream(Stream::new(Dictionary::new(), vec![0])),
+        );
+        let ids: Vec<u32> = collect_images(&doc).iter().map(|i| i.object_id.0).collect();
+        assert_eq!(ids, vec![1, 2]);
+    }
 
     #[test]
     fn collect_images_finds_image_stream() {

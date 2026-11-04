@@ -51,3 +51,7 @@ Looking up the object’s real generation makes the object-addressed modes agree
 ## Related
 [[bug-0019-missing-object-modes-exit-zero]] (the false “not found” also exits 0),
 [[bug-0021-object-indirect-reference-masquerade]].
+
+## Amendment — 3-Nov-2026: `--extract-image` shares this
+
+`--extract-image` (v0.31.0, plan-0005) addresses objects at generation 0 like the other modes, while `--images` lists every generation, so a listed image at generation 1 cannot be exported.  The decision here should cover it.

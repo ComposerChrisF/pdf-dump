@@ -603,6 +603,316 @@ fn undecodable_form_value_exits_3() {
     );
 }
 
+// ── plan-0005: images as viewable files ──────────────────────────────
+
+/// Saves a one-page PDF drawing `content`, holding `image` when given, and returns the file with the
+/// image's object number.
+fn pdf_with_image(image: Option<Stream>, content: &[u8]) -> (tempfile::NamedTempFile, u32) {
+    let mut doc = Document::with_version("1.7");
+    let image_id = image.map(|s| doc.add_object(Object::Stream(s)));
+    let contents = doc.add_object(Object::Stream(Stream::new(
+        Dictionary::new(),
+        content.to_vec(),
+    )));
+    let page = doc.add_object(Dictionary::from_iter(vec![
+        ("Type", Object::Name(b"Page".to_vec())),
+        ("Contents", Object::Reference(contents)),
+    ]));
+    let pages = doc.add_object(Dictionary::from_iter(vec![
+        ("Type", Object::Name(b"Pages".to_vec())),
+        ("Count", Object::Integer(1)),
+        ("Kids", Object::Array(vec![Object::Reference(page)])),
+    ]));
+    if let Ok(Object::Dictionary(d)) = doc.get_object_mut(page) {
+        d.set("Parent", Object::Reference(pages));
+    }
+    let root = doc.add_object(Dictionary::from_iter(vec![
+        ("Type", Object::Name(b"Catalog".to_vec())),
+        ("Pages", Object::Reference(pages)),
+    ]));
+    doc.trailer.set("Root", Object::Reference(root));
+    let tmp = tempfile::NamedTempFile::new().unwrap();
+    doc.save(tmp.path()).unwrap();
+    (tmp, image_id.map_or(0, |id| id.0))
+}
+
+fn gray_image(w: i64, h: i64, data: Vec<u8>) -> Stream {
+    Stream::new(
+        Dictionary::from_iter(vec![
+            ("Subtype", Object::Name(b"Image".to_vec())),
+            ("Width", Object::Integer(w)),
+            ("Height", Object::Integer(h)),
+            ("BitsPerComponent", Object::Integer(8)),
+            ("ColorSpace", Object::Name(b"DeviceGray".to_vec())),
+        ]),
+        data,
+    )
+}
+
+/// SOI, then a baseline frame of 1×1; enough for what the export checks.
+const JPEG_BYTES: &[u8] = &[0xFF, 0xD8, 0xFF, 0xC0, 0, 11, 8, 0, 1, 0, 1, 1, 1, 0x11, 0];
+
+fn jpeg_image() -> Stream {
+    let mut stream = gray_image(1, 1, JPEG_BYTES.to_vec());
+    stream
+        .dict
+        .set("Filter", Object::Name(b"DCTDecode".to_vec()));
+    stream
+}
+
+fn png_pixels(path: &std::path::Path) -> (u32, u32, Vec<u8>) {
+    let decoder = png::Decoder::new(std::io::BufReader::new(fs::File::open(path).unwrap()));
+    let mut reader = decoder.read_info().unwrap();
+    let mut buffer = vec![0; reader.output_buffer_size().unwrap()];
+    let frame = reader.next_frame(&mut buffer).unwrap();
+    buffer.truncate(frame.buffer_size());
+    (frame.width, frame.height, buffer)
+}
+
+#[test]
+fn extract_image_writes_a_png_of_the_pixels() {
+    let (pdf, id) = pdf_with_image(Some(gray_image(2, 1, vec![7, 200])), b"q Q");
+    let dir = tempfile::tempdir().unwrap();
+    let out = dir.path().join("a.png");
+    let output = Command::new(binary_path())
+        .arg(pdf.path())
+        .args(["--extract-image", &id.to_string(), "--output"])
+        .arg(&out)
+        .output()
+        .unwrap();
+    assert_eq!(output.status.code(), Some(0), "{output:?}");
+    assert_eq!(png_pixels(&out), (2, 1, vec![7, 200]));
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(stdout.contains("png") && stdout.contains("2×1"), "{stdout}");
+}
+
+#[test]
+fn extract_image_json_reports_path_format_size_and_source() {
+    let (pdf, id) = pdf_with_image(Some(gray_image(2, 1, vec![7, 200])), b"q Q");
+    let dir = tempfile::tempdir().unwrap();
+    let out = dir.path().join("a.PNG");
+    let output = Command::new(binary_path())
+        .arg(pdf.path())
+        .args(["--extract-image", &id.to_string(), "--json", "--output"])
+        .arg(&out)
+        .output()
+        .unwrap();
+    assert_eq!(output.status.code(), Some(0), "{output:?}");
+    let v: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(v["path"], out.display().to_string());
+    assert_eq!(v["format"], "png");
+    assert_eq!(v["width"], 2);
+    assert_eq!(v["height"], 1);
+    assert_eq!(v["color_space"], "DeviceGray");
+    assert_eq!(v["bits_per_component"], 8);
+    assert_eq!(v["mask"], "none");
+}
+
+#[test]
+fn extract_image_writes_a_jpeg_as_it_is() {
+    let (pdf, id) = pdf_with_image(Some(jpeg_image()), b"q Q");
+    let dir = tempfile::tempdir().unwrap();
+    let out = dir.path().join("a.jpg");
+    let output = Command::new(binary_path())
+        .arg(pdf.path())
+        .args(["--extract-image", &id.to_string(), "--output"])
+        .arg(&out)
+        .output()
+        .unwrap();
+    assert_eq!(output.status.code(), Some(0), "{output:?}");
+    assert_eq!(fs::read(&out).unwrap(), JPEG_BYTES);
+}
+
+fn export_failure(pdf: &tempfile::NamedTempFile, args: &[&str], name: &str) -> (i32, String, bool) {
+    let dir = tempfile::tempdir().unwrap();
+    let out = dir.path().join(name);
+    let output = Command::new(binary_path())
+        .arg(pdf.path())
+        .args(args)
+        .arg("--output")
+        .arg(&out)
+        .output()
+        .unwrap();
+    (
+        output.status.code().unwrap(),
+        String::from_utf8_lossy(&output.stderr).into_owned(),
+        out.exists(),
+    )
+}
+
+#[test]
+fn extension_with_no_format_is_a_usage_error() {
+    let (pdf, id) = pdf_with_image(Some(gray_image(1, 1, vec![0])), b"q Q");
+    let (code, stderr, written) =
+        export_failure(&pdf, &["--extract-image", &id.to_string()], "a.tiff");
+    assert_eq!(code, 2, "{stderr}");
+    assert!(stderr.contains(".png"), "{stderr}");
+    assert!(!written);
+}
+
+#[test]
+fn extension_for_another_format_than_the_image_exits_1_and_writes_nothing() {
+    let (pdf, id) = pdf_with_image(Some(jpeg_image()), b"q Q");
+    let (code, stderr, written) =
+        export_failure(&pdf, &["--extract-image", &id.to_string()], "a.png");
+    assert_eq!(code, 1, "{stderr}");
+    assert!(
+        stderr.contains("jpeg") && stderr.contains(".jpg"),
+        "{stderr}"
+    );
+    assert!(!written, "JPEG bytes must never land in a file named .png");
+
+    let (pdf, id) = pdf_with_image(Some(gray_image(1, 1, vec![0])), b"q Q");
+    let (code, stderr, written) =
+        export_failure(&pdf, &["--extract-image", &id.to_string()], "a.jpg");
+    assert_eq!(code, 1, "{stderr}");
+    assert!(!written);
+}
+
+#[test]
+fn a_refusal_exits_1_names_what_stopped_it_and_writes_nothing() {
+    let mut separation = gray_image(1, 1, vec![0]);
+    separation.dict.set(
+        "ColorSpace",
+        Object::Array(vec![Object::Name(b"Separation".to_vec())]),
+    );
+    let (pdf, id) = pdf_with_image(Some(separation), b"q Q");
+    let (code, stderr, written) =
+        export_failure(&pdf, &["--extract-image", &id.to_string()], "a.png");
+    assert_eq!(code, 1, "{stderr}");
+    assert!(stderr.contains("Separation"), "{stderr}");
+    assert!(!written);
+}
+
+#[test]
+fn not_an_image_and_not_there_each_exit_1_by_name() {
+    let (pdf, _) = pdf_with_image(None, b"q Q");
+    let (code, stderr, _) = export_failure(&pdf, &["--extract-image", "1"], "a.png");
+    assert_eq!(code, 1, "{stderr}");
+    assert!(stderr.contains("not an image"), "{stderr}");
+    let (code, stderr, _) = export_failure(&pdf, &["--extract-image", "99"], "a.png");
+    assert_eq!(code, 1, "{stderr}");
+    assert!(stderr.contains("not found"), "{stderr}");
+}
+
+#[test]
+fn image_export_output_is_checked_before_the_document_is_read() {
+    let dir = tempfile::tempdir().unwrap();
+    let bad = dir.path().join("corrupt.pdf");
+    fs::write(&bad, b"not a pdf").unwrap();
+    let output = Command::new(binary_path())
+        .arg(&bad)
+        .args(["--extract-image", "1", "--output"])
+        .arg(dir.path().join("absent/a.png"))
+        .output()
+        .unwrap();
+    assert_eq!(output.status.code(), Some(1));
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("absent") && !stderr.contains("Failed to load"),
+        "{stderr}"
+    );
+}
+
+#[test]
+fn image_export_flags_are_mutually_exclusive_with_other_modes() {
+    let (pdf, _) = pdf_with_image(None, b"q Q");
+    let output = run_args(
+        &pdf,
+        &["--extract-image", "1", "--output", "a.png", "--fonts"],
+    );
+    assert_eq!(output.status.code(), Some(2));
+    let output = run_args(&pdf, &["--extract-image", "0", "--output", "a.png"]);
+    assert_eq!(output.status.code(), Some(2));
+    let output = run_args(&pdf, &["--extract-inline-image", "x", "--output", "a.png"]);
+    assert_eq!(output.status.code(), Some(2));
+    let output = run_args(&pdf, &["--extract-image", "1"]);
+    assert_eq!(output.status.code(), Some(2));
+}
+
+const INLINE: &[u8] = b"q BI /W 2 /H 1 /BPC 8 /CS /G ID \x07\xC8\nEI Q";
+
+#[test]
+fn images_lists_an_inline_image_and_its_export_format() {
+    let (pdf, _) = pdf_with_image(None, INLINE);
+    let output = run_args(&pdf, &["--images", "--json"]);
+    assert_eq!(output.status.code(), Some(0), "{output:?}");
+    let v: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(v["image_count"], 0);
+    assert_eq!(v["inline_image_count"], 1);
+    let image = &v["inline_images"][0];
+    assert_eq!(image["page_number"], 1);
+    assert_eq!(image["index"], 1);
+    assert_eq!(image["source"], "page");
+    assert_eq!(image["offset"], 2);
+    assert_eq!(image["width"], 2);
+    assert_eq!(image["height"], 1);
+    assert_eq!(image["export_format"], "png");
+
+    let text = run_args(&pdf, &["--images"]);
+    let stdout = String::from_utf8_lossy(&text.stdout);
+    assert!(
+        stdout.contains("1 inline images found") && stdout.contains("1:1"),
+        "{stdout}"
+    );
+}
+
+#[test]
+fn images_lists_an_xobjects_export_format() {
+    let (pdf, _) = pdf_with_image(Some(jpeg_image()), b"q Q");
+    let output = run_args(&pdf, &["--images", "--json"]);
+    let v: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(v["images"][0]["export_format"], "jpeg");
+    assert_eq!(v["inline_image_count"], 0);
+}
+
+#[test]
+fn images_exits_3_when_a_page_could_not_be_walked() {
+    let (pdf, _) = pdf_with_image(
+        None,
+        b"BI /W 1 /H 1 /BPC 8 /CS /G /F /Fl ID \xFF\xFE no end",
+    );
+    let output = run_args(&pdf, &["--images", "--json"]);
+    assert_eq!(output.status.code(), Some(3), "{output:?}");
+    let v: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(v["inline_image_warnings"].as_array().unwrap().len(), 1);
+    assert!(String::from_utf8_lossy(&output.stderr).contains("no EI"));
+}
+
+#[test]
+fn extract_inline_image_writes_the_pixels() {
+    let (pdf, _) = pdf_with_image(None, INLINE);
+    let dir = tempfile::tempdir().unwrap();
+    let out = dir.path().join("a.png");
+    let output = Command::new(binary_path())
+        .arg(pdf.path())
+        .args(["--extract-inline-image", "1:1", "--output"])
+        .arg(&out)
+        .output()
+        .unwrap();
+    assert_eq!(output.status.code(), Some(0), "{output:?}");
+    assert_eq!(png_pixels(&out), (2, 1, vec![7, 200]));
+}
+
+#[test]
+fn extract_inline_image_past_the_end_exits_1_naming_the_count() {
+    let (pdf, _) = pdf_with_image(None, INLINE);
+    let (code, stderr, _) = export_failure(&pdf, &["--extract-inline-image", "1:2"], "a.png");
+    assert_eq!(code, 1, "{stderr}");
+    assert!(stderr.contains("1 inline image"), "{stderr}");
+    let (code, stderr, _) = export_failure(&pdf, &["--extract-inline-image", "9:1"], "a.png");
+    assert_eq!(code, 1, "{stderr}");
+    assert!(stderr.contains("Page 9"), "{stderr}");
+}
+
+#[test]
+fn an_inline_image_with_no_colour_space_is_listed() {
+    let (pdf, _) = pdf_with_image(None, b"BI /W 1 /H 1 /BPC 8 ID a\nEI BT (x) Tj ET");
+    let images = run_args(&pdf, &["--images", "--json"]);
+    let v: serde_json::Value = serde_json::from_slice(&images.stdout).unwrap();
+    assert_eq!(v["inline_image_count"], 1);
+}
+
 /// A PDF whose `--list` output is far larger than a pipe's buffer, so a writer whose reader has
 /// gone must meet the closed pipe instead of finishing inside the buffer.
 fn create_pdf_with_many_objects() -> tempfile::NamedTempFile {

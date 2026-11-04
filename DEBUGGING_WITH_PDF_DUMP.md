@@ -35,6 +35,7 @@ Use `pdf-dump` instead of writing Python/shell scripts to inspect PDF internals.
 | Search decoded stream content | `pdf-dump f.pdf --search "stream=text"` |
 | Regex search | `pdf-dump f.pdf --search "regex=D:20(23\|24)"` |
 | Extract stream to file | `pdf-dump f.pdf --extract-stream 12 --output out.bin` (the directory must exist; an existing file is replaced) |
+| Write an image a viewer or OCR engine opens | `pdf-dump f.pdf --extract-image 12 --output a.png`, or `--extract-inline-image 3:1` for an inline image (see `--images --json`) |
 | GraphViz DOT graph | `pdf-dump f.pdf --tree --dot` |
 | Any of the above as JSON | Add `--json` to any command |
 | Combine document-level modes | `pdf-dump f.pdf --fonts --images --validate` |
@@ -42,7 +43,7 @@ Use `pdf-dump` instead of writing Python/shell scripts to inspect PDF internals.
 ## Combinability rules
 
 - **Document-level modes** combine freely: `--list`, `--validate`, `--fonts`, `--images`, `--forms`, `--bookmarks`, `--annotations`, `--text`, `--operators`, `--tags`, `--tree`, `--find-text`, `--detail`.  Multi-mode text output gets `=== Mode Name ===` headers; multi-mode JSON wraps values in `{"mode_name": ...}`.
-- **Standalone modes** are mutually exclusive (pick one): `--object`, `--inspect`, `--search`, `--extract-stream`.  Cannot combine with document-level modes.
+- **Standalone modes** are mutually exclusive (pick one): `--object`, `--inspect`, `--search`, `--extract-stream`, `--extract-image`, `--extract-inline-image`.  Cannot combine with document-level modes.
 - **`--page N` or `--page N-M`**: always a modifier.  Filters `--text`, `--operators`, `--annotations`, `--find-text` to specific pages.  When used alone, shows page info.
 - **Modifier flags**: `--json` (all modes), `--decode` (with `--object`; in overview enables decoded stats), `--deref` (with `--object`), `--depth N` (with `--tree`, `--tags`), `--hex` (with `--decode` or `--raw`), `--raw` (with `--object`, conflicts with `--decode`), `--truncate N` (limit binary output), `--dot` (with `--tree`).
 
@@ -146,7 +147,18 @@ When a content stream declares a wrong `/Length`, a strict parser drops its body
 `{font_count, fonts: [{object_number, generation, base_font, subtype, encoding, embedded: null|{object_number, generation}, to_unicode?, first_char?, last_char?, widths_count?, encoding_differences?, cid_system_info?}]}`
 
 **Images** (`--images --json`):
-`{image_count, images: [{object_number, generation, width, height, color_space, bits_per_component, filter, size}]}`
+`{image_count, images: [{object_number, generation, width, height, color_space, bits_per_component, filter, size, export_format}], inline_image_count, inline_images: [{page_number, index, source, source_object, offset, width, height, color_space, bits_per_component, filter, size, export_format}], inline_image_warnings: [text]}`
+
+- `export_format` is what `--extract-image` or `--extract-inline-image` writes, `png`, `jpeg` or `jp2`, which tells a caller the extension to ask for; `null` when the filters cannot be read.  It does not promise the export will succeed.
+- An inline image is addressed as `page_number:index`.  `index` counts from 1 on its page, in walking order.  `source` is `page`, `form`, `pattern` or `appearance`, with `source_object` for the last three, and `offset` is where `BI` falls in that source's decoded content; a page's content streams count as one, joined by newlines.
+- `images` holds every `/Subtype /Image` stream, and any stream one of them names as its `/SMask` or `/Mask`, whatever that stream's `/Subtype`.
+- Walked for inline images: a page's contents, the form XObjects (`Do`), tiling patterns (`scn`) and soft-mask groups (`gs`) it invokes, and its annotations' normal appearances.  Not walked: Type 3 glyph procedures, whose bitmap glyphs are inline images, and forms and patterns nothing on the page invokes.  `color_space` is the dictionary's text, so a name from the resources stays a name.
+- `inline_image_warnings` names anything that could not be walked: a stream that would not decode, nesting too deep, an inline image with no `EI` or whose end had to be guessed, a page tree declaring more pages than could be walked, or a scan stopped after 1 GiB of decoded content.  Any of them makes the run exit **3**, since each is a place an image may be.
+
+**Extract image** (`--extract-image N --output f --json`, `--extract-inline-image PAGE:INDEX --output f --json`):
+`{path, format, width, height, color_space, bits_per_component, filter, mask, mask_applied}`
+
+`width` and `height` are the file's pixels, which a mask larger than its image raises.  For a JPEG they are checked against its frame; for a JPEG 2000 they are the dictionary's.  `mask` is `none`, `smask`, `explicit` or `color_key`.  `mask_applied` is false only for a JPEG or JPEG 2000 written as it is, which also warns on stderr, and exits 0: the picture as drawn needs that mask, so a caller reading the file must read the mask too, which `--images` lists as an image of its own.
 
 **Validate** (`--validate --json`):
 `{error_count, warning_count, info_count, issues: [{level, message}]}`
@@ -211,6 +223,20 @@ Every file, however it is reached: `reached_from` is `name_tree`; `filespec` (a 
 
 Supported (applied sequentially in pipelines): FlateDecode, ASCII85Decode, ASCIIHexDecode, LZWDecode, RunLengthDecode.
 Unsupported (reported as warnings, decoding stops): DCTDecode, JPXDecode, JBIG2Decode, CCITTFaxDecode.
+
+`--extract-stream` and `--object --decode` do not undo a `/Predictor`, so predicted samples come out still predicted (bug-0004), and they do not follow an indirect `/Filter` (bug-0015).  `--extract-image` does both.
+
+## Exporting images
+
+`--extract-image` writes the picture as drawn:
+
+- **PNG for decoded pixels; the stream as it is for DCTDecode (`.jpg`, `.jpeg`) and JPXDecode (`.jp2`).**  Filters before them are undone.
+- **Exit codes.**  An extension that is none of those is **2**, wrong whatever the document holds.  An extension for another format than this image is written in is **1**, naming the right one: only the document can tell, so it is a mismatch with the world, not with the command.  `export_format` says which to ask for.
+- **Colour:** grey, RGB, CMYK (converted naively), ICCBased by `/N` then `/Alternate`, CalGray and CalRGB as grey and RGB, and Indexed through its palette.  Separation, DeviceN and Lab are refused by name, since each needs a tint transform or a real conversion.
+- **Samples:** 1, 2, 4, 8 and 16 bits, with `/Decode`.  16 bits reduce to 8.  The output is always 8-bit grey or RGB.
+- **Filters:** all of the above, with `/Predictor` and `/EarlyChange`, and CCITTFaxDecode and JBIG2Decode.  Both bilevel codecs decode strictly, because a lenient decode reports success over a damaged line or missing globals.  That catches a damaged fax line, a page missing its globals, and a stream cut short of its declared length.  It cannot catch damaged arithmetic-coded JBIG2 data, which decodes to something from any bytes.
+- **Masks are composited onto white,** the colour of paper: `/SMask`, which overrides `/Mask`; `/Mask` as a stencil or a colour key; and `/ImageMask`, which paints black.  The file takes the larger of the image's and the mask's size, since a mixed-raster scan keeps its words in a full-size mask over a tiny colour image.  An image with `/SMask` keeps `/Matte`'s tint at the edges.
+- **Refused, exit 1, nothing written:** what is above, plus data shorter than the image needs, a palette index past the palette, a `/Decode` that would change a JPEG or JPEG 2000, an Indexed JPEG, a JPEG whose frame is not the image's size, a mask pdf-dump cannot decode, a light image whose mask would leave a blank file on white, data in an external file (`/F`), a `/DecodeParms` value of the wrong type, and anything past 256 MiB of decoded pixels or samples.
 
 ## Content stream operators
 

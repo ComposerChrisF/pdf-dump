@@ -107,6 +107,8 @@ pdf-dump reads PDFs encrypted with the empty password automatically.  For a PDF 
 | `--inspect N` | Full explanation of an object’s role and relationships |
 | `--search <expr>` | Find objects matching criteria (`Type=Font`, `key=MediaBox`, `stream=text`) |
 | `--extract-stream N --output file` | Extract a decoded stream to a file.  The file’s directory must already exist (exit 1 otherwise, before the document is read); an existing file is replaced |
+| `--extract-image N --output f.png` | Write an image as a file a viewer or OCR engine opens: PNG for decoded pixels, the stream as it is for DCTDecode (`.jpg`) and JPXDecode (`.jp2`).  The picture as drawn, including CCITT and JBIG2 scans, palettes, CMYK, `/Decode`, predictors and masks, except that a JPEG’s or JPEG 2000’s mask is left unapplied, with a warning and `mask_applied: false`.  What it cannot convert it refuses, naming what stopped it, and writes nothing |
+| `--extract-inline-image PAGE:INDEX --output f.png` | The same for an inline image, as `--images` lists it |
 
 ### Modifiers
 
@@ -135,7 +137,7 @@ pdf-dump file.pdf --validate --json         # Validation results as JSON
 
 ## Supported Stream Filters
 
-FlateDecode, ASCII85Decode, ASCIIHexDecode, LZWDecode, RunLengthDecode — applied sequentially for multi-filter pipelines.
+FlateDecode, ASCII85Decode, ASCIIHexDecode, LZWDecode, RunLengthDecode — applied sequentially for multi-filter pipelines.  `--extract-image` also undoes predictors and decodes CCITTFaxDecode and JBIG2Decode.
 
 ## Acknowledgments
 

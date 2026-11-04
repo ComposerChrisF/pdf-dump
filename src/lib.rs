@@ -44,7 +44,9 @@ pub(crate) mod fonts;
 pub(crate) mod forms;
 pub(crate) mod glyphlist;
 pub(crate) mod helpers;
+pub(crate) mod image_export;
 pub(crate) mod images;
+pub(crate) mod inline_image;
 pub(crate) mod inspect;
 pub(crate) mod layers;
 pub(crate) mod layout;
@@ -74,6 +76,7 @@ use serde_json::{Value, json};
 use std::io::{self, Write};
 
 use helpers::json_pretty;
+use image_export::{ExportFormat, ImageSource, export_format, export_image, extension_mismatch};
 use types::{Args, DocMode, DumpConfig, PageSpec, ResolvedMode, StandaloneMode};
 
 pub fn run() {
@@ -101,11 +104,22 @@ pub fn run() {
     }
 
     // Refuse an output path that cannot work before spending time on the document.
-    if let ResolvedMode::Standalone(StandaloneMode::ExtractStream { output, .. }) = &resolved
-        && let Err(e) = cli_contract::check_output_file(output, CreateMode::None, Clobber::Allow)
+    if let ResolvedMode::Standalone(mode) = &resolved
+        && let Some(output) = mode.output()
     {
-        eprintln!("Error: {}", e);
-        std::process::exit(e.exit_code().into());
+        // A name no image could be written under is wrong whatever the document holds.
+        if mode.is_image_export() && ExportFormat::from_path(output).is_none() {
+            eprintln!(
+                "Error: the output must be named .png, .jpg, .jpeg or .jp2 for the image it will \
+                 hold: {}",
+                output.display()
+            );
+            std::process::exit(USAGE.into());
+        }
+        if let Err(e) = cli_contract::check_output_file(output, CreateMode::None, Clobber::Allow) {
+            eprintln!("Error: {}", e);
+            std::process::exit(e.exit_code().into());
+        }
     }
 
     // `Document::load` auto-decrypts only with the empty password. When the user
@@ -347,6 +361,78 @@ fn dispatch_standalone(
                 }
             }
         }
+        StandaloneMode::ExtractImage {
+            obj_num,
+            ref output,
+        } => {
+            let stream = match doc.get_object((obj_num, 0)) {
+                Ok(Object::Stream(s)) => s,
+                Ok(_) => tool_error(format!(
+                    "Object {obj_num} is not an image: it is not a stream."
+                )),
+                Err(_) => tool_error(format!("Object {obj_num} not found in the document.")),
+            };
+            // Whatever --images lists can be exported: an image, or a mask with no /Subtype.
+            if !images::collect_images(doc)
+                .iter()
+                .any(|i| i.object_id == (obj_num, 0))
+            {
+                tool_error(format!(
+                    "Object {obj_num} is not an image: its /Subtype is not /Image."
+                ));
+            }
+            let source = ImageSource {
+                dict: &stream.dict,
+                data: &stream.content,
+                resources: None,
+                inline: false,
+            };
+            let what = format!("object {obj_num}");
+            write_exported_image(out, doc, &source, output, &what, config, recovery);
+            false
+        }
+        StandaloneMode::ExtractInlineImage {
+            page,
+            index,
+            ref output,
+        } => {
+            let Some(&page_id) = doc.get_pages().get(&page) else {
+                tool_error(format!(
+                    "Page {page} not found. Document has {} pages.",
+                    doc.get_pages().len()
+                ));
+            };
+            let mut scan = inline_image::InlineScan::default();
+            inline_image::scan_page(doc, page, page_id, Some(index), &mut scan);
+            let Some(image) = scan.images.iter().find(|i| i.index == index) else {
+                let warned = if scan.warnings.is_empty() {
+                    String::new()
+                } else {
+                    format!(
+                        "  Not all of the page could be walked: {}.",
+                        scan.warnings.join("; ")
+                    )
+                };
+                tool_error(format!(
+                    "Page {page} has {} inline image(s), so no image {index}.{warned}",
+                    scan.images.len()
+                ));
+            };
+            for warning in &scan.warnings {
+                eprintln!("Warning: looking for inline images, {warning}");
+            }
+            let what = format!("inline image {index} of page {page}");
+            write_exported_image(
+                out,
+                doc,
+                &image.as_source(),
+                output,
+                &what,
+                config,
+                recovery,
+            );
+            false
+        }
         StandaloneMode::Object { ref spec } => {
             let selection = object::resolve_object_spec(doc, spec);
             for (start, end) in &selection.empty_ranges {
@@ -404,6 +490,74 @@ fn dispatch_standalone(
     }
 }
 
+fn tool_error(message: String) -> ! {
+    eprintln!("Error: {message}");
+    std::process::exit(TOOL_ERROR.into());
+}
+
+/// Exports one image and writes it.  A refusal names what stopped it, and nothing is written.
+fn write_exported_image(
+    out: &mut impl Write,
+    doc: &Document,
+    source: &ImageSource,
+    output: &std::path::Path,
+    what: &str,
+    config: &DumpConfig,
+    recovery: Option<&Value>,
+) {
+    // `run` has refused a name with no format, so `wanted` is there.  The image's format takes the
+    // document to know: a world mismatch, so exit 1, not the usage error a bad name is.
+    let wanted = ExportFormat::from_path(output);
+    if let (Some(wanted), Some(actual)) = (wanted, export_format(doc, source))
+        && wanted != actual
+    {
+        tool_error(format!("{what}: {}.", extension_mismatch(wanted, actual)));
+    }
+    let image = export_image(doc, source)
+        .unwrap_or_else(|why| tool_error(format!("{what} cannot be exported: {why}.")));
+    if let Err(e) = cli_contract::prepare_output_file(output, CreateMode::None, Clobber::Allow) {
+        eprintln!("Error: {}", e);
+        std::process::exit(e.exit_code().into());
+    }
+    if let Err(e) = std::fs::write(output, &image.bytes) {
+        tool_error(format!("writing {}: {e}", output.display()));
+    }
+    if !image.mask_applied {
+        eprintln!(
+            "Warning: {what} has a mask ({}) that was not applied: its {} bytes are written as they \
+             stand.",
+            image.mask,
+            image.format.name()
+        );
+    }
+    if config.json {
+        print_json_with_recovery(
+            out,
+            json!({
+                "path": output.display().to_string(),
+                "format": image.format.name(),
+                "width": image.width,
+                "height": image.height,
+                "color_space": image.color_space,
+                "bits_per_component": image.bits_per_component,
+                "filter": image.filter,
+                "mask": image.mask,
+                "mask_applied": image.mask_applied,
+            }),
+            recovery,
+        );
+    } else {
+        wln!(
+            out,
+            "Extracted {what} to '{}' ({}, {}×{}).",
+            output.display(),
+            image.format.name(),
+            image.width,
+            image.height
+        );
+    }
+}
+
 fn dispatch_combined(
     out: &mut impl Write,
     doc: &Document,
@@ -457,7 +611,7 @@ fn build_mode_json_value(
         DocMode::List => (summary::list_json_value(doc), false),
         DocMode::Validate => validate::validation_json_value_with_status(doc),
         DocMode::Fonts => (fonts::fonts_json_value(doc), false),
-        DocMode::Images => (images::images_json_value(doc), false),
+        DocMode::Images => images::images_json_value_with_status(doc),
         DocMode::Forms => forms::forms_json_value_with_status(doc),
         DocMode::Bookmarks => (bookmarks::bookmarks_json_value(doc), false),
         DocMode::Annotations => annotations::annotations_json_value_with_status(doc, page_spec),
@@ -500,10 +654,7 @@ fn dispatch_mode_text(
             fonts::print_fonts(out, doc);
             false
         }
-        DocMode::Images => {
-            images::print_images(out, doc);
-            false
-        }
+        DocMode::Images => images::print_images(out, doc),
         DocMode::Forms => forms::print_forms(out, doc),
         DocMode::Bookmarks => {
             bookmarks::print_bookmarks(out, doc);

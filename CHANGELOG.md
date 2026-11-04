@@ -7,6 +7,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.31.0] - 2026-11-04
+### Added
+- **`--extract-image N --output f`** writes an image XObject as a file a viewer or OCR
+  engine opens, and **`--extract-inline-image PAGE:INDEX --output f`** does the same
+  for an inline image (plan-0005).  PNG for decoded pixels; the stream as it is for
+  DCTDecode (`.jpg`) and JPXDecode (`.jp2`).  The written image is the picture as
+  drawn: predictors, `/EarlyChange`, `/Decode` and palettes are applied, CMYK and
+  ICCBased are converted naively, 16-bit samples reduce to 8, CCITTFaxDecode and
+  JBIG2Decode decode, and masks composite onto white.  `--json` reports the path, the
+  format, the pixel size and the source colour space and filter.
+- **What it cannot convert it refuses:** exit 1, naming what stopped it, and nothing
+  written.  An output extension no image can be written under is exit 2; one for
+  another format than this image's is exit 1, because only the document can tell.
+- **`--images` lists inline images** with their page, index, source and offset, and
+  every image's `export_format`.  It exits 3 when a content stream could not be walked.
+### Changed
+- **Minimum Rust is 1.92,** which `hayro-jbig2` and `hayro-ccitt` require.
+
 ## [0.30.0] - 2026-11-03
 ### Added
 - **`--forms` reports every value** (plan-0006).  A list value is a JSON array in

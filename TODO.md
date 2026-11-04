@@ -28,7 +28,8 @@ decision here, then implement in the phase noted. **Do not just “fix the code�
 - [ ] **bug-0020** [MED] Object generation not addressable (fallback lookup vs a `--object N:G`
       syntax?).  Gates Phase 3 fix. `bugs/bug-0020-object-generation-not-addressable.md`
 - [ ] **bug-0004** [HIGH] `/DecodeParms` predictor ignored (apply the PNG/TIFF predictor, or emit a
-      “predictor not applied” warning?).  Gates Phase 2 fix. `bugs/bug-0004-decodeparms-predictor-ignored.md`
+      “predictor not applied” warning?).  `stream::undo_predictor` exists since v0.31.0 for
+      `--extract-image`, so applying it in `decode_stream` is now a small change.  Gates Phase 2 fix. `bugs/bug-0004-decodeparms-predictor-ignored.md`
 - [ ] **bug-0033** [MED] UTF-16BE / non-UTF-8 text strings mishandled in display + search (decode
       per spec, and/or lossless byte fallback — scope?).  Narrowed by v0.30.0: only `--object`,
       `--inspect` and `--search` remain.  Gates Phase 2 fix.
@@ -146,7 +147,6 @@ graduate (a contract violated is a bug; a contract that should grow is a plan):
   only: a widget no field lists, `/DV`, `/Opt`, `/TU`, `/MK`, XFA attributes and template, `/D`, `/R`
   and the Hidden and NoView flags are out of scope, by plan-0006’s wording.  Documented in
   `DEBUGGING_WITH_PDF_DUMP.md`.  Each would be a plan if a caller needs it.
-- Inline images (`BI`/`ID`/`EI`) are not counted by `--images` (nothing claims they are).
 - **Test-suite repairs (do alongside the relevant fix):** `tests/integration.rs` `object_flag_nonexistent_object_fails` asserts only stderr text, not the exit status (bug-0019); revisit
   `parse_object_spec_zero` and `multi_object_missing_reports_error_in_json` (bug-0019); the existing
   `garbled_text_unicode_chars` pins bug-0017; `int_to_alpha_basic` pins bug-0023 only up to 27.

@@ -115,14 +115,23 @@ pub(crate) fn hex_digit(b: u8) -> Option<u8> {
 }
 
 pub(crate) fn decode_lzw(data: &[u8]) -> Result<Vec<u8>, String> {
-    decode_lzw_capped(data, MAX_DECODED_SIZE)
+    decode_lzw_capped(data, MAX_DECODED_SIZE, true)
+}
+
+/// LZW with `/EarlyChange` honoured: the code length grows one code early by default (true).
+pub(crate) fn decode_lzw_early(data: &[u8], early_change: bool) -> Result<Vec<u8>, String> {
+    decode_lzw_capped(data, MAX_DECODED_SIZE, early_change)
 }
 
 /// LZW-decodes `data` in chunks, failing as soon as the output would exceed
 /// `limit` rather than decoding everything first (bug-0005).  An input that
 /// runs out before the end marker is an error, as with weezl's `decode`.
-fn decode_lzw_capped(data: &[u8], limit: u64) -> Result<Vec<u8>, String> {
-    let mut decoder = weezl::decode::Decoder::with_tiff_size_switch(weezl::BitOrder::Msb, 8);
+fn decode_lzw_capped(data: &[u8], limit: u64, early_change: bool) -> Result<Vec<u8>, String> {
+    let mut decoder = if early_change {
+        weezl::decode::Decoder::with_tiff_size_switch(weezl::BitOrder::Msb, 8)
+    } else {
+        weezl::decode::Decoder::new(weezl::BitOrder::Msb, 8)
+    };
     let mut result = Vec::new();
     let mut chunk = [0u8; 1 << 12];
     let mut input = data;
@@ -193,6 +202,175 @@ fn decode_run_length_capped(data: &[u8], limit: u64) -> Result<Vec<u8>, String> 
     Ok(result)
 }
 
+pub(crate) fn decode_flate(data: &[u8]) -> Result<Vec<u8>, String> {
+    let decoder = ZlibDecoder::new(data);
+    let mut decompressed = Vec::new();
+    decoder
+        .take(MAX_DECODED_SIZE)
+        .read_to_end(&mut decompressed)
+        .map_err(|_| "FlateDecode decompression failed".to_string())?;
+    if decompressed.len() as u64 >= MAX_DECODED_SIZE {
+        return Err(format!(
+            "FlateDecode: decoded size exceeds {} byte limit",
+            MAX_DECODED_SIZE
+        ));
+    }
+    Ok(decompressed)
+}
+
+/// The `/DecodeParms` entries a predictor reads (ISO 32000-1 Table 8).
+pub(crate) struct PredictorParams {
+    pub predictor: i64,
+    pub colors: i64,
+    pub bits_per_component: i64,
+    pub columns: i64,
+}
+
+/// Undoes a Flate or LZW predictor: `1` is none, `2` is TIFF, `10` to `15` are PNG, whose rows each
+/// carry their own tag, so which of those six is named does not matter (§ 7.4.4.4).
+pub(crate) fn undo_predictor(data: Vec<u8>, parms: PredictorParams) -> Result<Vec<u8>, String> {
+    let PredictorParams {
+        predictor,
+        colors,
+        bits_per_component: bits,
+        columns,
+    } = parms;
+    if predictor == 1 {
+        return Ok(data);
+    }
+    if !(predictor == 2 || (10..=15).contains(&predictor)) {
+        return Err(format!("the unknown /Predictor {predictor}"));
+    }
+    if colors < 1 || columns < 1 || !matches!(bits, 1 | 2 | 4 | 8 | 16) {
+        return Err(format!(
+            "a predictor with /Colors {colors}, /BitsPerComponent {bits}, /Columns {columns}"
+        ));
+    }
+    let pixel_bits = (colors as u64)
+        .checked_mul(bits as u64)
+        .ok_or("a predictor pixel too wide to address")?;
+    let row_bits = pixel_bits
+        .checked_mul(columns as u64)
+        .filter(|b| *b <= MAX_DECODED_SIZE * 8)
+        .ok_or("a predictor row too wide to address")?;
+    let row_bytes = row_bits.div_ceil(8) as usize;
+    let pixel_bytes = pixel_bits.div_ceil(8) as usize;
+    if predictor == 2 {
+        undo_tiff_predictor(
+            data,
+            row_bytes,
+            colors as usize,
+            bits as u32,
+            columns as usize,
+        )
+    } else {
+        undo_png_predictor(&data, row_bytes, pixel_bytes)
+    }
+}
+
+fn undo_tiff_predictor(
+    mut data: Vec<u8>,
+    row_bytes: usize,
+    colors: usize,
+    bits: u32,
+    columns: usize,
+) -> Result<Vec<u8>, String> {
+    if row_bytes == 0 || !data.len().is_multiple_of(row_bytes) {
+        return Err(format!(
+            "TIFF predictor data of {} bytes, not whole rows of {row_bytes}",
+            data.len()
+        ));
+    }
+    for row in data.chunks_exact_mut(row_bytes) {
+        match bits {
+            8 => {
+                for i in colors..row_bytes {
+                    row[i] = row[i].wrapping_add(row[i - colors]);
+                }
+            }
+            16 => {
+                for i in (colors * 2..row_bytes - 1).step_by(2) {
+                    let left = u16::from_be_bytes([row[i - colors * 2], row[i - colors * 2 + 1]]);
+                    let delta = u16::from_be_bytes([row[i], row[i + 1]]);
+                    let [hi, lo] = delta.wrapping_add(left).to_be_bytes();
+                    row[i] = hi;
+                    row[i + 1] = lo;
+                }
+            }
+            _ => {
+                // 1, 2 and 4 bits: samples cross no byte, but neighbours do not share one.
+                let mask = (1u8 << bits) - 1;
+                let get = |row: &[u8], n: usize| {
+                    let bit = n * bits as usize;
+                    (row[bit / 8] >> (8 - bits as usize - bit % 8)) & mask
+                };
+                for n in colors..columns * colors {
+                    let value = get(row, n).wrapping_add(get(row, n - colors)) & mask;
+                    let bit = n * bits as usize;
+                    let shift = 8 - bits as usize - bit % 8;
+                    row[bit / 8] = (row[bit / 8] & !(mask << shift)) | (value << shift);
+                }
+            }
+        }
+    }
+    Ok(data)
+}
+
+fn undo_png_predictor(
+    data: &[u8],
+    row_bytes: usize,
+    pixel_bytes: usize,
+) -> Result<Vec<u8>, String> {
+    let stride = row_bytes + 1;
+    if !data.len().is_multiple_of(stride) {
+        return Err(format!(
+            "PNG predictor data of {} bytes, not whole rows of {stride}",
+            data.len()
+        ));
+    }
+    let mut out = vec![0u8; data.len() / stride * row_bytes];
+    for (y, row) in data.chunks_exact(stride).enumerate() {
+        let (tag, encoded) = (row[0], &row[1..]);
+        let (above_rows, rest) = out.split_at_mut(y * row_bytes);
+        let current = &mut rest[..row_bytes];
+        let above = y.checked_sub(1).map(|prev| &above_rows[prev * row_bytes..]);
+        for i in 0..row_bytes {
+            let left = i.checked_sub(pixel_bytes).map_or(0, |at| current[at]);
+            let up = above.map_or(0, |a| a[i]);
+            let up_left = i
+                .checked_sub(pixel_bytes)
+                .and_then(|at| above.map(|a| a[at]))
+                .unwrap_or(0);
+            let prediction = match tag {
+                0 => 0,
+                1 => left,
+                2 => up,
+                3 => ((u16::from(left) + u16::from(up)) / 2) as u8,
+                4 => paeth(left, up, up_left),
+                other => return Err(format!("the unknown PNG row tag {other}")),
+            };
+            current[i] = encoded[i].wrapping_add(prediction);
+        }
+    }
+    Ok(out)
+}
+
+fn paeth(left: u8, up: u8, up_left: u8) -> u8 {
+    let p = i16::from(left) + i16::from(up) - i16::from(up_left);
+    let (pa, pb, pc) = (
+        (p - i16::from(left)).abs(),
+        (p - i16::from(up)).abs(),
+        (p - i16::from(up_left)).abs(),
+    );
+    if pa <= pb && pa <= pc {
+        left
+    } else if pb <= pc {
+        up
+    } else {
+        up_left
+    }
+}
+
 pub(crate) fn get_filter_names(stream: &lopdf::Stream) -> Vec<&[u8]> {
     match stream.dict.get(b"Filter").ok() {
         Some(filter_obj) => {
@@ -217,24 +395,7 @@ pub(crate) fn decode_stream(stream: &lopdf::Stream) -> (Cow<'_, [u8]>, Option<St
     let mut data: Cow<'_, [u8]> = Cow::Borrowed(&stream.content);
     for filter in &filters {
         let result = match *filter {
-            b"FlateDecode" => {
-                let decoder = ZlibDecoder::new(&data[..]);
-                let mut decompressed = Vec::new();
-                decoder
-                    .take(MAX_DECODED_SIZE)
-                    .read_to_end(&mut decompressed)
-                    .map_err(|_| "FlateDecode decompression failed".to_string())
-                    .and_then(|_| {
-                        if decompressed.len() as u64 >= MAX_DECODED_SIZE {
-                            Err(format!(
-                                "FlateDecode: decoded size exceeds {} byte limit",
-                                MAX_DECODED_SIZE
-                            ))
-                        } else {
-                            Ok(decompressed)
-                        }
-                    })
-            }
+            b"FlateDecode" => decode_flate(&data),
             b"ASCII85Decode" => decode_ascii85(&data),
             b"ASCIIHexDecode" => decode_asciihex(&data),
             b"LZWDecode" => decode_lzw(&data),
@@ -301,6 +462,87 @@ mod tests {
     use lopdf::{Dictionary, Stream};
     use pretty_assertions::assert_eq;
     use std::borrow::Cow;
+
+    fn predictor(predictor: i64, colors: i64, bits: i64, columns: i64) -> PredictorParams {
+        PredictorParams {
+            predictor,
+            colors,
+            bits_per_component: bits,
+            columns,
+        }
+    }
+
+    #[test]
+    fn png_predictor_undoes_every_row_tag() {
+        // bug-0004's vector: Up rows of [1,2,3,4], then [+4,+4,+4,+4].
+        assert_eq!(
+            undo_predictor(vec![2, 1, 2, 3, 4, 2, 4, 4, 4, 4], predictor(12, 1, 8, 4)).unwrap(),
+            vec![1, 2, 3, 4, 5, 6, 7, 8]
+        );
+        // None, then Sub, Average and Paeth over a known row.
+        let data = vec![
+            0, 10, 20, 30, //
+            1, 1, 1, 1, // Sub: 1, 2, 3
+            3, 5, 5, 5, // Average: 5+(0+1)/2=5, 5+(5+2)/2=8, 5+(8+3)/2=10
+            4, 1, 1, 1, // Paeth
+        ];
+        let out = undo_predictor(data, predictor(15, 1, 8, 3)).unwrap();
+        assert_eq!(&out[..9], &[10, 20, 30, 1, 2, 3, 5, 8, 10]);
+        // Paeth: left 0, up 5, up-left 0 picks up: 6; then left 6, up 8, up-left 5 picks 8: 9.
+        assert_eq!(&out[9..11], &[6, 9]);
+    }
+
+    #[test]
+    fn png_predictor_steps_by_whole_pixels() {
+        // Three colours: Sub reaches back three bytes, not one.
+        assert_eq!(
+            undo_predictor(vec![1, 1, 2, 3, 1, 1, 1], predictor(11, 3, 8, 2)).unwrap(),
+            vec![1, 2, 3, 2, 3, 4]
+        );
+    }
+
+    #[test]
+    fn png_predictor_refuses_a_partial_row_and_an_unknown_tag() {
+        assert!(undo_predictor(vec![0, 1, 2], predictor(12, 1, 8, 4)).is_err());
+        assert!(undo_predictor(vec![9, 1], predictor(12, 1, 8, 1)).is_err());
+    }
+
+    #[test]
+    fn tiff_predictor_8_16_and_low_bits() {
+        assert_eq!(
+            undo_predictor(vec![1, 1, 1, 5, 1, 1], predictor(2, 1, 8, 3)).unwrap(),
+            vec![1, 2, 3, 5, 6, 7]
+        );
+        assert_eq!(
+            undo_predictor(vec![0x01, 0xFF, 0x00, 0x01], predictor(2, 1, 16, 2)).unwrap(),
+            vec![0x01, 0xFF, 0x02, 0x00]
+        );
+        // Four 2-bit samples 1, +1, +1, +1 are 1, 2, 3, 0.
+        assert_eq!(
+            undo_predictor(vec![0b01_01_01_01], predictor(2, 1, 2, 4)).unwrap(),
+            vec![0b01_10_11_00]
+        );
+    }
+
+    #[test]
+    fn predictor_1_is_nothing_and_an_unknown_one_is_refused() {
+        assert_eq!(
+            undo_predictor(vec![1, 2], predictor(1, 1, 8, 1)).unwrap(),
+            vec![1, 2]
+        );
+        assert!(undo_predictor(vec![1, 2], predictor(7, 1, 8, 1)).is_err());
+        assert!(undo_predictor(vec![1, 2], predictor(12, 0, 8, 1)).is_err());
+    }
+
+    #[test]
+    fn lzw_early_change_0_decodes() {
+        // A stream long enough to pass a code-length change, encoded both ways.
+        let plain: Vec<u8> = (0..2000u32).map(|i| (i % 251) as u8).collect();
+        let mut late = weezl::encode::Encoder::new(weezl::BitOrder::Msb, 8);
+        let encoded = late.encode(&plain).unwrap();
+        assert_eq!(decode_lzw_early(&encoded, false).unwrap(), plain);
+        assert_ne!(decode_lzw_early(&encoded, true).ok(), Some(plain));
+    }
 
     #[test]
     fn is_binary_stream_empty() {
@@ -1217,7 +1459,7 @@ mod tests {
         let mut encoder = weezl::encode::Encoder::with_tiff_size_switch(weezl::BitOrder::Msb, 8);
         let mut compressed = encoder.encode(&original).unwrap();
         compressed.truncate(compressed.len() - 4);
-        let err = decode_lzw_capped(&compressed, TEST_LIMIT).unwrap_err();
+        let err = decode_lzw_capped(&compressed, TEST_LIMIT, true).unwrap_err();
         assert!(err.contains("byte limit"), "{err}");
     }
 
@@ -1227,7 +1469,7 @@ mod tests {
         let mut encoder = weezl::encode::Encoder::with_tiff_size_switch(weezl::BitOrder::Msb, 8);
         let compressed = encoder.encode(&original).unwrap();
         assert_eq!(
-            decode_lzw_capped(&compressed, TEST_LIMIT).unwrap(),
+            decode_lzw_capped(&compressed, TEST_LIMIT, true).unwrap(),
             original
         );
     }

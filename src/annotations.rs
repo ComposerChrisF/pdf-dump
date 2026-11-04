@@ -147,6 +147,15 @@ fn normal_appearance(doc: &Document, dict: &lopdf::Dictionary) -> Option<NormalA
     Some(found)
 }
 
+/// An annotation's normal-appearance streams for a walk that needs nothing else, with what stopped
+/// any of them being found.
+pub(crate) fn normal_appearance_streams(
+    doc: &Document,
+    dict: &lopdf::Dictionary,
+) -> (Vec<ObjectId>, Option<String>) {
+    normal_appearance(doc, dict).map_or_else(|| (vec![], None), |a| (a.streams, a.problem))
+}
+
 /// Whether a field is a button: `/FT` is inheritable, so the walk goes up `/Parent`.
 fn is_button_field(doc: &Document, dict: &lopdf::Dictionary) -> bool {
     let mut current = dict;
@@ -255,7 +264,7 @@ pub(crate) fn collect_annotations(
     collect(doc, page_filter, false)
 }
 
-fn form_default_resources(doc: &Document) -> Option<&lopdf::Dictionary> {
+pub(crate) fn form_default_resources(doc: &Document) -> Option<&lopdf::Dictionary> {
     let form = resolve_dict(doc, get_catalog(doc)?.get(b"AcroForm").ok()?)?;
     resolve_dict(doc, form.get(b"DR").ok()?)
 }

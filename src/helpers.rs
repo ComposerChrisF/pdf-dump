@@ -297,6 +297,21 @@ fn walk_number_tree_inner(
     }
 }
 
+/// The streams of a page's `/Contents`: one stream or an array of them, either maybe by reference.
+/// `None` when the page has no `/Contents`.
+pub(crate) fn page_content_ids(doc: &Document, page: &lopdf::Dictionary) -> Option<Vec<ObjectId>> {
+    match page.get(b"Contents").ok()? {
+        Object::Reference(id) => match doc.get_object(*id) {
+            Ok(Object::Array(arr)) => {
+                Some(arr.iter().filter_map(|o| o.as_reference().ok()).collect())
+            }
+            _ => Some(vec![*id]),
+        },
+        Object::Array(arr) => Some(arr.iter().filter_map(|o| o.as_reference().ok()).collect()),
+        _ => None,
+    }
+}
+
 /// Decoded content stream bytes and any warnings encountered during decoding.
 pub(crate) struct ContentStreamData {
     pub bytes: Vec<u8>,
@@ -311,11 +326,7 @@ pub(crate) fn read_content_streams(doc: &Document, page_id: ObjectId) -> Option<
         _ => return None,
     };
 
-    let content_ids: Vec<ObjectId> = match page_dict.get(b"Contents") {
-        Ok(Object::Reference(id)) => vec![*id],
-        Ok(Object::Array(arr)) => arr.iter().filter_map(|o| o.as_reference().ok()).collect(),
-        _ => return None,
-    };
+    let content_ids = page_content_ids(doc, page_dict)?;
 
     let mut bytes = Vec::new();
     let mut warnings = Vec::new();

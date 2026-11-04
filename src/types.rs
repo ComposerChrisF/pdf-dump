@@ -1,5 +1,5 @@
-use clap::{Parser, ValueEnum};
-use std::path::PathBuf;
+use clap::{ArgGroup, Parser, ValueEnum};
+use std::path::{Path, PathBuf};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, ValueEnum)]
 pub(crate) enum DetailSub {
@@ -76,10 +76,48 @@ impl DocMode {
 
 #[derive(Debug)]
 pub(crate) enum StandaloneMode {
-    Object { spec: ObjectSpec },
-    Inspect { obj_num: u32 },
-    Search { expr: String, list_modifier: bool },
-    ExtractStream { obj_num: u32, output: PathBuf },
+    Object {
+        spec: ObjectSpec,
+    },
+    Inspect {
+        obj_num: u32,
+    },
+    Search {
+        expr: String,
+        list_modifier: bool,
+    },
+    ExtractStream {
+        obj_num: u32,
+        output: PathBuf,
+    },
+    ExtractImage {
+        obj_num: u32,
+        output: PathBuf,
+    },
+    ExtractInlineImage {
+        page: u32,
+        index: u32,
+        output: PathBuf,
+    },
+}
+
+impl StandaloneMode {
+    /// The file this mode writes, if it writes one.
+    pub fn output(&self) -> Option<&Path> {
+        match self {
+            StandaloneMode::ExtractStream { output, .. }
+            | StandaloneMode::ExtractImage { output, .. }
+            | StandaloneMode::ExtractInlineImage { output, .. } => Some(output),
+            _ => None,
+        }
+    }
+
+    pub fn is_image_export(&self) -> bool {
+        matches!(
+            self,
+            StandaloneMode::ExtractImage { .. } | StandaloneMode::ExtractInlineImage { .. }
+        )
+    }
 }
 
 #[derive(Debug)]
@@ -91,6 +129,7 @@ pub(crate) enum ResolvedMode {
 
 /// Dumps the internal structure of a PDF file.
 #[derive(Parser, Debug)]
+#[command(group(ArgGroup::new("export").args(["extract_stream", "extract_image", "extract_inline_image"])))]
 #[command(author, version, about, long_about = None, after_long_help = "\
 Common workflows:
   pdf-dump file.pdf                      Overview (metadata + validation + stats)
@@ -122,22 +161,27 @@ Exit codes:
   1   Tool error: the input could not be read (file not found, IO failure,
       corrupt PDF, wrong --password), or the caller named something the
       document lacks (a caller-claim/world mismatch): --page beyond the end
-      (naming the real count), or an --object, --inspect, or --extract-stream
-      object that is not there.  With --object, an explicit number that is
+      (naming the real count), or an --object, --inspect, --extract-stream or
+      --extract-image object, or an --extract-inline-image page or index, that
+      is not there, or an image export that cannot be done: not an image, a
+      filter or colour space it cannot convert, data that will not decode, or
+      an output named for another format than the image is written in.  Nothing
+      is written then.  With --object, an explicit number that is
       missing exits 1, and so does a range holding no objects at all; gaps
       within a range are fine.  Whatever was found is still printed
   2   Usage error: bad arguments — clap's own (unknown flag, missing required
       arg) plus semantic ones (--raw with --decode, --raw without --object,
       a malformed --page value, object number 0, an invalid --search
-      expression)
+      expression, an image output named other than .png, .jpg, .jpeg or .jp2)
   3   Findings: the tool ran correctly but the input had problems
       (--validate found errors; the text that --text printed or --find-text
        searched was degraded or unreliable, e.g. a CID/Type0 font without a
        ToUnicode map or >20% of codes undecodable, and the output is still
        printed; a --forms value, rich value or XFA data, or an --annotations
        comment or rich comment, could not be read, or an annotation's appearance
-       text is not reliable; --strict detected a malformed stream /Length; or the PDF is encrypted
-       and could not be decrypted — supply --password to read it)
+       text is not reliable; --images could not walk a content stream for inline
+       images; --strict detected a malformed stream /Length; or the PDF is
+       encrypted and could not be decrypted — supply --password to read it)
 ")]
 pub(crate) struct Args {
     /// Path to the PDF file
@@ -231,9 +275,34 @@ pub(crate) struct Args {
     )]
     pub extract_stream: Option<u32>,
 
-    /// Output file for extracted stream.  Its directory must already exist (exit 1
-    /// otherwise, before the document is read); an existing file is replaced
-    #[arg(long, requires = "extract_stream", help_heading = "Export")]
+    /// Write an image XObject as a file a viewer or OCR engine opens: PNG for decoded
+    /// pixels, the stream as it is for DCTDecode (.jpg) and JPXDecode (.jp2).  The picture
+    /// as drawn: predictors, /Decode and palettes applied, CMYK converted naively, masks
+    /// composited onto white, except that a JPEG's or JPEG 2000's mask is left unapplied,
+    /// with a warning.  --output's extension must match; --images --json gives each image's
+    /// export_format
+    #[arg(
+        long,
+        requires = "output",
+        value_name = "N",
+        value_parser = clap::value_parser!(u32).range(1..),
+        help_heading = "Export"
+    )]
+    pub extract_image: Option<u32>,
+
+    /// Write an inline image the same way, addressed as PAGE:INDEX, as --images lists it
+    #[arg(
+        long,
+        requires = "output",
+        value_name = "PAGE:INDEX",
+        value_parser = parse_inline_image_address,
+        help_heading = "Export"
+    )]
+    pub extract_inline_image: Option<(u32, u32)>,
+
+    /// Output file for extracted stream or image.  Its directory must already exist
+    /// (exit 1 otherwise, before the document is read); an existing file is replaced
+    #[arg(long, requires = "export", help_heading = "Export")]
     pub output: Option<PathBuf>,
 
     // ── Modifiers ────────────────────────────────────────────────────
@@ -310,6 +379,21 @@ impl Args {
                 output: output.clone(),
             });
         }
+        if let (Some(obj_num), Some(output)) = (self.extract_image, self.output.as_ref()) {
+            standalone.push(StandaloneMode::ExtractImage {
+                obj_num,
+                output: output.clone(),
+            });
+        }
+        if let (Some((page, index)), Some(output)) =
+            (self.extract_inline_image, self.output.as_ref())
+        {
+            standalone.push(StandaloneMode::ExtractInlineImage {
+                page,
+                index,
+                output: output.clone(),
+            });
+        }
         if let Some(ref spec) = self.object {
             let spec = parse_object_spec(spec)?;
             standalone.push(StandaloneMode::Object { spec });
@@ -370,12 +454,12 @@ impl Args {
 
         // Validate: can't mix standalone + document modes
         if !standalone.is_empty() && !doc_modes.is_empty() {
-            return Err("Cannot combine standalone mode (--object, --inspect, --search, --extract-stream) with document-level modes.".to_string());
+            return Err("Cannot combine standalone mode (--object, --inspect, --search, --extract-stream, --extract-image, --extract-inline-image) with document-level modes.".to_string());
         }
 
         // Validate: at most one standalone mode
         if standalone.len() > 1 {
-            return Err("Only one standalone mode may be used at a time (--object, --inspect, --search, --extract-stream).".to_string());
+            return Err("Only one standalone mode may be used at a time (--object, --inspect, --search, --extract-stream, --extract-image, --extract-inline-image).".to_string());
         }
 
         if let Some(mode) = standalone.into_iter().next() {
@@ -397,6 +481,14 @@ pub(crate) struct DumpConfig {
     pub depth: Option<usize>,
     pub deref: bool,
     pub raw: bool,
+}
+
+/// `--extract-inline-image` takes `PAGE:INDEX`, each from 1 (usage error, exit 2).
+fn parse_inline_image_address(s: &str) -> Result<(u32, u32), String> {
+    let number = |part: &str| part.parse::<u32>().ok().filter(|n| *n >= 1);
+    s.split_once(':')
+        .and_then(|(page, index)| Some((number(page)?, number(index)?)))
+        .ok_or_else(|| format!("expected PAGE:INDEX, each at least 1, got '{s}'"))
 }
 
 /// `--layout-cell` must be a finite number of points, at least
