@@ -455,3 +455,15 @@ fn lopdf_content_decode_stops_silently_at_a_syntax_error() {
 fn lopdf_content_decode_panics_on_an_inline_image_with_no_colour_space() {
     let _ = lopdf::content::Content::decode(b"BI /W 1 /H 1 /BPC 8 ID a\nEI");
 }
+
+#[test]
+fn lopdf_content_decode_stops_at_a_comment_with_white_space_after_it() {
+    let content = lopdf::content::Content::decode(b"% a comment\n\nq Q").unwrap();
+    assert_eq!(content.operations.len(), 0);
+}
+
+#[test]
+fn lopdf_content_decode_stops_at_a_form_feed() {
+    let content = lopdf::content::Content::decode(b"q\x0CQ").unwrap();
+    assert_eq!(content.operations.len(), 1);
+}

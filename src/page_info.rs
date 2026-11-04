@@ -130,11 +130,7 @@ fn collect_page_info(
         .collect();
 
     // Content streams
-    let content_ids: Vec<ObjectId> = match page_dict.get(b"Contents") {
-        Ok(Object::Reference(id)) => vec![*id],
-        Ok(Object::Array(arr)) => arr.iter().filter_map(|o| o.as_reference().ok()).collect(),
-        _ => vec![],
-    };
+    let content_ids = crate::helpers::page_content_ids(doc, page_dict).unwrap_or_default();
     let content_stream_count = content_ids.len();
     let mut content_stream_bytes = 0usize;
     for cid in &content_ids {

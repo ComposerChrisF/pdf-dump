@@ -582,7 +582,7 @@ impl<'b> Tokens<'b> {
                 loop {
                     self.skip_space();
                     match self.bytes.get(self.pos) {
-                        Some(b'>') => {
+                        Some(b'>') if self.bytes.get(self.pos + 1) == Some(&b'>') => {
                             self.pos += 2;
                             return Ok(Object::Dictionary(dict));
                         }
@@ -914,22 +914,49 @@ fn reads_as_content(bytes: &[u8]) -> bool {
 pub(crate) struct DecodedContent {
     pub operations: Vec<Operation>,
     pub stopped_early: bool,
+    /// Inline images with neither `/CS` nor `/IM`, which `operations` leaves out.
+    pub dropped_images: usize,
 }
 
-/// `Content::decode`, made safe to call on a stranger's bytes.  It has two faults this works around
-/// (`tests/lopdf_canary.rs` pins both):
+/// What a listing of operators says about `DecodedContent::dropped_images`.
+pub(crate) const INLINE_IMAGES_DROPPED: &str =
+    "An inline image with neither /CS nor /IM is left out of this listing";
+
+/// An operator no content stream has, put after the content to see whether lopdf gets there.
+const END_MARKER: &str = "PdfDumpEndOfContent";
+
+/// `Content::decode`, made safe to call on a stranger's bytes.  It has three faults this works around
+/// (`tests/lopdf_canary.rs` pins them):
 ///
 /// - It stops at the first token it cannot parse and returns what it had as `Ok`, so everything after
-///   a syntax error is gone with no sign.  So the operators are counted here too, and fewer from
-///   lopdf means it stopped early.
+///   a syntax error is gone with no sign.  So a marker goes after the content, and no marker at the
+///   end means it stopped early.  The operators are counted here too, because lopdf ends an inline
+///   image at an `EI` the scanner turns down, and fewer from lopdf means it lost some on the way.
+///   An image whose end was not found stops the read as well, and so does one blanked below whose
+///   end was guessed at: what follows it may be its data or may be content.
 /// - It panics on an inline image with neither `/CS` nor `/IM`.  So such an image is blanked out
-///   first; it draws nothing lopdf could report anyway, and what follows it survives.
+///   first, and counted, so what follows it survives.
+/// - It stops at a comment not followed directly by an operator or operand, and at white space other
+///   than space, tab, CR and LF.  So those are blanked out too.
 pub(crate) fn decode_content(bytes: &[u8]) -> Result<DecodedContent, lopdf::Error> {
     let doc = Document::new();
     let mut tokens = Tokens { bytes, pos: 0 };
     let mut operators = 0usize;
     let mut blanked = Vec::new();
-    while let Some(token) = tokens.next_token() {
+    let mut dropped_images = 0usize;
+    let mut end_unsure = false;
+    loop {
+        let before = tokens.pos;
+        tokens.skip_space();
+        if bytes[before..tokens.pos]
+            .iter()
+            .any(|b| !b" \t\r\n".contains(b))
+        {
+            blanked.push(before..tokens.pos);
+        }
+        let Some(token) = tokens.next_token() else {
+            break;
+        };
         let Token::Operator(op) = token else {
             continue;
         };
@@ -938,9 +965,12 @@ pub(crate) fn decode_content(bytes: &[u8]) -> Result<DecodedContent, lopdf::Erro
             continue;
         }
         let start = tokens.pos - 2;
+        // A dictionary the scanner cannot read may still be one lopdf reads, and panics on, and
+        // where its image ends is unknown either way.
         let Ok(dict) = read_inline_dict(&mut tokens) else {
-            operators += 1;
-            continue;
+            blanked.push(start..bytes.len());
+            end_unsure = true;
+            break;
         };
         let panics_lopdf = !dict.has(b"CS")
             && !dict.has(b"ColorSpace")
@@ -949,9 +979,18 @@ pub(crate) fn decode_content(bytes: &[u8]) -> Result<DecodedContent, lopdf::Erro
                 Ok(Object::Boolean(true))
             );
         match read_inline_data(&doc, &mut tokens, dict, None) {
-            Ok(_) if panics_lopdf => blanked.push(start..tokens.pos),
-            Ok(_) => operators += 1,
+            Ok(read) => {
+                // Only a blanked image's guess can cost anything: lopdf reads the rest itself.
+                end_unsure |= read.ambiguous && panics_lopdf;
+                if panics_lopdf {
+                    blanked.push(start..tokens.pos);
+                    dropped_images += 1;
+                } else {
+                    operators += 1;
+                }
+            }
             Err(_) => {
+                end_unsure = true;
                 if panics_lopdf {
                     blanked.push(start..bytes.len());
                 } else {
@@ -961,18 +1000,24 @@ pub(crate) fn decode_content(bytes: &[u8]) -> Result<DecodedContent, lopdf::Erro
             }
         }
     }
-    let content = if blanked.is_empty() {
-        Content::decode(bytes)?
-    } else {
-        let mut cleaned = bytes.to_vec();
-        for range in blanked {
-            cleaned[range].fill(b' ');
-        }
-        Content::decode(&cleaned)?
-    };
+    let mut marked = bytes.to_vec();
+    for range in blanked {
+        marked[range].fill(b' ');
+    }
+    marked.push(b'\n');
+    marked.extend_from_slice(END_MARKER.as_bytes());
+    marked.push(b'\n');
+    let mut operations = Content::decode(&marked)?.operations;
+    let reached_the_end = operations
+        .last()
+        .is_some_and(|op| op.operator == END_MARKER);
+    if reached_the_end {
+        operations.pop();
+    }
     Ok(DecodedContent {
-        stopped_early: content.operations.len() < operators,
-        operations: content.operations,
+        stopped_early: end_unsure || !reached_the_end || operations.len() < operators,
+        operations,
+        dropped_images,
     })
 }
 
@@ -1049,6 +1094,118 @@ mod tests {
         let whole =
             decode_content(b"q 1 0 0 1 0 0 cm /F1 12 Tf BT (a) Tj [(b) -5] TJ T* ET Q").unwrap();
         assert!(!whole.stopped_early);
+    }
+
+    #[test]
+    fn decode_content_keeps_lopdfs_count_on_filtered_and_named_inline_images() {
+        for content in [
+            &b"BI /W 1 /H 1 /BPC 8 /CS /G /F /AHx ID 61 >\nEI BT (x) Tj ET"[..],
+            b"BI /W 1 /H 1 /BPC 8 /CS /Cs1 ID a\nEI BT (x) Tj ET",
+            b"BI /W 1 /H 1 /BPC 8 /CS /RGB /F /Fl ID xxxxxxxx\nEI BT (x) Tj ET",
+        ] {
+            let read = decode_content(content).unwrap();
+            assert!(
+                !read.stopped_early,
+                "{:?}",
+                String::from_utf8_lossy(content)
+            );
+            assert_eq!(read.dropped_images, 0);
+        }
+    }
+
+    #[test]
+    fn decode_content_counts_a_dropped_image_and_reads_on() {
+        let read = decode_content(b"BI /W 1 /H 1 /BPC 8 ID a\nEI BT (x) Tj ET").unwrap();
+        assert_eq!(read.dropped_images, 1);
+        assert!(!read.stopped_early);
+    }
+
+    #[test]
+    fn an_image_whose_end_is_missing_or_guessed_stops_the_read() {
+        for content in [
+            &b"q BI /W 1 /H 1 /BPC 8 ID a never ends BT (secret) Tj ET"[..],
+            b"q BI /W 1 /H 1 /BPC 8 /CS /G /F /AHx ID 61> EI \xFF\xFE BT (secret) Tj ET",
+            b"q BI /W 1 /H 1 /IM true /F /AHx ID 61> EI \xFF\xFE BT (secret) Tj ET",
+            b"BI /W 1 /H 1 /BPC 8 ID ab\nEI \xFF\xFE BT (secret) Tj ET\nEI Q",
+        ] {
+            let read = decode_content(content).unwrap();
+            assert!(read.stopped_early, "{:?}", String::from_utf8_lossy(content));
+        }
+    }
+
+    #[test]
+    fn a_dictionary_the_scanner_cannot_read_does_not_panic() {
+        // lopdf reads a reference as a value where the scanner does not, and then panics.
+        let read = decode_content(b"q BI /W 1 /H 1 /BPC 8 /X 1 0 R ID a\nEI BT (x) Tj ET").unwrap();
+        assert!(read.stopped_early);
+        // A nested dictionary cut short must not leave the scanner past the end.
+        let _ = decode_content(b"BI /DP << >");
+    }
+
+    #[test]
+    fn a_stop_is_found_whatever_the_counts_say() {
+        for content in [
+            &b"BT /F1 12 Tf 72 700 Td (ok Tj ET\nBT (Lockbox code: 7301) Tj ET\n"[..],
+            b"BT <41 Tj ET\nBT (secret) Tj ET\n",
+            b"q1q1q1q1q1q1q ) BT (secret) Tj ET",
+            b"q1q1q1q1q1q ) BT (secret) Tj ET",
+            b"q BI /W 1 /H 1 /BPC 8 /CS /G /F /AHx ID 61> EI q q q q q ) BT (secret) Tj ET\nEI Q",
+        ] {
+            let read = decode_content(content).unwrap();
+            assert!(read.stopped_early, "{:?}", String::from_utf8_lossy(content));
+        }
+    }
+
+    #[test]
+    fn the_marker_is_not_among_the_operations() {
+        let read = decode_content(b"q Q % a comment with no newline").unwrap();
+        assert!(!read.stopped_early);
+        let ops: Vec<&str> = read
+            .operations
+            .iter()
+            .map(|o| o.operator.as_str())
+            .collect();
+        assert_eq!(ops, ["q", "Q"]);
+        // An operand left over at the end goes with the marker, as it would with lopdf alone.
+        let read = decode_content(b"q 1 2").unwrap();
+        assert!(!read.stopped_early);
+        assert_eq!(read.operations.len(), 1);
+    }
+
+    #[test]
+    fn a_comment_or_odd_white_space_is_no_stop() {
+        let read = decode_content(b"% DSBlank\n").unwrap();
+        assert!(!read.stopped_early);
+        assert!(read.operations.is_empty());
+        for content in [
+            &b"% a comment\nq Q"[..],
+            b"% a comment\n\n  q % another\n\n Q",
+            b"q\x0CQ\x00",
+            b"q Q % a comment with no newline",
+        ] {
+            let read = decode_content(content).unwrap();
+            assert!(
+                !read.stopped_early,
+                "{:?}",
+                String::from_utf8_lossy(content)
+            );
+            assert_eq!(read.operations.len(), 2, "{content:?}");
+        }
+    }
+
+    #[test]
+    fn a_sound_image_at_the_end_of_the_stream_reads_clean() {
+        for content in [
+            &b"BT (x) Tj ET BI /W 1 /H 1 /BPC 8 /CS /Cs1 ID a\nEI"[..],
+            b"BT (x) Tj ET BI /W 1 /H 1 /BPC 8 /CS /G /F /AHx ID 61>\nEI",
+        ] {
+            let read = decode_content(content).unwrap();
+            assert!(
+                !read.stopped_early,
+                "{:?}",
+                String::from_utf8_lossy(content)
+            );
+        }
     }
 
     #[test]

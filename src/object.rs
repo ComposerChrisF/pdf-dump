@@ -61,6 +61,14 @@ pub(crate) fn print_content_data(
                         crate::text::CONTENT_STOPPED_EARLY
                     );
                 }
+                if content.dropped_images > 0 {
+                    wln!(
+                        writer,
+                        "\n{}[WARNING: {}]",
+                        indent_str,
+                        crate::inline_image::INLINE_IMAGES_DROPPED
+                    );
+                }
                 wln!(
                     writer,
                     "\n{}Parsed Content Stream ({} operations):",
@@ -1232,6 +1240,26 @@ mod tests {
             print_stream_content(w, &empty_doc(), &stream, "", &config, false);
         });
         assert!(out.contains("truncated to 100"));
+    }
+
+    #[test]
+    fn print_content_data_warns_of_a_dropped_inline_image() {
+        let config = default_config();
+        let out = output_of(|w| {
+            print_content_data(
+                w,
+                b"BI /W 1 /H 1 /BPC 8 ID a\nEI q Q",
+                "raw",
+                "",
+                &config,
+                true,
+                None,
+            );
+        });
+        assert!(
+            out.contains(crate::inline_image::INLINE_IMAGES_DROPPED),
+            "{out}"
+        );
     }
 
     #[test]

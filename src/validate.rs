@@ -4,8 +4,7 @@ use serde_json::{Value, json};
 use std::collections::{BTreeMap, BTreeSet};
 use std::io::Write;
 
-use crate::helpers::{get_catalog, resolve_dict};
-use crate::stream::decode_stream;
+use crate::helpers::{get_catalog, read_content_streams, resolve_dict};
 
 #[derive(PartialEq)]
 pub(crate) enum ValidationLevel {
@@ -349,28 +348,17 @@ fn check_content_stream_syntax(
     issues: &mut Vec<ValidationIssue>,
 ) {
     for (&page_num, &page_id) in pages {
-        let page_dict = match doc.get_object(page_id) {
-            Ok(Object::Dictionary(d)) => d,
-            _ => continue,
+        // A page's streams are one content stream (§ 7.8.2), and may divide inside a dictionary.
+        let Some(content) = read_content_streams(doc, page_id) else {
+            continue;
         };
-        let content_ids: Vec<ObjectId> = match page_dict.get(b"Contents") {
-            Ok(Object::Reference(id)) => vec![*id],
-            Ok(Object::Array(arr)) => arr.iter().filter_map(|o| o.as_reference().ok()).collect(),
-            _ => continue,
-        };
-        for content_id in content_ids {
-            if let Ok(Object::Stream(stream)) = doc.get_object(content_id) {
-                let (decoded, _) = decode_stream(doc, stream);
-                if decode_content(&decoded).map_or(true, |content| content.stopped_early) {
-                    issues.push(ValidationIssue {
-                        level: ValidationLevel::Warn,
-                        message: format!(
-                            "Page {}: content stream {} {} has invalid syntax",
-                            page_num, content_id.0, content_id.1
-                        ),
-                    });
-                }
-            }
+        if decode_content(&content.bytes)
+            .map_or(true, |read| read.stopped_early || read.dropped_images > 0)
+        {
+            issues.push(ValidationIssue {
+                level: ValidationLevel::Warn,
+                message: format!("Page {page_num}: content has invalid syntax"),
+            });
         }
     }
 }

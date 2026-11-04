@@ -30,6 +30,9 @@ pub(crate) fn get_page_operations_with_warnings(doc: &Document, page_id: ObjectI
             if content.stopped_early {
                 warnings.push(crate::text::CONTENT_STOPPED_EARLY.to_string());
             }
+            if content.dropped_images > 0 {
+                warnings.push(crate::inline_image::INLINE_IMAGES_DROPPED.to_string());
+            }
             OpsResult {
                 operations: content.operations,
                 warnings,

@@ -247,9 +247,35 @@ fn markup_end(s: &str) -> Option<(usize, Markup<'_>)> {
         return s.find("?>").map(|i| (i + 2, Markup::Skipped));
     }
     if s.starts_with("<!") {
-        return s.find('>').map(|i| (i + 1, Markup::Skipped));
+        return doctype_end(s).map(|end| (end, Markup::Skipped));
     }
     parse_tag(s)
+}
+
+/// The end of a `<!DOCTYPE`, past its internal subset if it has one.  Any other `<!` is malformed, as
+/// is a `<` before the end, so that a declaration cannot swallow a tag.
+fn doctype_end(s: &str) -> Option<usize> {
+    if !s.get(..9)?.eq_ignore_ascii_case("<!DOCTYPE") {
+        return None;
+    }
+    let close = s.find('>')?;
+    let Some(open) = s.find('[').filter(|open| *open < close) else {
+        return (!s[1..close].contains('<')).then_some(close + 1);
+    };
+    // A `]` in a comment or a quoted value does not end the subset.
+    let mut at = open + 1;
+    loop {
+        let rest = &s[at..];
+        if rest.starts_with("<!--") {
+            at += rest.find("-->")? + 3;
+        } else {
+            match rest.chars().next()? {
+                ']' => return Some(at + rest.find('>')? + 1),
+                quote @ ('"' | '\'') => at += 1 + rest[1..].find(quote)? + 1,
+                other => at += other.len_utf8(),
+            }
+        }
+    }
 }
 
 /// One element tag: a name, then attributes of the form `name="value"`.
@@ -305,8 +331,9 @@ fn parse_tag(s: &str) -> Option<(usize, Markup<'_>)> {
 /// Every element named `local`, under any namespace prefix: from its `<` through its closing tag, or
 /// to the end of the input if it has none, which `strip_markup` then reports.  The walk goes
 /// by markup, so an element inside a comment or CDATA does not count.
-pub(crate) fn find_elements<'a>(xml: &'a str, local: &str) -> Vec<&'a str> {
+pub(crate) fn find_elements<'a>(xml: &'a str, local: &str) -> (Vec<&'a str>, bool) {
     let mut found = Vec::new();
+    let mut read_to_end = true;
     let mut opened_at = None;
     let mut depth = 0usize;
     let mut at = 0;
@@ -318,6 +345,7 @@ pub(crate) fn find_elements<'a>(xml: &'a str, local: &str) -> Vec<&'a str> {
             continue;
         }
         let Some((end, kind)) = markup_end(markup) else {
+            read_to_end = false;
             break;
         };
         if let Markup::Tag(tag) = kind {
@@ -345,7 +373,7 @@ pub(crate) fn find_elements<'a>(xml: &'a str, local: &str) -> Vec<&'a str> {
     if let Some(open) = opened_at {
         found.push(&xml[open..]);
     }
-    found
+    (found, read_to_end)
 }
 
 /// A `<` that cannot open markup: nothing that could start a name follows it.
@@ -619,16 +647,58 @@ mod tests {
                    <x:datasets a='1'>one<datasets>two</datasets></x:datasets><datasets>three</datasets>";
         assert_eq!(
             find_elements(xml, "datasets"),
-            vec![
-                "<x:datasets a='1'>one<datasets>two</datasets></x:datasets>",
-                "<datasets>three</datasets>"
-            ]
+            (
+                vec![
+                    "<x:datasets a='1'>one<datasets>two</datasets></x:datasets>",
+                    "<datasets>three</datasets>"
+                ],
+                true
+            )
         );
         assert_eq!(
             find_elements("<datasets>cut", "datasets"),
-            vec!["<datasets>cut"]
+            (vec!["<datasets>cut"], true)
         );
-        assert!(find_elements("<p>datasets</p>", "datasets").is_empty());
+        assert_eq!(find_elements("<p>datasets</p>", "datasets"), (vec![], true));
+    }
+
+    #[test]
+    fn find_elements_says_when_markup_stopped_it() {
+        let (found, read_to_end) = find_elements(
+            "<xfa:datasets invalid><v>7301</v></xfa:datasets>",
+            "datasets",
+        );
+        assert!(found.is_empty());
+        assert!(!read_to_end);
+        let (found, read_to_end) = find_elements(
+            "<t><! <xfa:datasets a=\"1\"><v>7301</v></xfa:datasets></t>",
+            "datasets",
+        );
+        assert!(found.is_empty());
+        assert!(!read_to_end);
+        let (found, read_to_end) = find_elements(
+            "<!DOCTYPE <xfa:datasets a=\"1\"><v>7301</v></xfa:datasets>",
+            "datasets",
+        );
+        assert!(found.is_empty());
+        assert!(!read_to_end);
+    }
+
+    #[test]
+    fn find_elements_reads_past_a_doctype() {
+        for xml in [
+            "<!DOCTYPE x><datasets>v</datasets>",
+            "<!DOCTYPE x [<!ELEMENT a (b)><!ATTLIST a c CDATA #IMPLIED>]><datasets>v</datasets>",
+            "<!doctype x [ <!ENTITY e \"f\"> ] ><datasets>v</datasets>",
+            "<!DOCTYPE x [<!ENTITY e \"a]b\"><!ATTLIST a c CDATA #IMPLIED>]><datasets>v</datasets>",
+            "<!DOCTYPE x [<!-- ] --><!-- <datasets>no</datasets> -->]><datasets>v</datasets>",
+        ] {
+            assert_eq!(
+                find_elements(xml, "datasets"),
+                (vec!["<datasets>v</datasets>"], true),
+                "{xml}"
+            );
+        }
     }
 
     #[test]

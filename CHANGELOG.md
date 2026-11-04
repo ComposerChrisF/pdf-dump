@@ -5,6 +5,35 @@ All notable changes to `pdf-dump` are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0/).
 
+## [0.31.4] - 2026-11-04
+### Fixed
+Found by Fable, Sol and Opus, reviewing what v0.30.0 to v0.31.3 promise, and by
+Obsidian-Brain's mail gate:
+- **Text extraction now knows when lopdf did not reach the end of a content stream.**
+  An unterminated string, an inline image with no `EI` or with an end that was guessed
+  at, and syntax errors the operator count missed all lost what followed with verdict
+  `reliable` and exit 0, so `--find-text` said "No matches" of text in the file.  They
+  now exit 3 with a `degraded` verdict.  Shapes lopdf could not read now read: an inline
+  image whose `EI` ends the stream, and a comment followed by a blank line or white space,
+  each of which lost the page's text.
+- **An inline image whose dictionary holds a reference no longer crashes** `--text`,
+  `--operators`, `--validate` or `--object` with a panic in lopdf.  What follows it counts
+  as not read.
+- **`--validate` reads a page's content streams as one,** as the spec does.  It warned of
+  invalid syntax on a page whose streams divide inside a dictionary.
+- **Malformed markup in XFA no longer reads as decoded.**  A tag that stops the search
+  for `datasets`, or a `<!` that is no declaration, sets `xfa_decoded: false`, exit 3,
+  where the data was lost with exit 0.
+- **`--validate` and `--page` follow an indirect `/Contents` array,** as `--text` has
+  since v0.31.0.  `--validate` missed such a page's syntax errors, and `--page` reported
+  0 bytes.
+- **An inline image with no `/CS` no longer vanishes without a word:** `--operators`
+  and `--object` warn, and `--validate` reports it.
+- **`--extract-image` refuses a colour key that would leave a picture blank,** as it does
+  a mask, and a `/DecodeParms` of the wrong kind, which it read as none.
+- `--extract-stream`, `--object --decode` and `--search` read a `/DecodeParms` that refers
+  to nothing as null, as the rest of the tool and § 7.3.10 do, rather than warning.
+
 ## [0.31.3] - 2026-11-04
 ### Fixed
 - **`--object --decode`, `--extract-stream` and `--search stream=` undo predictors.**

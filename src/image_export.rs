@@ -17,7 +17,7 @@ use std::path::Path;
 
 use crate::stream::{
     PredictorParams, decode_ascii85, decode_asciihex, decode_flate, decode_lzw_early,
-    decode_run_length, undo_predictor,
+    decode_run_length, deref, follow, undo_predictor,
 };
 
 /// Refuses an image whose decoded pixels would pass this size, before allocating them.  The same as
@@ -86,15 +86,6 @@ impl<'a> ImageSource<'a> {
     }
 }
 
-/// Follows a reference; one to nothing reads as null, which is to say absent (§ 7.3.10).
-fn deref<'a>(doc: &'a Document, value: &'a Object) -> Option<&'a Object> {
-    match value {
-        Object::Reference(id) => doc.get_object(*id).ok(),
-        Object::Null => None,
-        other => Some(other),
-    }
-}
-
 /// A successful export, ready to write.
 pub(crate) struct ExportedImage {
     pub bytes: Vec<u8>,
@@ -141,22 +132,45 @@ fn filter_chain<'a>(
             .collect::<Result<_, _>>()?,
         _ => return Err("a /Filter that is neither a name nor an array".to_string()),
     };
-    let parms = src.entry(doc, b"DecodeParms", b"DP");
-    Ok(names
+    let raw_parms = src
+        .dict
+        .get(b"DecodeParms")
+        .ok()
+        .or_else(|| src.inline.then(|| src.dict.get(b"DP").ok()).flatten());
+    let parms = match raw_parms {
+        Some(value) => follow(doc, value).map_err(|reason| format!("a /DecodeParms: {reason}"))?,
+        None => None,
+    };
+    names
         .into_iter()
         .enumerate()
         .map(|(i, name)| {
             let step = match parms {
-                Some(Object::Dictionary(d)) if i == 0 => Some(d),
-                Some(Object::Array(items)) => match items.get(i).and_then(|o| deref(doc, o)) {
-                    Some(Object::Dictionary(d)) => Some(d),
-                    _ => None,
-                },
-                _ => None,
+                None => None,
+                Some(Object::Dictionary(d)) => (i == 0).then_some(d),
+                Some(Object::Array(items)) => {
+                    let item = match items.get(i) {
+                        Some(item) => follow(doc, item)
+                            .map_err(|reason| format!("a /DecodeParms entry: {reason}"))?,
+                        None => None,
+                    };
+                    match item {
+                        None => None,
+                        Some(Object::Dictionary(d)) => Some(d),
+                        Some(_) => {
+                            return Err("a /DecodeParms entry that is not a dictionary".to_string());
+                        }
+                    }
+                }
+                Some(_) => {
+                    return Err(
+                        "a /DecodeParms that is neither a dictionary nor an array".to_string()
+                    );
+                }
             };
-            FilterStep { name, parms: step }
+            Ok(FilterStep { name, parms: step })
         })
-        .collect())
+        .collect()
 }
 
 /// Inline images may abbreviate filter names (§ 8.9.7, Table 94).
@@ -556,6 +570,8 @@ fn convert_samples(
         ));
     }
 
+    let mut any_masked = false;
+    let mut any_shown = false;
     let max = f64::from((1u32 << bits) - 1);
     let indexed = matches!(space, ColorSpace::Indexed { .. });
     let (default_low, default_high) = if indexed { (0.0, max) } else { (0.0, 1.0) };
@@ -600,8 +616,10 @@ fn convert_samples(
             });
             if masked {
                 data.extend(std::iter::repeat_n(255u8, channels));
+                any_masked = true;
                 continue;
             }
+            any_shown = true;
             match space {
                 ColorSpace::Gray => data.push(to_byte(value(0, raw[0]))),
                 ColorSpace::Rgb => {
@@ -643,6 +661,13 @@ fn convert_samples(
                     }
                 }
             }
+        }
+    }
+    // A key with a shape, leaving something light on paper, over a picture that had more in it.
+    if any_masked && any_shown && spread(&data) < NO_PICTURE_SPREAD {
+        let unkeyed = convert_samples(samples, width, height, bits, space, decode, None)?;
+        if spread(&unkeyed.data) >= NO_PICTURE_SPREAD {
+            return Err(LIGHT_THROUGH_A_MASK.to_string());
         }
     }
     Ok(Pixels {
@@ -973,10 +998,7 @@ fn composite(base: Pixels, alpha: &Pixels) -> Result<Pixels, String> {
         data,
     };
     if masks_a_picture_away(&pixels, alpha) {
-        return Err(
-            "a mask holding a picture in ink too light to show on white, so the file would be blank"
-                .to_string(),
-        );
+        return Err(LIGHT_THROUGH_A_MASK.to_string());
     }
     Ok(pixels)
 }
@@ -984,15 +1006,19 @@ fn composite(base: Pixels, alpha: &Pixels) -> Result<Pixels, String> {
 /// The spread below which a composite counts as having no picture in it.
 const NO_PICTURE_SPREAD: u8 = 8;
 
+const LIGHT_THROUGH_A_MASK: &str =
+    "a mask holding a picture in ink too light to show on white, so the file would be blank";
+
+fn spread(data: &[u8]) -> u8 {
+    let (low, high) = data
+        .iter()
+        .fold((255u8, 0u8), |(l, h), v| (l.min(*v), h.max(*v)));
+    high.saturating_sub(low)
+}
+
 /// True when the mask has a shape, showing some of the image and not the rest, but the result is
 /// one flat tone.  That is light ink on paper: white words through a mask over a dark panel, say.
 fn masks_a_picture_away(result: &Pixels, alpha: &Pixels) -> bool {
-    let spread = |data: &[u8]| {
-        let (low, high) = data
-            .iter()
-            .fold((255u8, 0u8), |(l, h), v| (l.min(*v), h.max(*v)));
-        high.saturating_sub(low)
-    };
     spread(&alpha.data) >= 128 && spread(&result.data) < NO_PICTURE_SPREAD
 }
 
@@ -1947,6 +1973,62 @@ mod tests {
             indexed(name("DeviceRGB"), 0, string(&[1, 2, 3])),
         );
         assert!(refusal(&d, JPEG).contains("palette indices"));
+    }
+
+    #[test]
+    fn decode_parms_of_the_wrong_kind_are_refused_not_read_as_none() {
+        let flated = crate::test_utils::zlib_compress(&[127]);
+        for parms in [Object::Integer(3), Object::Array(vec![Object::Integer(3)])] {
+            let mut d = image_dict(1, 1, 8, name("DeviceGray"));
+            d.set("Filter", name("FlateDecode"));
+            d.set("DecodeParms", parms.clone());
+            assert!(refusal(&d, &flated).contains("/DecodeParms"), "{parms:?}");
+        }
+    }
+
+    #[test]
+    fn decode_parms_that_are_null_are_none() {
+        let mut doc = Document::new();
+        doc.objects.insert((9, 0), Object::Null);
+        for parms in [
+            Object::Null,
+            Object::Reference((9, 0)),
+            Object::Reference((99, 0)),
+            Object::Array(vec![Object::Reference((9, 0))]),
+        ] {
+            let mut d = image_dict(1, 1, 8, name("DeviceGray"));
+            d.set("Filter", name("FlateDecode"));
+            d.set("DecodeParms", parms.clone());
+            let flated = crate::test_utils::zlib_compress(&[127]);
+            assert_eq!(pixels_in(&doc, &d, &flated).3, vec![127], "{parms:?}");
+        }
+    }
+
+    #[test]
+    fn a_colour_key_over_a_picture_it_would_leave_blank_is_refused() {
+        let mut d = image_dict(2, 1, 8, name("DeviceGray"));
+        d.set("Mask", numbers(&[0.0, 0.0]));
+        assert!(refusal(&d, &[255, 0]).contains("too light"));
+    }
+
+    #[test]
+    fn a_colour_key_with_nothing_to_lose_is_written() {
+        let mut d = image_dict(2, 1, 8, name("DeviceGray"));
+        d.set("Mask", numbers(&[0.0, 0.0]));
+        // Something still shows, or there was no picture.
+        assert_eq!(pixels_in(&Document::new(), &d, &[100, 0]).3, vec![100, 255]);
+        assert_eq!(pixels_in(&Document::new(), &d, &[0, 0]).3, vec![255, 255]);
+        assert_eq!(
+            pixels_in(&Document::new(), &d, &[255, 255]).3,
+            vec![255, 255]
+        );
+        // A blank scan whose key removes white: faithfully near-blank.
+        let mut d = image_dict(4, 1, 8, name("DeviceGray"));
+        d.set("Mask", numbers(&[255.0, 255.0]));
+        assert_eq!(
+            pixels_in(&Document::new(), &d, &[255, 252, 250, 255]).3,
+            vec![255, 252, 250, 255]
+        );
     }
 
     #[test]

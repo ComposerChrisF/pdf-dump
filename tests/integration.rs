@@ -4098,3 +4098,128 @@ fn a_predicted_stream_comes_out_with_its_predictor_undone() {
     assert!(stdout.contains("decoded, 8 bytes"), "{stdout}");
     assert!(!stdout.contains("WARNING"), "{stdout}");
 }
+
+/// A page whose `/Contents` is a reference to an array, holding `content`.
+fn page_with_indirect_contents_array(content: &[u8]) -> tempfile::NamedTempFile {
+    let mut doc = Document::with_version("1.7");
+    let stream = doc.add_object(Object::Stream(Stream::new(
+        Dictionary::new(),
+        content.to_vec(),
+    )));
+    let array = doc.add_object(Object::Array(vec![Object::Reference(stream)]));
+    let page = doc.add_object(Dictionary::from_iter(vec![
+        ("Type", Object::Name(b"Page".to_vec())),
+        ("Contents", Object::Reference(array)),
+    ]));
+    let pages = doc.add_object(Dictionary::from_iter(vec![
+        ("Type", Object::Name(b"Pages".to_vec())),
+        ("Count", Object::Integer(1)),
+        ("Kids", Object::Array(vec![Object::Reference(page)])),
+    ]));
+    if let Ok(Object::Dictionary(d)) = doc.get_object_mut(page) {
+        d.set("Parent", Object::Reference(pages));
+    }
+    let root = doc.add_object(Dictionary::from_iter(vec![
+        ("Type", Object::Name(b"Catalog".to_vec())),
+        ("Pages", Object::Reference(pages)),
+    ]));
+    doc.trailer.set("Root", Object::Reference(root));
+    let tmp = tempfile::NamedTempFile::new().unwrap();
+    doc.save(tmp.path()).unwrap();
+    tmp
+}
+
+#[test]
+fn validate_and_page_follow_an_indirect_contents_array() {
+    let content = b"BT (seen) Tj ET ) garbage";
+    let tmp = page_with_indirect_contents_array(content);
+    let validate = run_args(&tmp, &["--validate"]);
+    assert!(
+        String::from_utf8_lossy(&validate.stdout).contains("invalid syntax"),
+        "{validate:?}"
+    );
+    let page = run_args(&tmp, &["--page", "1", "--json"]);
+    let json: serde_json::Value = serde_json::from_slice(&page.stdout).unwrap();
+    assert_eq!(
+        json["pages"][0]["content_stream_bytes"],
+        serde_json::json!(content.len())
+    );
+}
+
+#[test]
+fn text_after_an_unterminated_image_with_no_colour_space_is_a_finding() {
+    let tmp = page_with_indirect_contents_array(
+        b"q BI /W 1 /H 1 /BPC 8 ID a never ends BT (secret) Tj ET",
+    );
+    let find = run_args(&tmp, &["--find-text", "secret"]);
+    assert_eq!(find.status.code(), Some(3), "{find:?}");
+    let text = run_args(&tmp, &["--text"]);
+    assert_eq!(text.status.code(), Some(3), "{text:?}");
+}
+
+#[test]
+fn a_dropped_inline_image_is_reported_by_the_listings() {
+    let tmp = page_with_indirect_contents_array(b"BI /W 1 /H 1 /BPC 8 ID a\nEI q Q");
+    let operators = run_args(&tmp, &["--operators", "--json"]);
+    assert!(
+        String::from_utf8_lossy(&operators.stdout).contains("left out of this listing"),
+        "{operators:?}"
+    );
+    let validate = run_args(&tmp, &["--validate"]);
+    assert!(
+        String::from_utf8_lossy(&validate.stdout).contains("invalid syntax"),
+        "{validate:?}"
+    );
+}
+
+/// Obsidian-Brain's report: the string swallows the rest of the stream.
+#[test]
+fn text_swallowed_by_an_unterminated_string_is_a_finding() {
+    let tmp = page_with_indirect_contents_array(
+        b"BT /F1 12 Tf 72 700 Td (ok Tj ET\nBT /F1 12 Tf 72 680 Td (Lockbox code: 7301) Tj ET\n",
+    );
+    let find = run_args(&tmp, &["--find-text", "7301"]);
+    assert_eq!(find.status.code(), Some(3), "{find:?}");
+    let text = run_args(&tmp, &["--text"]);
+    assert_eq!(text.status.code(), Some(3), "{text:?}");
+}
+
+#[test]
+fn validate_reads_a_pages_streams_as_one() {
+    let mut doc = Document::with_version("1.7");
+    let first = doc.add_object(Object::Stream(Stream::new(
+        Dictionary::new(),
+        b"/Span <</Lang ".to_vec(),
+    )));
+    let second = doc.add_object(Object::Stream(Stream::new(
+        Dictionary::new(),
+        b"(en-US)/MCID 1 >>BDC EMC".to_vec(),
+    )));
+    let page = doc.add_object(Dictionary::from_iter(vec![
+        ("Type", Object::Name(b"Page".to_vec())),
+        (
+            "Contents",
+            Object::Array(vec![Object::Reference(first), Object::Reference(second)]),
+        ),
+    ]));
+    let pages = doc.add_object(Dictionary::from_iter(vec![
+        ("Type", Object::Name(b"Pages".to_vec())),
+        ("Count", Object::Integer(1)),
+        ("Kids", Object::Array(vec![Object::Reference(page)])),
+    ]));
+    if let Ok(Object::Dictionary(d)) = doc.get_object_mut(page) {
+        d.set("Parent", Object::Reference(pages));
+    }
+    let root = doc.add_object(Dictionary::from_iter(vec![
+        ("Type", Object::Name(b"Catalog".to_vec())),
+        ("Pages", Object::Reference(pages)),
+    ]));
+    doc.trailer.set("Root", Object::Reference(root));
+    let tmp = tempfile::NamedTempFile::new().unwrap();
+    doc.save(tmp.path()).unwrap();
+    let validate = run_args(&tmp, &["--validate"]);
+    assert!(
+        !String::from_utf8_lossy(&validate.stdout).contains("invalid syntax"),
+        "{validate:?}"
+    );
+}

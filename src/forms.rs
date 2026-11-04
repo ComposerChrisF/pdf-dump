@@ -410,11 +410,11 @@ pub(crate) fn collect_xfa(doc: &Document) -> Option<XfaInfo> {
     match xfa {
         // One stream holding the whole XDP document.
         Object::Stream(_) => match read_xfa_packet(doc, xfa) {
-            Some(xml) => datasets.extend(
-                find_elements(&xml, "datasets")
-                    .into_iter()
-                    .map(str::to_string),
-            ),
+            Some(xml) => {
+                let (found, read_to_end) = find_elements(&xml, "datasets");
+                datasets.extend(found.into_iter().map(str::to_string));
+                read_failed |= !read_to_end;
+            }
             None => read_failed = true,
         },
         // Packets as pairs: a name, then a stream.
@@ -429,11 +429,11 @@ pub(crate) fn collect_xfa(doc: &Document) -> Option<XfaInfo> {
                     .unwrap_or_default();
                 match pair.get(1).and_then(|stream| read_xfa_packet(doc, stream)) {
                     Some(xml) if name == "datasets" => datasets.push(xml),
-                    Some(xml) => datasets.extend(
-                        find_elements(&xml, "datasets")
-                            .into_iter()
-                            .map(str::to_string),
-                    ),
+                    Some(xml) => {
+                        let (found, read_to_end) = find_elements(&xml, "datasets");
+                        datasets.extend(found.into_iter().map(str::to_string));
+                        read_failed |= !read_to_end;
+                    }
                     None => read_failed = true,
                 }
                 packets.push(name);
@@ -1401,6 +1401,31 @@ mod tests {
         assert_eq!(v["xfa"], true);
         assert_eq!(v["xfa_decoded"], false);
         assert!(had_issues);
+    }
+
+    #[test]
+    fn xfa_whose_markup_stops_the_search_is_a_finding() {
+        let doc = xfa_doc(
+            Object::Stream(lopdf::Stream::new(
+                Dictionary::new(),
+                b"<xdp:xdp><xfa:datasets invalid><v>7301</v></xfa:datasets></xdp:xdp>".to_vec(),
+            )),
+            vec![],
+        );
+        let info = collect_xfa(&doc).unwrap();
+        assert_eq!(info.decoded, false);
+        // And in a packet of any other name, among an array's.
+        let doc = xfa_doc(
+            Object::Array(vec![
+                Object::String(b"preamble".to_vec(), lopdf::StringFormat::Literal),
+                Object::Stream(lopdf::Stream::new(
+                    Dictionary::new(),
+                    b"<xfa:datasets invalid><v>7301</v></xfa:datasets>".to_vec(),
+                )),
+            ]),
+            vec![],
+        );
+        assert_eq!(collect_xfa(&doc).unwrap().decoded, false);
     }
 
     #[test]

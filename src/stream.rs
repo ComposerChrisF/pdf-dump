@@ -388,16 +388,31 @@ pub(crate) fn get_filter_names(stream: &lopdf::Stream) -> Vec<&[u8]> {
     }
 }
 
-/// A value the document holds directly or by reference.  `Ok(None)` is null; a reference that leads
-/// nowhere is an error, not null, since it cannot say what a stream's parameters were.
-fn follow<'a>(doc: &'a Document, value: &'a Object) -> Result<Option<&'a Object>, String> {
+/// Follows a reference.  `Ok(None)` is null, which is what a reference to nothing reads as (§ 7.3.10);
+/// one that could not be followed, such as a cycle, says nothing about the value, and is an error.
+pub(crate) fn follow<'a>(
+    doc: &'a Document,
+    value: &'a Object,
+) -> Result<Option<&'a Object>, String> {
     let value = match value {
-        Object::Reference(id) => doc
-            .get_object(*id)
-            .map_err(|_| format!("a reference to {} {}, which is not there", id.0, id.1))?,
+        Object::Reference(id) => match doc.get_object(*id) {
+            Ok(target) => target,
+            Err(lopdf::Error::ObjectNotFound(_)) => return Ok(None),
+            Err(_) => {
+                return Err(format!(
+                    "a reference to {} {} that cannot be followed",
+                    id.0, id.1
+                ));
+            }
+        },
         other => other,
     };
     Ok((!matches!(value, Object::Null)).then_some(value))
+}
+
+/// `follow`, where what could not be read is absent.
+pub(crate) fn deref<'a>(doc: &'a Document, value: &'a Object) -> Option<&'a Object> {
+    follow(doc, value).ok().flatten()
 }
 
 /// The `/DecodeParms` of filter `index`: one dictionary, for the first filter, or an array with an
@@ -785,14 +800,8 @@ mod tests {
         for parms in [
             up_rows(),                        // a partial row
             parms_of(vec![("Predictor", 7)]), // an unknown predictor
-            Object::Reference((9, 0)),        // nothing there
-            Object::Array(vec![Object::Reference((9, 0))]),
+            Object::Array(vec![Object::Integer(3)]),
             Object::Integer(3),
-            {
-                let mut d = Dictionary::new();
-                d.set("Predictor", Object::Reference((9, 0)));
-                Object::Dictionary(d)
-            },
             {
                 let mut d = Dictionary::new();
                 d.set("Predictor", Object::Integer(12));
@@ -816,7 +825,7 @@ mod tests {
     fn decode_stream_warns_about_a_later_filters_unusable_parameters() {
         let stream = stream_with(
             Object::Array(vec![hex_filter(), flate()]),
-            Some(Object::Reference((9, 0))),
+            Some(Object::Integer(3)),
             hex_of(&zlib(&[2, 1, 2])),
         );
         let (data, warning) = decode_stream(&empty_doc(), &stream);
@@ -827,11 +836,56 @@ mod tests {
     #[test]
     fn decode_stream_ignores_unused_parameters_when_no_predictor_is_named() {
         let mut d = Dictionary::new();
-        d.set("Columns", Object::Reference((9, 0)));
+        d.set("Columns", Object::Name(b"Four".to_vec()));
         let stream = stream_with(flate(), Some(Object::Dictionary(d)), zlib(b"text"));
         let (data, warning) = decode_stream(&empty_doc(), &stream);
         assert_eq!(&*data, b"text");
         assert_eq!(warning, None);
+    }
+
+    #[test]
+    fn decode_stream_warns_of_a_reference_it_cannot_follow() {
+        let mut doc = empty_doc();
+        doc.objects.insert((9, 0), Object::Reference((9, 0)));
+        let stream = stream_with(flate(), Some(Object::Reference((9, 0))), zlib(&PREDICTED));
+        let (data, warning) = decode_stream(&doc, &stream);
+        assert_eq!(&*data, &PREDICTED);
+        assert!(warning.is_some_and(|w| w.starts_with("predictor not undone: ")));
+    }
+
+    #[test]
+    fn decode_stream_reads_a_reference_to_null_as_null() {
+        let mut doc = empty_doc();
+        doc.objects.insert((9, 0), Object::Null);
+        let mut d = Dictionary::new();
+        d.set("Predictor", Object::Integer(12));
+        d.set("Columns", Object::Reference((9, 0)));
+        // /Columns is then its default of 1, so these rows of 2 bytes are 1, 2 and 4, 4.
+        let stream = stream_with(flate(), Some(Object::Dictionary(d)), zlib(&[2, 1, 2, 3]));
+        let (data, warning) = decode_stream(&doc, &stream);
+        assert_eq!(warning, None);
+        assert_eq!(&*data, &[1, 4]);
+        let stream = stream_with(flate(), Some(Object::Reference((9, 0))), zlib(b"text"));
+        assert_eq!(
+            decode_stream(&doc, &stream),
+            (b"text".as_slice().into(), None)
+        );
+    }
+
+    #[test]
+    fn decode_stream_reads_a_reference_to_nothing_as_null() {
+        let mut d = Dictionary::new();
+        d.set("Predictor", Object::Reference((9, 0)));
+        for parms in [
+            Object::Reference((9, 0)),
+            Object::Array(vec![Object::Reference((9, 0))]),
+            Object::Dictionary(d),
+        ] {
+            let stream = stream_with(flate(), Some(parms.clone()), zlib(b"text"));
+            let (data, warning) = decode_stream(&empty_doc(), &stream);
+            assert_eq!(&*data, b"text", "{parms:?}");
+            assert_eq!(warning, None, "{parms:?}");
+        }
     }
 
     #[test]
@@ -856,7 +910,7 @@ mod tests {
             .encode(b"needle")
             .unwrap();
         let mut d = Dictionary::new();
-        d.set("EarlyChange", Object::Reference((9, 0)));
+        d.set("EarlyChange", Object::Name(b"Yes".to_vec()));
         let stream = stream_with(
             Object::Name(b"LZWDecode".to_vec()),
             Some(Object::Dictionary(d)),
