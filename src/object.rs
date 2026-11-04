@@ -8,6 +8,9 @@ use std::io::Write;
 use crate::helpers::json_pretty;
 use crate::helpers::{find_object, format_dict_value, format_operation, object_type_label};
 use crate::stream::{decode_stream, format_hex_dump, get_filter_names, is_binary_stream};
+use crate::text_string::{
+    decode_text_string, display_string, hex_digits, is_plain_ascii, summary_string, text_encoding,
+};
 use crate::types::{DumpConfig, ObjectSpec};
 
 pub(crate) fn print_stream_content(
@@ -155,15 +158,7 @@ pub(crate) fn print_object(
         Object::Real(r) => w!(writer, "{}", r),
         Object::Name(name) => w!(writer, "/{}", String::from_utf8_lossy(name)),
         Object::String(bytes, format) => {
-            if *format == lopdf::StringFormat::Hexadecimal {
-                w!(writer, "<");
-                for b in bytes {
-                    w!(writer, "{:02x}", b);
-                }
-                w!(writer, ">");
-            } else {
-                w!(writer, "({})", String::from_utf8_lossy(bytes));
-            }
+            w!(writer, "{}", display_string(bytes, *format));
         }
         Object::Array(array) => {
             let child_indent = "  ".repeat(indent + 1);
@@ -258,7 +253,7 @@ pub(crate) fn deref_summary(obj: &Object) -> String {
         Object::Integer(i) => i.to_string(),
         Object::Real(r) => r.to_string(),
         Object::Name(n) => format!("/{}", String::from_utf8_lossy(n)),
-        Object::String(bytes, _) => format!("({})", String::from_utf8_lossy(bytes)),
+        Object::String(bytes, _) => summary_string(bytes),
         Object::Array(arr) => format!("[{} items]", arr.len()),
         Object::Reference(id) => format!("{} {} R", id.0, id.1),
         Object::Stream(stream) => {
@@ -483,8 +478,23 @@ pub(crate) fn object_to_json(obj: &Object, doc: &Document, config: &DumpConfig) 
         Object::Integer(i) => json!({"type": "integer", "value": i}),
         Object::Real(r) => json!({"type": "real", "value": r}),
         Object::Name(n) => json!({"type": "name", "value": String::from_utf8_lossy(n)}),
-        Object::String(bytes, _) => {
-            json!({"type": "string", "value": String::from_utf8_lossy(bytes)})
+        Object::String(bytes, format) => {
+            let decoded = decode_text_string(bytes);
+            let mut value = json!({
+                "type": "string",
+                "value": decoded.text,
+                "decoded": decoded.decoded,
+                "encoding": text_encoding(bytes),
+                "format": if *format == lopdf::StringFormat::Hexadecimal {
+                    "hexadecimal"
+                } else {
+                    "literal"
+                },
+            });
+            if !is_plain_ascii(bytes) {
+                value["hex"] = json!(hex_digits(bytes));
+            }
+            value
         }
         Object::Array(arr) => {
             let items: Vec<Value> = arr.iter().map(|o| object_to_json(o, doc, config)).collect();
@@ -1289,15 +1299,40 @@ mod tests {
     }
 
     #[test]
-    fn print_object_string_non_utf8() {
-        // Non-UTF8 bytes should be handled by from_utf8_lossy with replacement char
-        let (out, _) = print_obj(&Object::String(vec![0xFF, 0xFE], StringFormat::Literal));
-        assert!(out.starts_with('('));
-        assert!(out.ends_with(')'));
-        assert!(
-            out.contains('\u{FFFD}'),
-            "Non-UTF8 bytes should produce replacement chars"
+    fn a_strings_json_says_how_it_was_read() {
+        let doc = Document::new();
+        let config = json_config();
+        let json_of = |bytes: &[u8], format| {
+            object_to_json(&Object::String(bytes.to_vec(), format), &doc, &config)
+        };
+        assert_eq!(
+            json_of(b"Hi", StringFormat::Literal),
+            json!({"type": "string", "value": "Hi", "decoded": true,
+                   "encoding": "PDFDocEncoding", "format": "literal"})
         );
+        assert_eq!(
+            json_of(b"\xFE\xFF\x00H", StringFormat::Hexadecimal),
+            json!({"type": "string", "value": "H", "decoded": true, "encoding": "UTF-16BE",
+                   "format": "hexadecimal", "hex": "feff0048"})
+        );
+        assert_eq!(
+            json_of(b"\xFE\xFF\x00", StringFormat::Literal),
+            json!({"type": "string", "value": "<FEFF00>", "decoded": false, "encoding": "UTF-16BE",
+                   "format": "literal", "hex": "feff00"})
+        );
+    }
+
+    #[test]
+    fn summaries_show_what_a_string_says() {
+        let utf16 = Object::String(b"\xFE\xFF\x00H".to_vec(), StringFormat::Literal);
+        assert_eq!(deref_summary(&utf16), "(H)");
+    }
+
+    #[test]
+    fn print_object_string_non_utf8() {
+        // With no mark these are PDFDocEncoding, and the output says so.
+        let (out, _) = print_obj(&Object::String(vec![0xFF, 0xFE], StringFormat::Literal));
+        assert_eq!(out, "(\u{FF}\u{FE}) [PDFDocEncoding]");
     }
 
     #[test]

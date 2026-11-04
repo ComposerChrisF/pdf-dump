@@ -109,6 +109,88 @@ pub(crate) fn decode_text_string(bytes: &[u8]) -> TextString {
     }
 }
 
+/// The encoding `decode_text_string` reads these bytes under, named for a person.
+pub(crate) fn text_encoding(bytes: &[u8]) -> &'static str {
+    if bytes.starts_with(b"\xFE\xFF") {
+        "UTF-16BE"
+    } else if bytes.starts_with(b"\xEF\xBB\xBF") {
+        "UTF-8"
+    } else {
+        "PDFDocEncoding"
+    }
+}
+
+/// Bytes that read the same under every encoding, so that a reader need not be told which.
+pub(crate) fn is_plain_ascii(bytes: &[u8]) -> bool {
+    bytes
+        .iter()
+        .all(|b| matches!(b, 0x20..=0x7E | b'\t' | b'\n' | b'\r'))
+}
+
+/// A string as `--object` prints it: as written, with what it says when that is not plain, and its
+/// encoding, so that `(Hello) [UTF-16BE]` can be told from ASCII, and a raw UTF-8 string, which is
+/// invalid, shows as the mojibake a viewer shows, marked `[PDFDocEncoding]`.  A hex string with no
+/// mark is more likely bytes than text, so it stays as written.
+pub(crate) fn display_string(bytes: &[u8], format: lopdf::StringFormat) -> String {
+    let decoded = decode_text_string(bytes);
+    let what_it_says = if decoded.decoded {
+        format!("({}) [{}]", printable(&decoded.text), text_encoding(bytes))
+    } else {
+        "[not decodable]".to_string()
+    };
+    if format == lopdf::StringFormat::Hexadecimal {
+        let has_mark = text_encoding(bytes) != "PDFDocEncoding";
+        return if has_mark {
+            format!("<{}> {what_it_says}", hex_digits(bytes))
+        } else {
+            format!("<{}>", hex_digits(bytes))
+        };
+    }
+    if is_plain_ascii(bytes) {
+        format!("({})", printable(&decoded.text))
+    } else if decoded.decoded {
+        what_it_says
+    } else {
+        format!("{} {what_it_says}", decoded.text)
+    }
+}
+
+/// A string in one line of a summary: what it says, or its bytes in hex when that cannot be read.
+pub(crate) fn summary_string(bytes: &[u8]) -> String {
+    let decoded = decode_text_string(bytes);
+    if decoded.decoded {
+        format!("({})", printable(&decoded.text))
+    } else {
+        decoded.text
+    }
+}
+
+/// Text fit for a terminal: a character that moves or hides what is around it (a control character
+/// other than tab and newline, a bidirectional override) shows as its escape.
+pub(crate) fn printable(text: &str) -> String {
+    let mut out = String::with_capacity(text.len());
+    for c in text.chars() {
+        let moves_text = (c.is_control() && !matches!(c, '\t' | '\n'))
+            || matches!(c, '\u{200E}' | '\u{200F}' | '\u{202A}'..='\u{202E}' | '\u{2066}'..='\u{2069}');
+        if moves_text {
+            out.extend(c.escape_unicode());
+        } else {
+            out.push(c);
+        }
+    }
+    out
+}
+
+/// Bytes as lowercase hex digits.
+pub(crate) fn hex_digits(bytes: &[u8]) -> String {
+    use std::fmt::Write;
+    let mut out = String::with_capacity(bytes.len() * 2);
+    for b in bytes {
+        let _ = write!(out, "{b:02x}");
+    }
+    out
+}
+
 const ESCAPE: u16 = 0x1B;
 
 /// Under UTF-16 a language code is its raw ASCII bytes, so 2 or 4 letters are 1 or 2 code units.
@@ -708,6 +790,57 @@ mod tests {
         assert_eq!((d.text.as_str(), d.decoded), ("7", false));
         assert_eq!(read_text_value(&doc, &Object::Null), None);
         assert_eq!(read_text_value(&doc, &Object::Reference((99, 0))), None);
+    }
+
+    #[test]
+    fn display_string_shows_the_encoding_when_it_matters() {
+        use lopdf::StringFormat::{Hexadecimal, Literal};
+        let hello = b"\xFE\xFF\x00H\x00i";
+        assert_eq!(display_string(b"Hi", Literal), "(Hi)");
+        assert_eq!(display_string(hello, Literal), "(Hi) [UTF-16BE]");
+        assert_eq!(
+            display_string(hello, Hexadecimal),
+            "<feff00480069> (Hi) [UTF-16BE]"
+        );
+        assert_eq!(display_string(b"\xEF\xBB\xBFHi", Literal), "(Hi) [UTF-8]");
+        assert_eq!(display_string(b"Hi", Hexadecimal), "<4869>");
+        // Raw UTF-8 with no mark is invalid, and must not read as if it were right.
+        assert_eq!(
+            display_string("La\u{2018}i".as_bytes(), Literal),
+            "(La\u{e2}\u{2022}\u{178}i) [PDFDocEncoding]"
+        );
+        assert_eq!(
+            display_string(b"\xFE\xFF\x00", Literal),
+            "<FEFF00> [not decodable]"
+        );
+        assert_eq!(
+            display_string(b"\xFE\xFF\x00", Hexadecimal),
+            "<feff00> [not decodable]"
+        );
+        // A byte PDFDocEncoding defines, in a string that is not plain ASCII.
+        assert_eq!(
+            display_string(b"\x18", Literal),
+            "(\u{2D8}) [PDFDocEncoding]"
+        );
+    }
+
+    #[test]
+    fn what_could_rewrite_the_terminal_is_escaped() {
+        use lopdf::StringFormat::{Hexadecimal, Literal};
+        let tricky = b"\xFE\xFF\x00P\x00\x0D\x00V\x20\x2E\x00\x9B";
+        assert_eq!(
+            display_string(tricky, Literal),
+            "(P\\u{d}V\\u{202e}\\u{9b}) [UTF-16BE]"
+        );
+        assert!(display_string(tricky, Hexadecimal).contains("(P\\u{d}V"));
+        assert_eq!(summary_string(tricky), "(P\\u{d}V\\u{202e}\\u{9b})");
+        assert_eq!(display_string(b"a\tb\nc\rd", Literal), "(a\tb\nc\\u{d}d)");
+    }
+
+    #[test]
+    fn summary_string_shows_hex_for_what_cannot_be_read() {
+        assert_eq!(summary_string(b"\xFE\xFF\x00"), "<FEFF00>");
+        assert_eq!(summary_string(b"\xFE\xFF\x00H"), "(H)");
     }
 
     #[test]

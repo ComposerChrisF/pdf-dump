@@ -47,5 +47,5 @@ Documenting the load-bearing syntax and adding an escape removes the silent rein
 the comma and operator-word cases searchable and predictable.
 
 ## Related
-[[bug-0028-search-nested-values-not-matched]] and [[bug-0033-text-string-utf16be-mishandled]] (search
+[[bug-0028-search-nested-values-not-matched]] and bug-0033, fixed in the commit that names it (search
 behavior/coverage).  Doc side overlaps with [[bug-0006-docs-help-and-readme-flag-text-errors]].

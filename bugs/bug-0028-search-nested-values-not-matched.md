@@ -43,5 +43,5 @@ Recursing into containers makes the behavior match the “any value” claim in 
 docs makes the claim match the behavior.  Either removes the mismatch.
 
 ## Related
-Overlaps with [[bug-0033-text-string-utf16be-mishandled]] (search-side value matching) and
+Overlaps with bug-0033 (search-side value matching, fixed in the commit that names it) and
 [[bug-0030-search-syntax-comma-and-case-undocumented]] (search documentation).

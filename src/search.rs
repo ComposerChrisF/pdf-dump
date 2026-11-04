@@ -68,6 +68,19 @@ pub(crate) fn parse_search_expr(expr: &str) -> Result<Vec<SearchCondition>, Stri
     Ok(conditions)
 }
 
+/// What a text string says, for matching beside its raw bytes: a string that cannot be decoded has
+/// only its bytes to match.
+fn decoded_text(bytes: &[u8]) -> Option<String> {
+    let decoded = crate::text_string::decode_text_string(bytes);
+    decoded.decoded.then_some(decoded.text)
+}
+
+/// Lowercased a character at a time.  `str::to_lowercase` also applies context rules, under which a
+/// final sigma differs from the same letter inside a longer string.
+fn folded(text: &str) -> String {
+    text.chars().flat_map(char::to_lowercase).collect()
+}
+
 pub(crate) fn object_matches(doc: &Document, obj: &Object, conditions: &[SearchCondition]) -> bool {
     let dict = match obj {
         Object::Dictionary(d) => d,
@@ -99,21 +112,28 @@ pub(crate) fn object_matches(doc: &Document, obj: &Object, conditions: &[SearchC
             Object::String(bytes, _) => {
                 let v_lower = value.to_ascii_lowercase();
                 bytes.to_ascii_lowercase() == v_lower
+                    || decoded_text(bytes).is_some_and(|text| {
+                        folded(&text) == folded(&String::from_utf8_lossy(value))
+                    })
             }
             _ => false,
         }),
         SearchCondition::HasKey { key } => dict.get(key).is_ok(),
         SearchCondition::ValueContains { text } => {
             let needle = text.as_bytes();
-            dict.iter().any(|(_, v)| {
-                let haystack: &[u8] = match v {
-                    Object::Name(n) => n,
-                    Object::String(bytes, _) => bytes,
-                    _ => return false,
-                };
+            let in_bytes = |haystack: &[u8]| {
                 haystack
                     .windows(needle.len())
                     .any(|w| w.eq_ignore_ascii_case(needle))
+            };
+            dict.iter().any(|(_, v)| match v {
+                Object::Name(n) => in_bytes(n),
+                Object::String(bytes, _) => {
+                    in_bytes(bytes)
+                        || decoded_text(bytes)
+                            .is_some_and(|decoded| folded(&decoded).contains(&folded(text)))
+                }
+                _ => false,
             })
         }
         SearchCondition::StreamContains { text } => {
@@ -129,15 +149,14 @@ pub(crate) fn object_matches(doc: &Document, obj: &Object, conditions: &[SearchC
         SearchCondition::RegexMatch { pattern } => {
             // Match against dict key names, Name values, String values
             let key_or_value_match = dict.iter().any(|(k, v)| {
-                if let Ok(key_str) = std::str::from_utf8(k)
-                    && pattern.is_match(key_str)
-                {
+                if pattern.is_match(&String::from_utf8_lossy(k)) {
                     return true;
                 }
                 match v {
-                    Object::Name(n) => std::str::from_utf8(n).is_ok_and(|s| pattern.is_match(s)),
+                    Object::Name(n) => pattern.is_match(&String::from_utf8_lossy(n)),
                     Object::String(bytes, _) => {
-                        std::str::from_utf8(bytes).is_ok_and(|s| pattern.is_match(s))
+                        pattern.is_match(&String::from_utf8_lossy(bytes))
+                            || decoded_text(bytes).is_some_and(|s| pattern.is_match(&s))
                     }
                     _ => false,
                 }
@@ -266,6 +285,79 @@ mod tests {
     use pretty_assertions::assert_eq;
     use regex::Regex;
     use serde_json::Value;
+
+    #[test]
+    fn search_matches_what_a_string_says_and_its_bytes() {
+        let doc = empty_doc();
+        let utf16 = b"\xFE\xFF\x00H\x00e\x00l\x00l\x00o\x20\x18".to_vec();
+        let mut dict = Dictionary::new();
+        dict.set("Title", Object::String(utf16, StringFormat::Literal));
+        let object = Object::Dictionary(dict);
+        for expr in [
+            "value=hello",
+            "value=\u{2018}",
+            "Title=hello\u{2018}",
+            "regex=H.llo",
+        ] {
+            let conditions = parse_search_expr(expr).unwrap();
+            assert!(object_matches(&doc, &object, &conditions), "{expr}");
+        }
+        assert!(!object_matches(
+            &doc,
+            &object,
+            &parse_search_expr("value=goodbye").unwrap()
+        ));
+    }
+
+    /// A search that matched at v0.31.6 still does: these match only in their bytes.
+    #[test]
+    fn search_still_matches_raw_bytes() {
+        let doc = empty_doc();
+        let string_object = |bytes: &[u8]| {
+            let mut dict = Dictionary::new();
+            dict.set(
+                "Title",
+                Object::String(bytes.to_vec(), StringFormat::Literal),
+            );
+            Object::Dictionary(dict)
+        };
+        // Raw UTF-8 with no mark decodes to mojibake, so only its bytes say this.
+        let raw_utf8 = string_object("\u{e9}".as_bytes());
+        for expr in ["value=\u{e9}", "Title=\u{e9}", "regex=\u{e9}"] {
+            let conditions = parse_search_expr(expr).unwrap();
+            assert!(object_matches(&doc, &raw_utf8, &conditions), "{expr}");
+        }
+        // This cannot be decoded at all, and was skipped by regex= before.
+        let undecodable = string_object(&[0x01, 0xFF]);
+        let conditions = parse_search_expr(r"regex=^\x01").unwrap();
+        assert!(object_matches(&doc, &undecodable, &conditions));
+    }
+
+    #[test]
+    fn search_regex_reads_names_and_keys_that_are_not_utf8() {
+        let doc = empty_doc();
+        let mut dict = Dictionary::new();
+        dict.set(b"Bar\xE9".to_vec(), Object::Name(b"Caf\xE9".to_vec()));
+        let object = Object::Dictionary(dict);
+        for expr in ["regex=^Bar", "regex=^Caf"] {
+            let conditions = parse_search_expr(expr).unwrap();
+            assert!(object_matches(&doc, &object, &conditions), "{expr}");
+        }
+    }
+
+    #[test]
+    fn search_folds_case_a_letter_at_a_time() {
+        let doc = empty_doc();
+        let utf16: Vec<u8> = [0xFEFFu16, 0x0391, 0x03A3, 0x0392]
+            .iter()
+            .flat_map(|u| u.to_be_bytes())
+            .collect();
+        let mut dict = Dictionary::new();
+        dict.set("Key", Object::String(utf16, StringFormat::Literal));
+        let object = Object::Dictionary(dict);
+        let conditions = parse_search_expr("value=\u{3b1}\u{3a3}").unwrap();
+        assert!(object_matches(&doc, &object, &conditions));
+    }
 
     #[test]
     fn parse_search_expr_key_value() {

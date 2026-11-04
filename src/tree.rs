@@ -29,7 +29,12 @@ fn tree_node_label(obj: &Object) -> String {
         Object::Integer(i) => format!("Integer({})", i),
         Object::Real(r) => format!("Real({})", r),
         Object::Name(n) => format!("Name({})", String::from_utf8_lossy(n)),
-        Object::String(s, _) => format!("String({})", String::from_utf8_lossy(s)),
+        Object::String(s, _) => {
+            format!(
+                "String({})",
+                crate::text_string::printable(&crate::text_string::decode_text_string(s).text)
+            )
+        }
         Object::Null => "Null".to_string(),
         Object::Reference(id) => format!("Reference({} {})", id.0, id.1),
     }
@@ -311,6 +316,18 @@ mod tests {
     use lopdf::{Dictionary, Stream, StringFormat};
     use pretty_assertions::assert_eq;
     use serde_json::Value;
+
+    #[test]
+    fn a_string_label_says_what_it_says_and_escapes_what_could_rewrite_a_terminal() {
+        let label = |bytes: &[u8]| {
+            tree_node_label(&Object::String(
+                bytes.to_vec(),
+                lopdf::StringFormat::Literal,
+            ))
+        };
+        assert_eq!(label(b"\xFE\xFF\x00H"), "String(H)");
+        assert_eq!(label(b"\xFE\xFF\x00A\x00\x0D\x00X"), "String(A\\u{d}X)");
+    }
 
     #[test]
     fn tree_node_label_catalog() {

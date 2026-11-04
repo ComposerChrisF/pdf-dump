@@ -147,9 +147,10 @@ Common workflows:
 Search expression syntax (--search):
   <KeyName>=<value>   Dictionary has /KeyName equal to <value>
   key=<name>          Dictionary has a key named <name>
-  value=<text>        Any Name/String value contains <text> (case-insensitive)
+  value=<text>        Any Name/String value contains <text> (case-insensitive), in
+                      what a string says or in its raw bytes
   stream=<text>       Decoded stream content contains <text> (case-insensitive)
-  regex=<pattern>     Any key, Name, or String value matches the regex
+  regex=<pattern>     Any key, Name, or String value matches the regex, likewise
 
 Tolerant by default: when a stream declares a wrong /Length (so a strict reader
 would drop its body and silently lose page content), pdf-dump recovers the body,

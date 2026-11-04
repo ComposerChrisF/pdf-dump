@@ -288,9 +288,9 @@ pub(crate) fn classify_object(
         Object::String(bytes, _) => (
             "String".to_string(),
             format!(
-                "Object {} is a string: ({}).",
+                "Object {} is a string: {}.",
                 obj_num,
-                String::from_utf8_lossy(bytes)
+                crate::text_string::summary_string(bytes)
             ),
         ),
         Object::Name(n) => (

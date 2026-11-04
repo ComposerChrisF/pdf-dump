@@ -25,10 +25,6 @@ contract violation · **[MED]** correctness/robustness on unusual input · **[LO
 These need a decision from Chris; the report lists the options and a recommendation.  Do the
 decision here, then implement in the phase noted. **Do not just “fix the code”.**
 
-- [ ] **bug-0033** [MED] UTF-16BE / non-UTF-8 text strings mishandled in display + search (decode
-      per spec, and/or lossless byte fallback — scope?).  Narrowed by v0.30.0: only `--object`,
-      `--inspect` and `--search` remain.  Gates Phase 2 fix.
-      `bugs/bug-0033-text-string-utf16be-mishandled.md`
 - [ ] **bug-0009** [LOW] `--extract-stream` ignores `--json` (emit a JSON summary, or scope the
       docs?).  Gates the Phase 4 doc/behavior fix. `bugs/bug-0009-extract-stream-ignores-json.md`
 - [ ] **bug-0025** [LOW] `--page` accepted-but-ignored, yet range-validated (reject/warn, or
@@ -70,8 +66,6 @@ decision here, then implement in the phase noted. **Do not just “fix the code�
       hits and false “not found”, warning discarded. `bugs/bug-0029-search-raw-bytes-on-decode-failure.md`
 - [ ] **bug-0021** [MED] `--object N` on an indirect-reference object shows the _target’s_ content
       under N’s header.  Display the stored value, not the deref. `bugs/bug-0021-object-indirect-reference-masquerade.md`
-- [ ] **bug-0033** [MED] (code fix, after Phase 0 decision) Decode UTF-16BE text strings / lossless
-      fallback, in display and search. `bugs/bug-0033-text-string-utf16be-mishandled.md`
 
 ---
 
@@ -168,7 +162,7 @@ corrupts the text that `--layout` positions or makes the reliability verdict its
    change regardless of everything else.  The other DoS items are independent one-liners/guards.
 3. **Phase 2 silent-wrong-output** — highest user harm after crashes.  Note the intra-phase
    dependencies: bug-0012 before bug-0011 (shared reliability verdict); bug-0034 with bug-0027
-   (shared trailer walk); bug-0033 lands here once its Phase 0 decision is made.
+   (shared trailer walk).
 4. **Phase 3 correctness/robustness.**
 5. **Phase 4 docs last**, so they describe the behavior that actually shipped.  The pure-stale doc
    fixes (0006, 0007, 0008) are safe to start early but must be reconciled with any behavior change.

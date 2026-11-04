@@ -5,6 +5,18 @@ All notable changes to `pdf-dump` are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0/).
 
+## [0.31.7] - 2026-11-04
+### Fixed
+- **`--object`, `--inspect`, `--tree` and `--search` read text strings as the standard
+  says.**  A UTF-16BE `/Title` printed as mojibake and never matched a search, and raw
+  UTF-8, which is invalid, read as correct, which hid a real defect in another tool.
+  `--object` now prints `(Hello) [UTF-16BE]`, marks a string that is not plain ASCII with
+  its encoding or `[not decodable]`, and escapes what could rewrite a terminal.  Its JSON
+  gains `decoded`, `encoding`, `format` and, unless the bytes are plain ASCII, `hex`, so
+  nothing is lost; `value` is the decoded text.  `--search` matches what a string says and
+  its raw bytes, so a search that matched before still does, and `regex=` now reads a
+  string, Name or key that is not UTF-8, where it skipped it.  (bug-0033)
+
 ## [0.31.6] - 2026-11-04
 ### Fixed
 - **An object at a generation other than 0 can be reached, and the live one is what a number

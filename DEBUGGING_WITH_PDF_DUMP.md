@@ -56,13 +56,13 @@ Conditions are ANDed.  Case-insensitive on values.
 | `Type=Value` | `Type=Font` | Objects where `/Type` = `/Font` |
 | `Key=Value` | `Subtype=Image` | Any dict key matching |
 | `key=Name` | `key=MediaBox` | Objects containing key `/MediaBox` |
-| `value=Text` | `value=Helvetica` | Any Name or String value containing text |
+| `value=Text` | `value=Helvetica` | Any Name or String value containing text, in what it says or in its bytes |
 | `stream=Text` | `stream=BT` | Decoded stream content containing text |
 | `regex=Pattern` | `regex=D:20(23\|24)` | Regex match across keys, values, and streams |
 
 ## Text strings
 
-`--forms`, `--annotations`, `--detail`, `--bookmarks`, `--tags`, and the overview's metadata decode a PDF text string as the standard says: by its UTF-16BE (`FE FF`) or UTF-8 (`EF BB BF`) mark, otherwise as PDFDocEncoding, with any language escape removed.  So raw UTF-8 with no mark, which is invalid, reads as mojibake here, as it does in a viewer.  A string that cannot be decoded prints as lossless hex (`<FEFF00>`), never as replacement characters.  `--forms`, `--annotations` and `--detail embedded` also flag it in `--json`; the others show only the hex.  `--object`, `--inspect` and `--search` still show and match raw bytes (bug-0033).
+`--forms`, `--annotations`, `--detail`, `--bookmarks`, `--tags`, `--object`, `--inspect`, `--tree`, and the overview's metadata decode a PDF text string as the standard says: by its UTF-16BE (`FE FF`) or UTF-8 (`EF BB BF`) mark, otherwise as PDFDocEncoding, with any language escape removed.  So raw UTF-8 with no mark, which is invalid, reads as mojibake here, as it does in a viewer.  A string that cannot be decoded prints as lossless hex (`<FEFF00>`), never as replacement characters.  `--forms`, `--annotations`, `--detail embedded` and `--object` also flag it in `--json`; the others show only the hex.  `--object` adds the encoding when it matters, so `(Hello) [UTF-16BE]` can be told from ASCII, and raw UTF-8 reads as mojibake marked `[PDFDocEncoding]`; one that cannot be read shows `[not decodable]`.  A hex string stays as written, with what it says added when it has a mark.  Text output escapes what could rewrite a terminal, such as `\u{d}`; JSON has the text as it is.  `--search` matches what a string says and its raw bytes, either one.  `--operators` does not decode: an operand's bytes mean what its font says.  `decoded` says only whether the bytes read under the encoding: PDF does not mark a byte string such as `/ID` as one, so it can read as `decoded: true` mojibake, with its bytes in `hex`.
 
 ## Validation checks (10)
 
@@ -93,7 +93,7 @@ Add `--json` to any mode.  All schemas below show the structure of a single mode
 | Integer | `"integer"` | `"value"` |
 | Real | `"real"` | `"value"` |
 | Name | `"name"` | `"value"` (no `/` prefix) |
-| String | `"string"` | `"value"` (UTF-8 lossy) |
+| String | `"string"` | `"value"` (decoded, or lossless hex when it cannot be), `"decoded"`, `"encoding"`, `"format"` (`literal` or `hexadecimal`), and `"hex"`, the bytes, unless they are plain ASCII |
 | Array | `"array"` | `"items": [...]` |
 | Dictionary | `"dictionary"` | `"keys": {"Key": {...}}` |
 | Stream | `"stream"` | `"dict"`, optional `"content"` / `"content_hex"` / `"content_binary"` / `"decode_warning"` |
