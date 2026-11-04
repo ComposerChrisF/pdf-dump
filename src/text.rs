@@ -1,4 +1,4 @@
-use lopdf::{Document, Object, ObjectId, content::Content};
+use lopdf::{Document, Object, ObjectId};
 use serde_json::{Value, json};
 use std::collections::{HashMap, HashSet};
 use std::io::Write;
@@ -7,6 +7,7 @@ use std::rc::Rc;
 use crate::cmap::{CodeWidth, ToUnicodeCMap};
 use crate::encodings;
 use crate::helpers;
+use crate::inline_image::decode_content;
 use crate::types::PageSpec;
 
 /// Fraction of attempted-decode codes that may go unmapped before a document's
@@ -171,6 +172,31 @@ impl ExtractState {
     }
 }
 
+/// Why extraction stops short of a content stream's end, in words for a warning.
+pub(crate) const CONTENT_STOPPED_EARLY: &str =
+    "Content stream has a syntax error; what follows it was not read";
+
+/// A stream not read is text not read, and the verdict must show it, or a caller gating on the exit
+/// code passes a file it read part of (bug-0039).  A record of this shape is all the verdict, the
+/// banner and `--json` need.
+pub(crate) fn content_unread_record(reason: &str) -> FontReliabilityRecord {
+    FontReliabilityRecord {
+        name: "(content stream)".to_string(),
+        base_font: "-".to_string(),
+        subtype: "-".to_string(),
+        classification: Reliability::Degraded,
+        has_to_unicode: false,
+        reason: reason.to_string(),
+    }
+}
+
+impl ExtractState {
+    fn note_unread(&mut self, reason: &str) {
+        self.warnings.push(reason.to_string());
+        self.fonts.push(content_unread_record(reason));
+    }
+}
+
 #[cfg(test)]
 fn extract_text_from_page(doc: &Document, page_id: ObjectId) -> String {
     extract_text_from_page_with_warnings(doc, page_id).text
@@ -197,6 +223,11 @@ pub(crate) fn extract_text_from_page_with_warnings(
     match helpers::read_content_streams(doc, page_id) {
         Some(stream_data) => {
             state.warnings.extend(stream_data.warnings);
+            if stream_data.unread {
+                state
+                    .fonts
+                    .push(content_unread_record("A content stream could not be read"));
+            }
             // `visited` is the active form-recursion stack for cycle detection;
             // depth 0 is the page's own content stream.
             let mut visited = HashSet::new();
@@ -353,12 +384,15 @@ fn process_content(
         return;
     }
 
-    let operations = match Content::decode(bytes) {
-        Ok(content) => content.operations,
+    let operations = match decode_content(bytes) {
+        Ok(content) => {
+            if content.stopped_early {
+                state.note_unread(CONTENT_STOPPED_EARLY);
+            }
+            content.operations
+        }
         Err(_) => {
-            state
-                .warnings
-                .push("Content stream has syntax errors".to_string());
+            state.note_unread("Content stream has syntax errors");
             return;
         }
     };
@@ -573,9 +607,7 @@ fn recurse_into_form(
 
     let (decoded, warn) = crate::stream::decode_stream(stream);
     if let Some(w) = warn {
-        state
-            .warnings
-            .push(format!("Form XObject {} {}: {}", xobj_id.0, xobj_id.1, w));
+        state.note_unread(&format!("Form XObject {} {}: {}", xobj_id.0, xobj_id.1, w));
     }
 
     // A form XObject normally carries its own `/Resources`; when absent it

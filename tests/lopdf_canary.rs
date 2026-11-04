@@ -441,3 +441,17 @@ fn lopdf_save_modern_encryption_corrupts_objstm_strings() {
         }
     }
 }
+
+// ── Content::decode: what inline_image::decode_content works around ──────
+
+#[test]
+fn lopdf_content_decode_stops_silently_at_a_syntax_error() {
+    let content = lopdf::content::Content::decode(b"BT ET ) garbage q Q").unwrap();
+    assert_eq!(content.operations.len(), 2);
+}
+
+#[test]
+#[should_panic]
+fn lopdf_content_decode_panics_on_an_inline_image_with_no_colour_space() {
+    let _ = lopdf::content::Content::decode(b"BI /W 1 /H 1 /BPC 8 ID a\nEI");
+}

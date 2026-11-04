@@ -906,6 +906,103 @@ fn extract_inline_image_past_the_end_exits_1_naming_the_count() {
 }
 
 #[test]
+fn a_content_syntax_error_exits_3_and_says_the_rest_was_not_read() {
+    let (pdf, _) = pdf_with_image(None, b"BT (seen) Tj ET ) >> ] garbage BT (hidden) Tj ET");
+    let text = run_args(&pdf, &["--text"]);
+    assert_eq!(text.status.code(), Some(3), "{text:?}");
+    assert!(String::from_utf8_lossy(&text.stdout).contains("seen"));
+    assert!(String::from_utf8_lossy(&text.stderr).contains("not read"));
+
+    let json = run_args(&pdf, &["--text", "--json"]);
+    let v: serde_json::Value = serde_json::from_slice(&json.stdout).unwrap();
+    assert_eq!(json.status.code(), Some(3));
+    assert_eq!(v["reliability"]["verdict"], "degraded");
+
+    assert_eq!(
+        run_args(&pdf, &["--text", "--layout"]).status.code(),
+        Some(3)
+    );
+    let find = run_args(&pdf, &["--find-text", "hidden"]);
+    assert_eq!(find.status.code(), Some(3), "no match there is not absence");
+    assert!(String::from_utf8_lossy(&run_args(&pdf, &["--operators"]).stderr).contains("not read"));
+}
+
+#[test]
+fn an_inline_image_with_no_colour_space_does_not_crash_text_and_what_follows_survives() {
+    let (pdf, _) = pdf_with_image(None, b"BI /W 1 /H 1 /BPC 8 ID a\nEI BT (after) Tj ET");
+    for mode in [
+        &["--text"][..],
+        &["--text", "--layout"],
+        &["--operators"],
+        &["--validate"],
+    ] {
+        let output = run_args(&pdf, mode);
+        assert_ne!(output.status.code(), Some(101), "{mode:?}: {output:?}");
+    }
+    assert!(String::from_utf8_lossy(&run_args(&pdf, &["--text"]).stdout).contains("after"));
+}
+
+#[test]
+fn contents_in_an_indirect_array_are_read_as_text() {
+    let mut doc = Document::with_version("1.7");
+    let stream = doc.add_object(Object::Stream(Stream::new(
+        Dictionary::new(),
+        b"BT (from the array) Tj ET".to_vec(),
+    )));
+    let array = doc.add_object(Object::Array(vec![Object::Reference(stream)]));
+    let page = doc.add_object(Dictionary::from_iter(vec![
+        ("Type", Object::Name(b"Page".to_vec())),
+        ("Contents", Object::Reference(array)),
+    ]));
+    let pages = doc.add_object(Dictionary::from_iter(vec![
+        ("Type", Object::Name(b"Pages".to_vec())),
+        ("Count", Object::Integer(1)),
+        ("Kids", Object::Array(vec![Object::Reference(page)])),
+    ]));
+    if let Ok(Object::Dictionary(d)) = doc.get_object_mut(page) {
+        d.set("Parent", Object::Reference(pages));
+    }
+    let root = doc.add_object(Dictionary::from_iter(vec![
+        ("Type", Object::Name(b"Catalog".to_vec())),
+        ("Pages", Object::Reference(pages)),
+    ]));
+    doc.trailer.set("Root", Object::Reference(root));
+    let tmp = tempfile::NamedTempFile::new().unwrap();
+    doc.save(tmp.path()).unwrap();
+    let text = run_args(&tmp, &["--text"]);
+    assert_eq!(text.status.code(), Some(0), "{text:?}");
+    assert!(String::from_utf8_lossy(&text.stdout).contains("from the array"));
+}
+
+#[test]
+fn a_content_stream_that_will_not_decode_exits_3() {
+    let mut doc = Document::with_version("1.7");
+    let mut dict = Dictionary::new();
+    dict.set("Filter", Object::Name(b"FlateDecode".to_vec()));
+    let stream = doc.add_object(Object::Stream(Stream::new(dict, b"nope".to_vec())));
+    let page = doc.add_object(Dictionary::from_iter(vec![
+        ("Type", Object::Name(b"Page".to_vec())),
+        ("Contents", Object::Reference(stream)),
+    ]));
+    let pages = doc.add_object(Dictionary::from_iter(vec![
+        ("Type", Object::Name(b"Pages".to_vec())),
+        ("Count", Object::Integer(1)),
+        ("Kids", Object::Array(vec![Object::Reference(page)])),
+    ]));
+    if let Ok(Object::Dictionary(d)) = doc.get_object_mut(page) {
+        d.set("Parent", Object::Reference(pages));
+    }
+    let root = doc.add_object(Dictionary::from_iter(vec![
+        ("Type", Object::Name(b"Catalog".to_vec())),
+        ("Pages", Object::Reference(pages)),
+    ]));
+    doc.trailer.set("Root", Object::Reference(root));
+    let tmp = tempfile::NamedTempFile::new().unwrap();
+    doc.save(tmp.path()).unwrap();
+    assert_eq!(run_args(&tmp, &["--text"]).status.code(), Some(3));
+}
+
+#[test]
 fn an_inline_image_with_no_colour_space_is_listed() {
     let (pdf, _) = pdf_with_image(None, b"BI /W 1 /H 1 /BPC 8 ID a\nEI BT (x) Tj ET");
     let images = run_args(&pdf, &["--images", "--json"]);

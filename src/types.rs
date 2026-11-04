@@ -176,8 +176,8 @@ Exit codes:
   3   Findings: the tool ran correctly but the input had problems
       (--validate found errors; the text that --text printed or --find-text
        searched was degraded or unreliable, e.g. a CID/Type0 font without a
-       ToUnicode map or >20% of codes undecodable, and the output is still
-       printed; a --forms value, rich value or XFA data, or an --annotations
+       ToUnicode map, >20% of codes undecodable, or a content stream not read
+       to its end, and the output is still printed; a --forms value, rich value or XFA data, or an --annotations
        comment or rich comment, could not be read, or an annotation's appearance
        text is not reliable; --images could not walk a content stream for inline
        images; --strict detected a malformed stream /Length; or the PDF is

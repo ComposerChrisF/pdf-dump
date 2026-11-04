@@ -7,6 +7,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.31.2] - 2026-11-04
+### Fixed
+- **A syntax error in a content stream no longer ends text extraction silently.**
+  lopdf stops at the first token it cannot parse and reports success, so everything
+  after it was lost with verdict `reliable` and exit 0.  `--text`, `--text --layout`
+  and `--find-text` now warn, and exit 3 with a `degraded` verdict, and so do a content
+  stream or form that will not decode.  `--operators` and `--object` warn, `--validate`
+  reports it, and an annotation's appearance reads `unreliable`.  (bug-0039)
+- **An inline image with neither `/CS` nor `/IM` no longer crashes** `--text`,
+  `--operators`, `--validate` or `--object` with a panic in lopdf.  The text after it
+  now survives.
+
+## [0.31.1] - 2026-11-04
+### Fixed
+- CI's clippy job, on a lint newer than the toolchain v0.30.0 was built with, and CI's
+  minimum-Rust job, which now names 1.92.
+
 ## [0.31.0] - 2026-11-04
 ### Added
 - **`--extract-image N --output f`** writes an image XObject as a file a viewer or OCR

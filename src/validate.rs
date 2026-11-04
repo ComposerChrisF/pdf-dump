@@ -1,4 +1,5 @@
-use lopdf::{Document, Object, ObjectId, content::Content};
+use crate::inline_image::decode_content;
+use lopdf::{Document, Object, ObjectId};
 use serde_json::{Value, json};
 use std::collections::{BTreeMap, BTreeSet};
 use std::io::Write;
@@ -360,7 +361,7 @@ fn check_content_stream_syntax(
         for content_id in content_ids {
             if let Ok(Object::Stream(stream)) = doc.get_object(content_id) {
                 let (decoded, _) = decode_stream(stream);
-                if Content::decode(&decoded).is_err() {
+                if decode_content(&decoded).map_or(true, |content| content.stopped_early) {
                     issues.push(ValidationIssue {
                         level: ValidationLevel::Warn,
                         message: format!(

@@ -316,6 +316,8 @@ pub(crate) fn page_content_ids(doc: &Document, page: &lopdf::Dictionary) -> Opti
 pub(crate) struct ContentStreamData {
     pub bytes: Vec<u8>,
     pub warnings: Vec<String>,
+    /// A stream would not decode or was not a stream.  One that is simply absent reads as null.
+    pub unread: bool,
 }
 
 /// Read and decode all content streams for a page, returning accumulated bytes and warnings.
@@ -330,14 +332,14 @@ pub(crate) fn read_content_streams(doc: &Document, page_id: ObjectId) -> Option<
 
     let mut bytes = Vec::new();
     let mut warnings = Vec::new();
-    let mut decode_failed = false;
+    let mut unread = false;
     for cid in &content_ids {
         match doc.get_object(*cid) {
             Ok(Object::Stream(stream)) => {
                 let (decoded, warning) = decode_stream(stream);
                 if let Some(warn) = warning {
                     warnings.push(format!("Content stream {} {}: {}", cid.0, cid.1, warn));
-                    decode_failed = true;
+                    unread = true;
                 }
                 // PDF 32000-1 §7.8.2: segments divide only at token boundaries, so each
                 // one ends a token.  Without a separator, `…ET` + `BT…` fuses into `ETBT`.
@@ -351,7 +353,7 @@ pub(crate) fn read_content_streams(doc: &Document, page_id: ObjectId) -> Option<
                     "Content stream {} {} is not a stream object",
                     cid.0, cid.1
                 ));
-                decode_failed = true;
+                unread = true;
             }
             Err(_) => {
                 warnings.push(format!("Content stream {} {} not found", cid.0, cid.1));
@@ -359,11 +361,15 @@ pub(crate) fn read_content_streams(doc: &Document, page_id: ObjectId) -> Option<
         }
     }
 
-    if bytes.is_empty() && !content_ids.is_empty() && decode_failed {
+    if bytes.is_empty() && !content_ids.is_empty() && unread {
         warnings.push("Content stream could not be decoded".to_string());
     }
 
-    Some(ContentStreamData { bytes, warnings })
+    Some(ContentStreamData {
+        bytes,
+        warnings,
+        unread,
+    })
 }
 
 /// Check a font dictionary's FontDescriptor for FontFile/FontFile2/FontFile3.

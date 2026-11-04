@@ -11,6 +11,7 @@
 //! glyphs are inline images, and listing them says nothing about pictures), and forms and patterns
 //! that nothing on a page invokes, which are not drawn.
 
+use lopdf::content::{Content, Operation};
 use lopdf::{Dictionary, Document, Object, ObjectId, StringFormat};
 use std::collections::HashSet;
 
@@ -675,6 +676,12 @@ fn read_inline_image<'b>(
     tokens: &mut Tokens<'b>,
     resources: Option<&Dictionary>,
 ) -> Result<ReadInline<'b>, InlineError> {
+    let dict = read_inline_dict(tokens)?;
+    read_inline_data(doc, tokens, dict, resources)
+}
+
+/// With `tokens` just past `BI`: reads the dictionary, leaving `tokens` just past `ID`.
+fn read_inline_dict(tokens: &mut Tokens) -> Result<Dictionary, InlineError> {
     let mut dict = Dictionary::new();
     loop {
         tokens.skip_space();
@@ -685,7 +692,7 @@ fn read_inline_image<'b>(
             }
             Some(_) if tokens.bytes[tokens.pos..].starts_with(b"ID") => {
                 tokens.pos += 2;
-                break;
+                return Ok(dict);
             }
             Some(_) => {
                 return Err(InlineError::Malformed(
@@ -699,6 +706,15 @@ fn read_inline_image<'b>(
             }
         }
     }
+}
+
+/// With `tokens` just past `ID`: reads the data to `EI`, and leaves `tokens` past that.
+fn read_inline_data<'b>(
+    doc: &Document,
+    tokens: &mut Tokens<'b>,
+    dict: Dictionary,
+    resources: Option<&Dictionary>,
+) -> Result<ReadInline<'b>, InlineError> {
     let bytes = tokens.bytes;
     let after_id = tokens.pos;
     // One white-space byte separates ID from the data (§ 8.9.7), and writers on CR LF systems use
@@ -894,6 +910,72 @@ fn reads_as_content(bytes: &[u8]) -> bool {
     true
 }
 
+/// A content stream's operations, and whether lopdf got to the end of them.
+pub(crate) struct DecodedContent {
+    pub operations: Vec<Operation>,
+    pub stopped_early: bool,
+}
+
+/// `Content::decode`, made safe to call on a stranger's bytes.  It has two faults this works around
+/// (`tests/lopdf_canary.rs` pins both):
+///
+/// - It stops at the first token it cannot parse and returns what it had as `Ok`, so everything after
+///   a syntax error is gone with no sign.  So the operators are counted here too, and fewer from
+///   lopdf means it stopped early.
+/// - It panics on an inline image with neither `/CS` nor `/IM`.  So such an image is blanked out
+///   first; it draws nothing lopdf could report anyway, and what follows it survives.
+pub(crate) fn decode_content(bytes: &[u8]) -> Result<DecodedContent, lopdf::Error> {
+    let doc = Document::new();
+    let mut tokens = Tokens { bytes, pos: 0 };
+    let mut operators = 0usize;
+    let mut blanked = Vec::new();
+    while let Some(token) = tokens.next_token() {
+        let Token::Operator(op) = token else {
+            continue;
+        };
+        if op != b"BI" {
+            operators += 1;
+            continue;
+        }
+        let start = tokens.pos - 2;
+        let Ok(dict) = read_inline_dict(&mut tokens) else {
+            operators += 1;
+            continue;
+        };
+        let panics_lopdf = !dict.has(b"CS")
+            && !dict.has(b"ColorSpace")
+            && !matches!(
+                dict.get(b"IM").or_else(|_| dict.get(b"ImageMask")),
+                Ok(Object::Boolean(true))
+            );
+        match read_inline_data(&doc, &mut tokens, dict, None) {
+            Ok(_) if panics_lopdf => blanked.push(start..tokens.pos),
+            Ok(_) => operators += 1,
+            Err(_) => {
+                if panics_lopdf {
+                    blanked.push(start..bytes.len());
+                } else {
+                    operators += 1;
+                }
+                break;
+            }
+        }
+    }
+    let content = if blanked.is_empty() {
+        Content::decode(bytes)?
+    } else {
+        let mut cleaned = bytes.to_vec();
+        for range in blanked {
+            cleaned[range].fill(b' ');
+        }
+        Content::decode(&cleaned)?
+    };
+    Ok(DecodedContent {
+        stopped_early: content.operations.len() < operators,
+        operations: content.operations,
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -957,6 +1039,55 @@ mod tests {
         let mut scan = InlineScan::default();
         scan_page(doc, 1, (52, 0), Some(1), &mut scan);
         scan
+    }
+
+    #[test]
+    fn decode_content_reports_a_stream_lopdf_did_not_finish() {
+        let read = decode_content(b"BT (seen) Tj ET ) >> ] garbage BT (hidden) Tj ET").unwrap();
+        assert!(read.stopped_early);
+        assert_eq!(read.operations.len(), 3);
+        let whole =
+            decode_content(b"q 1 0 0 1 0 0 cm /F1 12 Tf BT (a) Tj [(b) -5] TJ T* ET Q").unwrap();
+        assert!(!whole.stopped_early);
+    }
+
+    #[test]
+    fn decode_content_counts_every_form_an_operator_takes() {
+        // Nothing here stops lopdf, so none of it may read as stopping early.
+        for content in [
+            &b"BT (it's) ' (a) \" 0 0 Td T* ET f* B* b*"[..],
+            b"/Span <</ActualText (x) /Lang (en) /Y true>> BDC EMC",
+            b"[/Pattern] cs /P1 scn <0A0B> Tj % a comment\nq Q",
+            b"BI /W 1 /H 1 /BPC 8 /CS /G ID a\nEI BT (x) Tj ET",
+            b"BI /W 1 /H 1 /IM true ID \x80\nEI q Q",
+        ] {
+            let read = decode_content(content).unwrap();
+            assert!(
+                !read.stopped_early,
+                "{:?}",
+                String::from_utf8_lossy(content)
+            );
+        }
+    }
+
+    #[test]
+    fn an_image_lopdf_would_panic_on_is_blanked_and_what_follows_survives() {
+        let read = decode_content(b"BI /W 1 /H 1 /BPC 8 ID a\nEI BT (x) Tj ET").unwrap();
+        assert!(!read.stopped_early);
+        let ops: Vec<&str> = read
+            .operations
+            .iter()
+            .map(|o| o.operator.as_str())
+            .collect();
+        assert_eq!(ops, vec!["BT", "Tj", "ET"]);
+        // With no end, it blanks to the end of the stream, keeping what came before.
+        let read = decode_content(b"q BI /W 1 /H 1 /BPC 8 ID \xFF\xFE never ends").unwrap();
+        let ops: Vec<&str> = read
+            .operations
+            .iter()
+            .map(|o| o.operator.as_str())
+            .collect();
+        assert_eq!(ops, vec!["q"]);
     }
 
     #[test]

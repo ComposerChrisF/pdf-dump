@@ -1,4 +1,5 @@
-use lopdf::{Document, Object, ObjectId, content::Content};
+use crate::inline_image::decode_content;
+use lopdf::{Document, Object, ObjectId};
 use serde_json::{Value, json};
 use std::collections::BTreeSet;
 use std::io::Write;
@@ -49,8 +50,16 @@ pub(crate) fn print_content_data(
     }
 
     if is_contents {
-        match Content::decode(content) {
+        match decode_content(content) {
             Ok(content) => {
+                if content.stopped_early {
+                    wln!(
+                        writer,
+                        "\n{}[WARNING: {}]",
+                        indent_str,
+                        crate::text::CONTENT_STOPPED_EARLY
+                    );
+                }
                 wln!(
                     writer,
                     "\n{}Parsed Content Stream ({} operations):",

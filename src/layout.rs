@@ -39,7 +39,7 @@
 //! font) makes its font Degraded, which exits 3.  Positions are never invented
 //! under a Reliable verdict.
 
-use lopdf::content::Content;
+use crate::inline_image::decode_content;
 use lopdf::{Document, Object, ObjectId};
 use serde_json::{Value, json};
 use std::collections::{BTreeSet, HashMap, HashSet};
@@ -413,6 +413,11 @@ pub(crate) fn layout_page(
     match helpers::read_content_streams(doc, page_id) {
         Some(data) => {
             state.warnings.extend(data.warnings);
+            if data.unread {
+                state.fonts.push(text::content_unread_record(
+                    "A content stream could not be read",
+                ));
+            }
             let mut visited = HashSet::new();
             process_content(
                 doc,
@@ -468,12 +473,20 @@ fn process_content(
     if bytes.is_empty() {
         return;
     }
-    let operations = match Content::decode(bytes) {
-        Ok(content) => content.operations,
+    let operations = match decode_content(bytes) {
+        Ok(content) => {
+            if content.stopped_early {
+                state.warnings.push(text::CONTENT_STOPPED_EARLY.to_string());
+                state
+                    .fonts
+                    .push(text::content_unread_record(text::CONTENT_STOPPED_EARLY));
+            }
+            content.operations
+        }
         Err(_) => {
-            state
-                .warnings
-                .push("Content stream has syntax errors".to_string());
+            let reason = "Content stream has syntax errors";
+            state.warnings.push(reason.to_string());
+            state.fonts.push(text::content_unread_record(reason));
             return;
         }
     };
@@ -768,9 +781,9 @@ fn process_form(
     {
         let (decoded, warn) = crate::stream::decode_stream(stream);
         if let Some(w) = warn {
-            state
-                .warnings
-                .push(format!("Form XObject {} {}: {}", xobj_id.0, xobj_id.1, w));
+            let reason = format!("Form XObject {} {}: {}", xobj_id.0, xobj_id.1, w);
+            state.fonts.push(text::content_unread_record(&reason));
+            state.warnings.push(reason);
         }
         let form_resources = stream
             .dict

@@ -1,4 +1,6 @@
-use lopdf::{Document, ObjectId, content::Content};
+use lopdf::{Document, ObjectId};
+
+use crate::inline_image::decode_content;
 use serde_json::{Value, json};
 use std::io::Write;
 
@@ -23,11 +25,16 @@ pub(crate) fn get_page_operations_with_warnings(doc: &Document, page_id: ObjectI
 
     let mut warnings = stream_data.warnings;
 
-    match Content::decode(&stream_data.bytes) {
-        Ok(content) => OpsResult {
-            operations: content.operations,
-            warnings,
-        },
+    match decode_content(&stream_data.bytes) {
+        Ok(content) => {
+            if content.stopped_early {
+                warnings.push(crate::text::CONTENT_STOPPED_EARLY.to_string());
+            }
+            OpsResult {
+                operations: content.operations,
+                warnings,
+            }
+        }
         Err(_) => {
             warnings.push("Content stream has syntax errors".to_string());
             OpsResult {
