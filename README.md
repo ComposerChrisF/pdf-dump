@@ -106,7 +106,7 @@ pdf-dump reads PDFs encrypted with the empty password automatically.  For a PDF 
 | `--object N` | Print object(s) by number (`5`, `1,5,12`, `3-7`) |
 | `--inspect N` | Full explanation of an object’s role and relationships |
 | `--search <expr>` | Find objects matching criteria (`Type=Font`, `key=MediaBox`, `stream=text`) |
-| `--extract-stream N --output file` | Extract a decoded stream to a file |
+| `--extract-stream N --output file` | Extract a decoded stream to a file.  The file’s directory must already exist (exit 1 otherwise, before the document is read); an existing file is replaced |
 
 ### Modifiers
 

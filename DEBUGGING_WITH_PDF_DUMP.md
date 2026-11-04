@@ -34,7 +34,7 @@ Use `pdf-dump` instead of writing Python/shell scripts to inspect PDF internals.
 | Find objects, compact output | `pdf-dump f.pdf --search Type=Font --list` |
 | Search decoded stream content | `pdf-dump f.pdf --search "stream=text"` |
 | Regex search | `pdf-dump f.pdf --search "regex=D:20(23\|24)"` |
-| Extract stream to file | `pdf-dump f.pdf --extract-stream 12 --output out.bin` |
+| Extract stream to file | `pdf-dump f.pdf --extract-stream 12 --output out.bin` (the directory must exist; an existing file is replaced) |
 | GraphViz DOT graph | `pdf-dump f.pdf --tree --dot` |
 | Any of the above as JSON | Add `--json` to any command |
 | Combine document-level modes | `pdf-dump f.pdf --fonts --images --validate` |

@@ -226,7 +226,8 @@ pub(crate) struct Args {
     )]
     pub extract_stream: Option<u32>,
 
-    /// Output file for extracted stream
+    /// Output file for extracted stream.  Its directory must already exist (exit 1
+    /// otherwise, before the document is read); an existing file is replaced
     #[arg(long, requires = "extract_stream", help_heading = "Export")]
     pub output: Option<PathBuf>,
 
@@ -540,7 +541,42 @@ pub(crate) fn parse_object_spec(s: &str) -> Result<ObjectSpec, String> {
 mod tests {
     use super::*;
 
+    use clap::CommandFactory;
     use pretty_assertions::assert_eq;
+
+    /// The line of `text` that defines exit code `code`, in either tool's layout.
+    fn exit_line(text: &str, code: u8) -> Option<String> {
+        let prefix = code.to_string();
+        text.lines()
+            .map(str::trim_start)
+            .find(|l| {
+                l.strip_prefix(prefix.as_str())
+                    .is_some_and(|rest| rest.starts_with("  "))
+            })
+            .map(str::to_lowercase)
+    }
+
+    #[test]
+    fn exit_table_agrees_with_cli_contract() {
+        use cli_contract::exit::HELP_BLOCK;
+        use cli_contract::{FINDINGS, OK, TOOL_ERROR, USAGE};
+        let help = Args::command().render_long_help().to_string();
+        let tail = help.split("Exit codes:").nth(1).expect("an exit table");
+        // Each code pdf-dump can exit with opens its line with the contract's own word for it.
+        for (code, word) in [
+            (OK, "success"),
+            (TOOL_ERROR, "tool error"),
+            (USAGE, "usage error"),
+            (FINDINGS, "findings"),
+        ] {
+            let contract = exit_line(HELP_BLOCK, code).expect("a contract line");
+            assert!(contract.contains(word), "contract {code}: {contract}");
+            let ours = exit_line(tail, code).expect("a line in pdf-dump's table");
+            assert!(ours.contains(word), "pdf-dump {code}: {ours}");
+        }
+        // pdf-dump needs no setup state, so it never exits 4 and must not claim to.
+        assert_eq!(exit_line(tail, cli_contract::SETUP), None);
+    }
 
     #[test]
     fn page_spec_parse_single() {

@@ -497,6 +497,106 @@ fn object_flag_nonexistent_object_fails() {
     );
 }
 
+/// A PDF whose `--list` output is far larger than a pipe's buffer, so a writer whose reader has
+/// gone must meet the closed pipe instead of finishing inside the buffer.
+fn create_pdf_with_many_objects() -> tempfile::NamedTempFile {
+    let mut doc = Document::with_version("1.5");
+    for i in 0..20_000 {
+        doc.add_object(Object::Integer(i));
+    }
+    let catalog = doc.add_object(Dictionary::from_iter(vec![("Type", "Catalog".into())]));
+    doc.trailer.set("Root", Object::Reference(catalog));
+    let tmp = tempfile::NamedTempFile::new().unwrap();
+    doc.save(tmp.path()).unwrap();
+    tmp
+}
+
+#[test]
+fn closed_pipe_exits_0_with_empty_stderr() {
+    let pdf = create_pdf_with_many_objects();
+    let mut child = Command::new(binary_path())
+        .arg(pdf.path())
+        .arg("--list")
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .unwrap();
+    // Like `head -1`: read one line, then close the pipe.
+    let mut reader = std::io::BufReader::new(child.stdout.take().unwrap());
+    let mut first = String::new();
+    std::io::BufRead::read_line(&mut reader, &mut first).unwrap();
+    assert!(!first.is_empty());
+    drop(reader);
+
+    let output = child.wait_with_output().unwrap();
+    assert_eq!(output.status.code(), Some(0), "status: {:?}", output.status);
+    assert_eq!(String::from_utf8_lossy(&output.stderr), "");
+}
+
+#[test]
+fn extract_stream_missing_output_dir_is_refused_before_the_document_is_read() {
+    let dir = tempfile::tempdir().unwrap();
+    let out = dir.path().join("absent/out.bin");
+    // A corrupt input: if the document were read first, the error would name the load.
+    let bad = dir.path().join("corrupt.pdf");
+    fs::write(&bad, b"not a pdf").unwrap();
+
+    let output = Command::new(binary_path())
+        .arg(&bad)
+        .args(["--extract-stream", "1", "--output"])
+        .arg(&out)
+        .output()
+        .unwrap();
+
+    assert_eq!(output.status.code(), Some(1));
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(stderr.contains("absent"), "stderr: {stderr}");
+    assert!(!stderr.contains("Failed to load"), "stderr: {stderr}");
+    assert!(
+        !dir.path().join("absent").exists(),
+        "must create no directory"
+    );
+}
+
+#[test]
+fn extract_stream_overwrites_an_existing_output_file() {
+    let (pdf, stream_id) = create_pdf_with_flatedecode_stream();
+    let dir = tempfile::tempdir().unwrap();
+    let out = dir.path().join("out.bin");
+    fs::write(
+        &out,
+        b"old content that is longer than what replaces it, by far",
+    )
+    .unwrap();
+
+    let output = Command::new(binary_path())
+        .arg(pdf.path())
+        .args(["--extract-stream", &stream_id.to_string(), "--output"])
+        .arg(&out)
+        .output()
+        .unwrap();
+
+    assert_eq!(output.status.code(), Some(0));
+    assert!(!fs::read(&out).unwrap().starts_with(b"old content"));
+}
+
+#[test]
+fn extract_stream_directory_as_output_is_refused_naming_it() {
+    let (pdf, stream_id) = create_pdf_with_flatedecode_stream();
+    let dir = tempfile::tempdir().unwrap();
+
+    let output = Command::new(binary_path())
+        .arg(pdf.path())
+        .args(["--extract-stream", &stream_id.to_string(), "--output"])
+        .arg(dir.path())
+        .output()
+        .unwrap();
+
+    assert_eq!(output.status.code(), Some(1));
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(stderr.contains("expected a file path"), "stderr: {stderr}");
+}
+
 fn run_args(pdf: &tempfile::NamedTempFile, args: &[&str]) -> std::process::Output {
     Command::new(binary_path())
         .arg(pdf.path())

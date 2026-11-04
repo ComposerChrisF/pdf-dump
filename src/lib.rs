@@ -1,18 +1,25 @@
+/// Ends the process after a failed write to stdout: a closed pipe (`pdf-dump … | head -1`) is a
+/// clean exit, since the reader has what it wanted; any other write error is a tool error.
+#[doc(hidden)]
+pub fn exit_on_write_error(e: std::io::Error) -> ! {
+    if cli_contract::is_broken_pipe(&e) {
+        std::process::exit(cli_contract::OK.into());
+    }
+    eprintln!("Write error: {}", e);
+    std::process::exit(TOOL_ERROR.into());
+}
+
 /// writeln! that exits cleanly on BrokenPipe instead of panicking.
 #[macro_export]
 macro_rules! wln {
     ($dst:expr $(,)?) => {
         if let Err(e) = writeln!($dst) {
-            if e.kind() == ::std::io::ErrorKind::BrokenPipe { ::std::process::exit(0); }
-            eprintln!("Write error: {}", e);
-            ::std::process::exit(1);
+            $crate::exit_on_write_error(e);
         }
     };
     ($dst:expr, $($arg:tt)*) => {
         if let Err(e) = writeln!($dst, $($arg)*) {
-            if e.kind() == ::std::io::ErrorKind::BrokenPipe { ::std::process::exit(0); }
-            eprintln!("Write error: {}", e);
-            ::std::process::exit(1);
+            $crate::exit_on_write_error(e);
         }
     };
 }
@@ -22,9 +29,7 @@ macro_rules! wln {
 macro_rules! w {
     ($dst:expr, $($arg:tt)*) => {
         if let Err(e) = write!($dst, $($arg)*) {
-            if e.kind() == ::std::io::ErrorKind::BrokenPipe { ::std::process::exit(0); }
-            eprintln!("Write error: {}", e);
-            ::std::process::exit(1);
+            $crate::exit_on_write_error(e);
         }
     };
 }
@@ -62,6 +67,7 @@ pub(crate) mod types;
 pub(crate) mod validate;
 
 use clap::Parser;
+use cli_contract::{Clobber, CreateMode, FINDINGS, TOOL_ERROR, USAGE};
 use lopdf::{Document, Object};
 use serde_json::{Value, json};
 use std::io::{self, Write};
@@ -74,7 +80,7 @@ pub fn run() {
 
     let resolved = args.resolve_mode().unwrap_or_else(|e| {
         eprintln!("Error: {}", e);
-        std::process::exit(2);
+        std::process::exit(USAGE.into());
     });
 
     // Modifier validation. A bad flag combination is a usage error (exit 2), the
@@ -85,12 +91,20 @@ pub fn run() {
             ResolvedMode::Standalone(StandaloneMode::Object { .. })
         ) {
             eprintln!("Error: --raw requires --object.");
-            std::process::exit(2);
+            std::process::exit(USAGE.into());
         }
         if args.decode {
             eprintln!("Error: --raw and --decode cannot be used together.");
-            std::process::exit(2);
+            std::process::exit(USAGE.into());
         }
+    }
+
+    // Refuse an output path that cannot work before spending time on the document.
+    if let ResolvedMode::Standalone(StandaloneMode::ExtractStream { output, .. }) = &resolved
+        && let Err(e) = cli_contract::check_output_file(output, CreateMode::None, Clobber::Allow)
+    {
+        eprintln!("Error: {}", e);
+        std::process::exit(e.exit_code().into());
     }
 
     // `Document::load` auto-decrypts only with the empty password. When the user
@@ -109,7 +123,7 @@ pub fn run() {
             } else {
                 eprintln!("Reason: {}", e);
             }
-            std::process::exit(1);
+            std::process::exit(TOOL_ERROR.into());
         }
     };
 
@@ -178,7 +192,7 @@ pub fn run() {
     let page_spec = args.page.as_deref().map(|s| {
         PageSpec::parse(s).unwrap_or_else(|e| {
             eprintln!("Error: {}", e);
-            std::process::exit(2);
+            std::process::exit(USAGE.into());
         })
     });
 
@@ -193,7 +207,7 @@ pub fn run() {
         && let Err(msg) = helpers::build_page_list(&doc, Some(spec))
     {
         eprintln!("Error: {}", msg);
-        std::process::exit(1);
+        std::process::exit(TOOL_ERROR.into());
     }
 
     let mut out = io::stdout().lock();
@@ -208,7 +222,7 @@ pub fn run() {
                 // A named object the document lacks is a caller-claim/world
                 // mismatch (exit 1), like --page past the end (bug-0019).
                 let _ = out.flush();
-                std::process::exit(1);
+                std::process::exit(TOOL_ERROR.into());
             }
             false
         }
@@ -224,7 +238,7 @@ pub fn run() {
     };
 
     if had_issues || strict_malformed || encrypted_undecrypted {
-        std::process::exit(3);
+        std::process::exit(FINDINGS.into());
     }
 }
 
@@ -299,9 +313,17 @@ fn dispatch_standalone(
                     if let Some(warn) = &warning {
                         eprintln!("Warning: {}", warn);
                     }
+                    // An existing file is replaced: it is named explicitly on the command
+                    // line, and a stream can always be extracted again.
+                    if let Err(e) =
+                        cli_contract::prepare_output_file(output, CreateMode::None, Clobber::Allow)
+                    {
+                        eprintln!("Error: {}", e);
+                        std::process::exit(e.exit_code().into());
+                    }
                     if let Err(e) = std::fs::write(output, &*decoded_content) {
                         eprintln!("Error writing to output file: {}", e);
-                        std::process::exit(1);
+                        std::process::exit(TOOL_ERROR.into());
                     }
                     wln!(
                         out,
@@ -316,11 +338,11 @@ fn dispatch_standalone(
                         "Error: Object {} is not a stream and cannot be extracted to a file.",
                         obj_num
                     );
-                    std::process::exit(1);
+                    std::process::exit(TOOL_ERROR.into());
                 }
                 Err(_) => {
                     eprintln!("Error: Object {} not found in the document.", obj_num);
-                    std::process::exit(1);
+                    std::process::exit(TOOL_ERROR.into());
                 }
             }
         }
@@ -364,7 +386,7 @@ fn dispatch_standalone(
                 Err(e) => {
                     // A malformed --search expression is a usage error (exit 2).
                     eprintln!("Error: Invalid search expression: {}", e);
-                    std::process::exit(2);
+                    std::process::exit(USAGE.into());
                 }
             };
             if config.json {

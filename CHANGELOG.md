@@ -7,6 +7,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.29.1] - 2026-11-03
+### Changed
+- **`--extract-stream --output` checks its output path before the document is
+  read.**  A missing directory, a directory in the file's place, or a dangling
+  link exits 1 naming the path, where a missing directory used to fail only after
+  the document was parsed.  No directory is ever created.  An existing file is
+  still replaced, as before.  (plan-0007)
+- **Adopts `cli-contract` 0.6** for the exit codes, the closed-pipe check and the
+  output-file checks.  A closed pipe still exits 0 with nothing on stderr, now
+  pinned by a test, and a test holds `--help`'s exit table to the contract's.
+
 ## [0.29.0] - 2026-10-01
 ### Changed
 - **Behavior change (exit codes): `--find-text` now exits 3, with the stderr
