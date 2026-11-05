@@ -4332,6 +4332,93 @@ fn an_object_at_another_generation_is_reachable() {
     assert!(String::from_utf8_lossy(&extract.stdout).contains("object 7 generation 1"));
 }
 
+/// One page holding one annotation, in a form whose one field holds `field`.
+fn pdf_with_annotation_and_field(annot: Dictionary, field: Dictionary) -> tempfile::NamedTempFile {
+    let mut doc = Document::with_version("1.7");
+    let annot = doc.add_object(annot);
+    let field = doc.add_object(field);
+    let page = doc.add_object(Dictionary::from_iter(vec![
+        ("Type", Object::Name(b"Page".to_vec())),
+        ("Annots", Object::Array(vec![Object::Reference(annot)])),
+    ]));
+    let pages = doc.add_object(Dictionary::from_iter(vec![
+        ("Type", Object::Name(b"Pages".to_vec())),
+        ("Count", Object::Integer(1)),
+        ("Kids", Object::Array(vec![Object::Reference(page)])),
+    ]));
+    if let Ok(Object::Dictionary(d)) = doc.get_object_mut(page) {
+        d.set("Parent", Object::Reference(pages));
+    }
+    let root = doc.add_object(Dictionary::from_iter(vec![
+        ("Type", Object::Name(b"Catalog".to_vec())),
+        ("Pages", Object::Reference(pages)),
+        (
+            "AcroForm",
+            Object::Dictionary(Dictionary::from_iter(vec![(
+                "Fields",
+                Object::Array(vec![Object::Reference(field)]),
+            )])),
+        ),
+    ]));
+    doc.trailer.set("Root", Object::Reference(root));
+    let tmp = tempfile::NamedTempFile::new().unwrap();
+    doc.save(tmp.path()).unwrap();
+    tmp
+}
+
+/// plan-0008: what is read of an annotation and a field reaches the JSON and the exit code.
+#[test]
+fn annotation_and_field_strings_reach_the_json_and_the_exit_code() {
+    let text = |s: &[u8]| Object::String(s.to_vec(), lopdf::StringFormat::Literal);
+    let undecodable = || Object::String(vec![0xFE, 0xFF, 0x00], lopdf::StringFormat::Hexadecimal);
+    let annot = |author, flags| {
+        Dictionary::from_iter(vec![
+            ("Subtype", Object::Name(b"Text".to_vec())),
+            ("T", author),
+            ("F", flags),
+        ])
+    };
+    let field = |tooltip| {
+        Dictionary::from_iter(vec![
+            (
+                "T",
+                Object::String(b"f".to_vec(), lopdf::StringFormat::Literal),
+            ),
+            ("FT", Object::Name(b"Ch".to_vec())),
+            ("TU", tooltip),
+        ])
+    };
+
+    let sound =
+        pdf_with_annotation_and_field(annot(text(b"Me"), Object::Integer(2)), field(text(b"Tip")));
+    let output = run_args(&sound, &["--forms", "--annotations", "--json"]);
+    assert_eq!(output.status.code(), Some(0), "{output:?}");
+    let v: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(v["annotations"]["annotations"][0]["author"], "Me");
+    assert_eq!(v["annotations"]["annotations"][0]["hidden"], true);
+    assert_eq!(v["forms"]["fields"][0]["tooltip"], "Tip");
+
+    let bad_author = pdf_with_annotation_and_field(
+        annot(undecodable(), Object::Integer(0)),
+        field(text(b"Tip")),
+    );
+    assert_eq!(
+        run_args(&bad_author, &["--annotations"]).status.code(),
+        Some(3)
+    );
+
+    let bad_flags =
+        pdf_with_annotation_and_field(annot(text(b"Me"), text(b"2")), field(text(b"Tip")));
+    assert_eq!(
+        run_args(&bad_flags, &["--annotations"]).status.code(),
+        Some(3)
+    );
+
+    let bad_tooltip =
+        pdf_with_annotation_and_field(annot(text(b"Me"), Object::Integer(0)), field(undecodable()));
+    assert_eq!(run_args(&bad_tooltip, &["--forms"]).status.code(), Some(3));
+}
+
 /// bug-0015's reproduction.
 #[test]
 fn an_indirect_filter_is_followed() {

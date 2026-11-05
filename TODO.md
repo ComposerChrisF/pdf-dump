@@ -122,10 +122,7 @@ graduate (a contract violated is a bug; a contract that should grow is a plan):
   only scans marked-content OCGs (misses XObject/annotation `/OC`).  Under-reports `pages`.
 - `structure.rs` inline-`Dictionary` `/K` elements don’t recurse and drop `page`/`title`/`alt`;
   `/RoleMap` is not applied.  Incompleteness.
-- `--forms` reads what `/Fields` reaches and `/V` and `/RV` only, and `--annotations` reads `/AP /N`
-  only: a widget no field lists, `/DV`, `/Opt`, `/TU`, `/MK`, XFA attributes and template, `/D`, `/R`
-  and the Hidden and NoView flags are out of scope, by plan-0006’s wording.  Documented in
-  `DEBUGGING_WITH_PDF_DUMP.md`.  Each would be a plan if a caller needs it.
+- `--forms` reads what `/Fields` reaches, and a widget no field lists, XFA attributes and template are out of scope, by plan-0006’s wording.  What else `--forms` and `--annotations` leave out is `plans/plan-0008-read-more-of-forms-and-annotations.md`’s open list and `DEBUGGING_WITH_PDF_DUMP.md` § What pdf-dump does not read.
 - CI’s `msrv` job does not test the minimum: `rust-toolchain.toml`’s `channel = "stable"` overrides the toolchain the job installs, so it passed at 1.91 with `rust-version = "1.92"`.
 - **Test-suite repairs (do alongside the relevant fix):** `tests/integration.rs` `object_flag_nonexistent_object_fails` asserts only stderr text, not the exit status (bug-0019); revisit
   `parse_object_spec_zero` and `multi_object_missing_reports_error_in_json` (bug-0019); the existing

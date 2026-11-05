@@ -3,11 +3,13 @@ use serde_json::{Value, json};
 use std::collections::{BTreeMap, BTreeSet};
 use std::io::Write;
 
-use crate::helpers::{get_catalog, page_annots, resolve_array, resolve_dict};
+use crate::helpers::{
+    format_dict_value, get_catalog, own_entry, page_annots, resolve_array, resolve_dict,
+};
 use crate::stream::decode_stream;
 use crate::text_string::{
-    decode_text_string, find_elements, read_rich_text, read_text_stream, read_text_value,
-    strip_markup,
+    TextString, decode_text_string, find_elements, printable, read_rich_text, read_text_stream,
+    read_text_value, strip_markup,
 };
 
 pub(crate) struct FormFieldInfo {
@@ -28,10 +30,35 @@ pub(crate) struct FormFieldInfo {
     pub rich_value: Option<String>,
     pub rich_value_inherited: bool,
     pub rich_value_decoded: bool,
+    /// `/TU`, the field's own or its nearest ancestor's.
+    pub tooltip: Option<String>,
+    pub tooltip_decoded: bool,
+    pub tooltip_inherited: bool,
+    /// `/Opt`, the field's own or its nearest ancestor's.
+    pub options: Option<Vec<FieldOption>>,
+    pub options_inherited: bool,
+    /// `/MK /CA` of each of this field's widgets: its own, and its kids' when they are widgets.
+    pub captions: Vec<TextString>,
     /// A field whose kids are fields too, reported for the value it holds itself.
     pub has_field_kids: bool,
     pub page_number: Option<u32>,
     pub flags: u32,
+}
+
+/// One entry of `/Opt`.  A plain string is both the value a form exports and the label it shows.
+pub(crate) struct FieldOption {
+    pub export: String,
+    pub label: String,
+    pub decoded: bool,
+}
+
+impl FormFieldInfo {
+    fn options_decoded(&self) -> bool {
+        self.options.iter().flatten().all(|o| o.decoded)
+    }
+    fn captions_decoded(&self) -> bool {
+        self.captions.iter().all(|c| c.decoded)
+    }
 }
 
 /// `/XFA` from the AcroForm: an XFA form's values live in its datasets, not in `/Fields`.
@@ -129,6 +156,8 @@ struct Inherited<'a> {
     flags: Option<i64>,
     value: Option<&'a Object>,
     rich_value: Option<&'a Object>,
+    tooltip: Option<&'a Object>,
+    options: Option<&'a Object>,
 }
 
 struct FieldWalk<'a> {
@@ -198,6 +227,8 @@ impl<'a> FieldWalk<'a> {
                 .or(from_parent.flags),
             value: own_entry(doc, dict, b"V").or(from_parent.value),
             rich_value: own_entry(doc, dict, b"RV").or(from_parent.rich_value),
+            tooltip: own_entry(doc, dict, b"TU").or(from_parent.tooltip),
+            options: own_entry(doc, dict, b"Opt").or(from_parent.options),
         };
 
         let kids = dict
@@ -225,6 +256,20 @@ impl<'a> FieldWalk<'a> {
                 .value
                 .map_or_else(RenderedValue::empty, |v| render.value(v, 0));
             let rich = inherited.rich_value.and_then(|v| read_rich_text(doc, v));
+            let tooltip = inherited.tooltip.and_then(|v| read_text_value(doc, v));
+            let options = inherited.options.map(|v| read_options(doc, v));
+            // Kids that are fields report their own widgets when the walk reaches them.
+            let mut seen: BTreeSet<ObjectId> = field_id.into_iter().collect();
+            let widgets = kids
+                .iter()
+                .filter(|_| !has_field_kids)
+                .filter_map(|kid| field_dict(doc, kid))
+                .filter(|(id, _)| id.is_none_or(|id| seen.insert(id)))
+                .map(|(_, d)| d);
+            let captions: Vec<TextString> = std::iter::once(dict)
+                .chain(widgets)
+                .filter_map(|widget| read_caption(doc, widget))
+                .collect();
             self.fields.push(FormFieldInfo {
                 object_id: field_id,
                 qualified_name: qualified_name.clone(),
@@ -240,6 +285,14 @@ impl<'a> FieldWalk<'a> {
                 rich_value_decoded: rich.as_ref().is_none_or(|r| r.decoded),
                 rich_value: rich.map(|r| r.text),
                 rich_value_inherited: inherited.rich_value.is_some() && !own_rich_value,
+                tooltip_decoded: tooltip.as_ref().is_none_or(|t| t.decoded),
+                tooltip: tooltip.map(|t| t.text),
+                tooltip_inherited: inherited.tooltip.is_some()
+                    && own_entry(doc, dict, b"TU").is_none(),
+                options,
+                options_inherited: inherited.options.is_some()
+                    && own_entry(doc, dict, b"Opt").is_none(),
+                captions,
                 has_field_kids,
                 page_number: field_id.and_then(|id| self.widget_to_page.get(&id).copied()),
                 flags: inherited.flags.unwrap_or(0) as u32,
@@ -254,18 +307,63 @@ impl<'a> FieldWalk<'a> {
     }
 }
 
-/// An entry the field holds itself.  Null, or a reference to nothing, is the same as no entry
-/// (§ 7.3.9), so inheritance applies.
-fn own_entry<'a>(doc: &Document, dict: &'a Dictionary, key: &[u8]) -> Option<&'a Object> {
-    let value = dict.get(key).ok()?;
-    match value {
-        Object::Null => None,
-        Object::Reference(id) => match doc.get_object(*id) {
-            Ok(Object::Null) | Err(lopdf::Error::ObjectNotFound(_)) => None,
-            _ => Some(value),
-        },
-        _ => Some(value),
+/// `/Opt`, every item in its place, since `/I` and a button's state names count by position.  What
+/// cannot be read comes back flagged, not left out: a null item, or an `/Opt` that is not an array.
+fn read_options(doc: &Document, opt: &Object) -> Vec<FieldOption> {
+    let flagged = |text: String| FieldOption {
+        export: text.clone(),
+        label: text,
+        decoded: false,
+    };
+    let Some(items) = resolve_array(doc, opt) else {
+        return read_text_value(doc, opt)
+            .map(|text| flagged(text.text))
+            .into_iter()
+            .collect();
+    };
+    let read = |o| read_text_value(doc, o).unwrap_or_else(|| TextString::undecoded(&[]));
+    let mut options = Vec::with_capacity(items.len().min(MAX_VALUE_NODES as usize));
+    for item in items.iter().take(MAX_VALUE_NODES as usize) {
+        let target = match item {
+            Object::Reference(id) => doc.get_object(*id).unwrap_or(item),
+            direct => direct,
+        };
+        options.push(match target {
+            Object::Array(pair) if pair.len() == 2 => {
+                let (export, label) = (read(&pair[0]), read(&pair[1]));
+                FieldOption {
+                    decoded: export.decoded && label.decoded,
+                    export: export.text,
+                    label: label.text,
+                }
+            }
+            // Anything else that is not a string comes back flagged.
+            _ => {
+                let text = read(item);
+                FieldOption {
+                    export: text.text.clone(),
+                    label: text.text,
+                    decoded: text.decoded,
+                }
+            }
+        });
     }
+    if items.len() > MAX_VALUE_NODES as usize {
+        options.push(flagged("(too many options to read)".to_string()));
+    }
+    options
+}
+
+/// A widget's `/MK /CA`.  An `/MK` that is not a dictionary is flagged, not read as no caption.
+fn read_caption(doc: &Document, widget: &Dictionary) -> Option<TextString> {
+    let mk = own_entry(doc, widget, b"MK")?;
+    let Some(mk) = resolve_dict(doc, mk) else {
+        return Some(TextString {
+            text: format_dict_value(mk),
+            decoded: false,
+        });
+    };
+    read_text_value(doc, mk.get(b"CA").ok()?)
 }
 
 struct RenderedValue {
@@ -486,11 +584,18 @@ fn truncate_str(s: &str, max_chars: usize) -> &str {
 fn warn_unread(fields: &[FormFieldInfo], xfa: Option<&XfaInfo>) -> bool {
     let unread = fields
         .iter()
-        .filter(|f| !f.value_decoded || !f.rich_value_decoded)
+        .filter(|f| {
+            !f.value_decoded
+                || !f.rich_value_decoded
+                || !f.tooltip_decoded
+                || !f.options_decoded()
+                || !f.captions_decoded()
+        })
         .count();
     if unread > 0 {
         eprintln!(
-            "Warning: {unread} form field value(s) could not be decoded; their bytes are shown as hex."
+            "Warning: {unread} form field(s) hold a value, tooltip, option or caption that could not \
+             be read; it is shown as found, a string that would not decode as hex."
         );
     }
     let xfa_unread = xfa.is_some_and(|x| !x.decoded);
@@ -500,7 +605,7 @@ fn warn_unread(fields: &[FormFieldInfo], xfa: Option<&XfaInfo>) -> bool {
     unread > 0 || xfa_unread
 }
 
-/// Returns `true` when a value could not be decoded (a finding, exit 3).
+/// Returns `true` when a value or other string could not be read (a finding, exit 3).
 pub(crate) fn print_forms(writer: &mut impl Write, doc: &Document) -> bool {
     let (acroform_id, need_appearances, fields) = collect_form_fields(doc);
     let xfa = collect_xfa(doc);
@@ -559,6 +664,46 @@ pub(crate) fn print_forms(writer: &mut impl Write, doc: &Document) -> bool {
         if let Some(rich) = &f.rich_value {
             wln!(writer, "        rich text: {}", rich);
         }
+        if let Some(tooltip) = &f.tooltip {
+            let inherited = if f.tooltip_inherited {
+                " (inherited)"
+            } else {
+                ""
+            };
+            wln!(
+                writer,
+                "        tooltip: {}{}",
+                printable(tooltip),
+                inherited
+            );
+        }
+        if let Some(options) = &f.options {
+            let shown: Vec<String> = options
+                .iter()
+                .map(|o| {
+                    if o.export == o.label {
+                        o.label.clone()
+                    } else {
+                        format!("{} [{}]", o.label, o.export)
+                    }
+                })
+                .collect();
+            let inherited = if f.options_inherited {
+                " (inherited)"
+            } else {
+                ""
+            };
+            wln!(
+                writer,
+                "        options: {}{}",
+                printable(&shown.join(", ")),
+                inherited
+            );
+        }
+        if !f.captions.is_empty() {
+            let shown: Vec<&str> = f.captions.iter().map(|c| c.text.as_str()).collect();
+            wln!(writer, "        captions: {}", printable(&shown.join(", ")));
+        }
     }
     warn_unread(&fields, xfa.as_ref())
 }
@@ -568,7 +713,7 @@ pub(crate) fn forms_json_value(doc: &Document) -> Value {
     forms_json_value_with_status(doc).0
 }
 
-/// Returns the JSON and whether a value could not be decoded (a finding, exit 3).
+/// Returns the JSON and whether a value or other string could not be read (a finding, exit 3).
 pub(crate) fn forms_json_value_with_status(doc: &Document) -> (Value, bool) {
     let (acroform_id, need_appearances, fields) = collect_form_fields(doc);
     let xfa = collect_xfa(doc);
@@ -589,6 +734,22 @@ pub(crate) fn forms_json_value_with_status(doc: &Document) -> (Value, bool) {
                 "rich_value": f.rich_value,
                 "rich_value_inherited": f.rich_value_inherited,
                 "rich_value_decoded": f.rich_value_decoded,
+                "tooltip": f.tooltip,
+                "tooltip_decoded": f.tooltip_decoded,
+                "tooltip_inherited": f.tooltip_inherited,
+                "options": f.options.as_ref().map(|options| {
+                    options
+                        .iter()
+                        .map(|o| json!({"export": o.export, "label": o.label, "decoded": o.decoded}))
+                        .collect::<Vec<Value>>()
+                }),
+                "options_decoded": f.options_decoded(),
+                "options_inherited": f.options_inherited,
+                "captions": f.captions
+                    .iter()
+                    .map(|c| json!({"text": c.text, "decoded": c.decoded}))
+                    .collect::<Vec<Value>>(),
+                "captions_decoded": f.captions_decoded(),
                 "has_field_kids": f.has_field_kids,
                 "flags": f.flags,
                 "page_number": f.page_number,
@@ -653,6 +814,367 @@ mod tests {
             Object::Array(kids.into_iter().map(Object::Reference).collect()),
         );
         d
+    }
+
+    fn undecodable() -> Object {
+        Object::String(vec![0xFE, 0xFF, 0x00], StringFormat::Literal)
+    }
+
+    /// A text field with no kids, holding `entries`.
+    fn field_with(entries: Vec<(&str, Object)>) -> Dictionary {
+        let mut d = named_field("f", vec![]);
+        for (key, value) in entries {
+            d.set(key, value);
+        }
+        d
+    }
+
+    fn mk(caption: Object) -> Object {
+        let mut d = Dictionary::new();
+        d.set("CA", caption);
+        Object::Dictionary(d)
+    }
+
+    fn field_status(entries: Vec<(&str, Object)>) -> (Value, bool) {
+        let doc = form_doc_with_fields(vec![((4, 0), field_with(entries))], vec![(4, 0)]);
+        let (v, had_issues) = forms_json_value_with_status(&doc);
+        (v["fields"][0].clone(), had_issues)
+    }
+
+    #[test]
+    fn tooltip_is_read_with_its_decode_status() {
+        let (f, had_issues) = field_status(vec![("TU", literal(b"Your gate code"))]);
+        assert_eq!(f["tooltip"], "Your gate code");
+        assert_eq!(f["tooltip_decoded"], true);
+        assert!(!had_issues);
+
+        let (f, had_issues) = field_status(vec![("TU", undecodable())]);
+        assert_eq!(f["tooltip_decoded"], false);
+        assert!(had_issues);
+
+        let (f, _) = field_status(vec![]);
+        assert_eq!(f["tooltip"], Value::Null);
+        assert_eq!(f["options"], Value::Null);
+        assert_eq!(f["captions"], serde_json::json!([]));
+    }
+
+    #[test]
+    fn options_give_each_export_value_and_label() {
+        let (f, had_issues) = field_status(vec![(
+            "Opt",
+            Object::Array(vec![
+                literal(b"Plain"),
+                Object::Array(vec![literal(b"v1"), literal(b"Shown label")]),
+            ]),
+        )]);
+        assert_eq!(
+            f["options"],
+            serde_json::json!([
+                {"export": "Plain", "label": "Plain", "decoded": true},
+                {"export": "v1", "label": "Shown label", "decoded": true},
+            ])
+        );
+        assert_eq!(f["options_decoded"], true);
+        assert!(!had_issues);
+    }
+
+    #[test]
+    fn options_held_by_reference_are_followed() {
+        let doc = form_doc_with_fields(
+            vec![((4, 0), field_with(vec![("Opt", Object::Reference((5, 0)))]))],
+            vec![(4, 0)],
+        );
+        let mut doc = doc;
+        doc.objects.insert(
+            (5, 0),
+            Object::Array(vec![Object::Reference((6, 0)), Object::Reference((7, 0))]),
+        );
+        doc.objects.insert(
+            (6, 0),
+            Object::Array(vec![literal(b"v1"), literal(b"Shown label")]),
+        );
+        doc.objects.insert((7, 0), literal(b"Plain"));
+        let (v, had_issues) = forms_json_value_with_status(&doc);
+        assert_eq!(v["fields"][0]["options"][0]["label"], "Shown label");
+        assert_eq!(v["fields"][0]["options"][1]["export"], "Plain");
+        assert!(!had_issues);
+    }
+
+    #[test]
+    fn options_that_cannot_be_read_are_flagged_not_empty() {
+        let unread: Vec<Object> = vec![
+            Object::Integer(3),
+            Object::Array(vec![Object::Integer(3)]),
+            Object::Array(vec![undecodable()]),
+            Object::Array(vec![Object::Array(vec![literal(b"v1"), undecodable()])]),
+            Object::Array(vec![Object::Array(vec![literal(b"only one")])]),
+        ];
+        for opt in unread {
+            let (f, had_issues) = field_status(vec![("Opt", opt.clone())]);
+            assert_eq!(f["options_decoded"], false, "{opt:?}");
+            assert!(had_issues, "{opt:?}");
+        }
+    }
+
+    #[test]
+    fn the_new_entries_are_escaped_and_marked_when_inherited() {
+        let bad = b"a\rb";
+        let mut parent = named_field("p", vec![(5, 0)]);
+        parent.set("TU", literal(bad));
+        parent.set("Opt", Object::Array(vec![literal(bad)]));
+        let mut kid = named_field("k", vec![]);
+        kid.set("MK", mk(literal(bad)));
+        let doc = form_doc_with_fields(vec![((4, 0), parent), ((5, 0), kid)], vec![(4, 0)]);
+        let out = output_of(|w| {
+            print_forms(w, &doc);
+        });
+        assert!(!out.contains('\r'), "{out:?}");
+        assert!(out.contains("(inherited)\n"), "{out:?}");
+        assert_eq!(out.matches("(inherited)").count(), 2, "{out:?}");
+    }
+
+    #[test]
+    fn a_null_option_keeps_its_place_and_is_flagged() {
+        let (f, had_issues) = field_status(vec![(
+            "Opt",
+            Object::Array(vec![
+                literal(b"a"),
+                Object::Null,
+                Object::Reference((99, 0)),
+                literal(b"b"),
+            ]),
+        )]);
+        let options = f["options"].as_array().unwrap();
+        assert_eq!(options.len(), 4);
+        assert_eq!(options[0]["decoded"], true);
+        assert_eq!(options[1]["decoded"], false);
+        assert_eq!(options[2]["decoded"], false);
+        assert_eq!(options[3]["label"], "b");
+        assert_eq!(f["options_decoded"], false);
+        assert!(had_issues);
+    }
+
+    #[test]
+    fn each_option_says_whether_it_decoded() {
+        let (f, _) = field_status(vec![(
+            "Opt",
+            Object::Array(vec![literal(b"<FEFF00>"), undecodable()]),
+        )]);
+        assert_eq!(f["options"][0]["decoded"], true);
+        assert_eq!(f["options"][1]["decoded"], false);
+    }
+
+    #[test]
+    fn an_opt_that_is_not_an_array_keeps_its_text() {
+        let (f, had_issues) = field_status(vec![("Opt", literal(b"a whole sentence"))]);
+        assert_eq!(f["options"][0]["label"], "a whole sentence");
+        assert_eq!(f["options_decoded"], false);
+        assert!(had_issues);
+    }
+
+    #[test]
+    fn options_past_the_limit_are_flagged_not_dropped_quietly() {
+        let many = vec![literal(b"x"); MAX_VALUE_NODES as usize + 1];
+        let (f, had_issues) = field_status(vec![("Opt", Object::Array(many))]);
+        assert_eq!(
+            f["options"].as_array().unwrap().len(),
+            MAX_VALUE_NODES as usize + 1
+        );
+        assert_eq!(
+            f["options"][MAX_VALUE_NODES as usize]["label"],
+            "(too many options to read)"
+        );
+        assert!(had_issues);
+    }
+
+    #[test]
+    fn a_cycle_in_opt_is_flagged() {
+        let mut doc = form_doc_with_fields(
+            vec![(
+                (4, 0),
+                field_with(vec![(
+                    "Opt",
+                    Object::Array(vec![Object::Reference((7, 0))]),
+                )]),
+            )],
+            vec![(4, 0)],
+        );
+        doc.objects.insert((7, 0), Object::Reference((8, 0)));
+        doc.objects.insert((8, 0), Object::Reference((7, 0)));
+        let (v, had_issues) = forms_json_value_with_status(&doc);
+        assert_eq!(v["fields"][0]["options_decoded"], false);
+        assert!(had_issues);
+    }
+
+    #[test]
+    fn a_null_tooltip_or_opt_on_a_kid_still_inherits() {
+        let mut parent = named_field("p", vec![(5, 0)]);
+        parent.set("TU", literal(b"Parent tip"));
+        parent.set("Opt", Object::Array(vec![literal(b"Parent option")]));
+        let mut kid = named_field("k", vec![]);
+        kid.set("TU", Object::Null);
+        kid.set("Opt", Object::Reference((99, 0)));
+        let doc = form_doc_with_fields(vec![((4, 0), parent), ((5, 0), kid)], vec![(4, 0)]);
+        let v = forms_json_value(&doc);
+        assert_eq!(v["fields"][0]["tooltip"], "Parent tip");
+        assert_eq!(v["fields"][0]["tooltip_inherited"], true);
+        assert_eq!(v["fields"][0]["options_inherited"], true);
+    }
+
+    #[test]
+    fn a_fields_own_tooltip_and_options_are_not_inherited() {
+        let (f, _) = field_status(vec![
+            ("TU", literal(b"Own")),
+            ("Opt", Object::Array(vec![literal(b"Own")])),
+        ]);
+        assert_eq!(f["tooltip_inherited"], false);
+        assert_eq!(f["options_inherited"], false);
+    }
+
+    #[test]
+    fn tooltip_and_options_come_from_an_ancestor_when_a_kid_has_none() {
+        let parent = {
+            let mut d = named_field("p", vec![(5, 0)]);
+            d.set("TU", literal(b"Parent tip"));
+            d.set("Opt", Object::Array(vec![literal(b"Parent option")]));
+            d
+        };
+        let doc = form_doc_with_fields(
+            vec![((4, 0), parent), ((5, 0), named_field("k", vec![]))],
+            vec![(4, 0)],
+        );
+        let v = forms_json_value(&doc);
+        assert_eq!(v["field_count"], 1);
+        assert_eq!(v["fields"][0]["field_name"], "p.k");
+        assert_eq!(v["fields"][0]["tooltip"], "Parent tip");
+        assert_eq!(v["fields"][0]["options"][0]["label"], "Parent option");
+    }
+
+    #[test]
+    fn captions_come_from_the_field_and_each_of_its_widgets() {
+        let widget = |caption: &str| {
+            let mut d = Dictionary::new();
+            d.set("Subtype", Object::Name(b"Widget".to_vec()));
+            d.set("MK", mk(literal(caption.as_bytes())));
+            d
+        };
+        let parent = {
+            let mut d = named_field("radio", vec![(5, 0), (6, 0)]);
+            d.set("MK", mk(literal(b"Own")));
+            d
+        };
+        let doc = form_doc_with_fields(
+            vec![
+                ((4, 0), parent),
+                ((5, 0), widget("Yes")),
+                ((6, 0), widget("No")),
+            ],
+            vec![(4, 0)],
+        );
+        let v = forms_json_value(&doc);
+        assert_eq!(v["field_count"], 1);
+        let captions: Vec<&Value> = v["fields"][0]["captions"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|c| &c["text"])
+            .collect();
+        assert_eq!(captions, ["Own", "Yes", "No"]);
+        assert_eq!(v["fields"][0]["captions_decoded"], true);
+    }
+
+    #[test]
+    fn a_parent_does_not_claim_the_captions_of_kids_that_are_fields() {
+        let kid = |name: &str, caption: &[u8]| {
+            let mut d = named_field(name, vec![]);
+            d.set("MK", mk(literal(caption)));
+            d
+        };
+        let mut parent = named_field("p", vec![(5, 0), (6, 0)]);
+        parent.set("V", literal(b"own value"));
+        parent.set("MK", mk(literal(b"Own")));
+        let doc = form_doc_with_fields(
+            vec![
+                ((4, 0), parent),
+                ((5, 0), kid("a", b"A")),
+                ((6, 0), kid("b", b"B")),
+            ],
+            vec![(4, 0)],
+        );
+        let v = forms_json_value(&doc);
+        assert_eq!(v["fields"][0]["field_name"], "p");
+        assert_eq!(v["fields"][0]["captions"].as_array().unwrap().len(), 1);
+        assert_eq!(v["fields"][1]["captions"][0]["text"], "A");
+        assert_eq!(v["fields"][2]["captions"][0]["text"], "B");
+    }
+
+    #[test]
+    fn a_widget_listed_twice_gives_one_caption() {
+        let mut widget = Dictionary::new();
+        widget.set("Subtype", Object::Name(b"Widget".to_vec()));
+        widget.set("MK", mk(literal(b"Once")));
+        let doc = form_doc_with_fields(
+            vec![
+                ((4, 0), named_field("p", vec![(5, 0), (5, 0)])),
+                ((5, 0), widget),
+            ],
+            vec![(4, 0)],
+        );
+        let v = forms_json_value(&doc);
+        assert_eq!(v["fields"][0]["captions"].as_array().unwrap().len(), 1);
+    }
+
+    #[test]
+    fn a_null_or_dangling_mk_is_no_caption_and_no_finding() {
+        for absent in [Object::Null, Object::Reference((99, 0))] {
+            let (f, had_issues) = field_status(vec![("MK", absent.clone())]);
+            assert_eq!(f["captions"], serde_json::json!([]), "{absent:?}");
+            assert!(!had_issues, "{absent:?}");
+        }
+    }
+
+    #[test]
+    fn a_caption_that_cannot_be_read_is_a_finding() {
+        for bad in [
+            mk(undecodable()),
+            mk(Object::Integer(3)),
+            Object::Integer(3),
+        ] {
+            let (f, had_issues) = field_status(vec![("MK", bad.clone())]);
+            assert_eq!(f["captions_decoded"], false, "{bad:?}");
+            assert!(had_issues, "{bad:?}");
+        }
+    }
+
+    #[test]
+    fn the_new_entries_print_in_text_mode() {
+        let doc = form_doc_with_fields(
+            vec![(
+                (4, 0),
+                field_with(vec![
+                    ("TU", literal(b"A tip")),
+                    (
+                        "Opt",
+                        Object::Array(vec![
+                            literal(b"Plain"),
+                            Object::Array(vec![literal(b"v1"), literal(b"Shown")]),
+                        ]),
+                    ),
+                    ("MK", mk(literal(b"Press"))),
+                ]),
+            )],
+            vec![(4, 0)],
+        );
+        let out = output_of(|w| {
+            print_forms(w, &doc);
+        });
+        for expected in [
+            "tooltip: A tip",
+            "options: Plain, Shown [v1]",
+            "captions: Press",
+        ] {
+            assert!(out.contains(expected), "{expected} in {out}");
+        }
     }
 
     #[test]

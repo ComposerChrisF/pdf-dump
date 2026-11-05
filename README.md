@@ -58,9 +58,9 @@ These can be used together — output gets section headers automatically:
 | `--find-text "pattern"` | Case-insensitive text search with context; exits 3, like `--text`, when the searched text is not reliably decodable |
 | `--fonts` | List all fonts with encoding and embedding details |
 | `--images` | List all images with dimensions, color space, filters |
-| `--forms` | AcroForm fields with names, types and every value (lists, stream values, inherited values, rich text), plus XFA datasets.  A value that will not decode prints as hex and exits 3 |
+| `--forms` | AcroForm fields with names, types and every value (lists, stream values, inherited values, rich text), plus tooltips, options, widget captions and XFA datasets.  A string that will not decode prints as hex and exits 3 |
 | `--bookmarks` | Show the document outline tree |
-| `--annotations` | Every annotation in `/Annots`, with link targets, comments, rich text, and the text its appearance shows.  Text that could not be read reliably exits 3 |
+| `--annotations` | Every annotation in `/Annots`, with link targets, comments, rich text, author, subject, whether it is hidden, and the text its appearance shows.  Text that could not be read reliably exits 3 |
 | `--tags` | Show tagged PDF structure tree (accessibility) |
 | `--tree` | Show the object graph as an indented reference tree |
 | `--validate` | Structural checks: broken refs, unreachable objects, required keys |

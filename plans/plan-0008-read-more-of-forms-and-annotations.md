@@ -16,8 +16,10 @@ Four gaps, from Fable’s and Sol’s review of the reading limits (4-Nov-2026),
 **Chris ruled on gaps 1 and 2 on 4-Nov-2026 (`pdf-dump/0004`, option A):** “Both lists, as a plan after the three bugs: each string with its decode status, the flags, and presence of /D and /R”.  So this much is decided:
 
 - `--annotations` gains `author` (`/T`), `subject` (`/Subj`), `flags`, `hidden`, `has_down_appearance` and `has_rollover_appearance`.
-- `--forms` gains `tooltip` (`/TU`), `options` (`/Opt`, as `{export, label}`), and `captions` (`/MK /CA`, a list, since each widget of a field has its own).
+- `--forms` gains `tooltip` (`/TU`), `options` (`/Opt`, as `{export, label, decoded}`), and `captions` (`/MK /CA`, as `{text, decoded}`, a list, since each widget of a field has its own).
 - Each string carries a `*_decoded` beside it, as the existing ones do, and one that will not decode exits 3.
+
+_Status, 4-Nov-2026: this ruled list landed, with `captions` and `options` items each carrying their own `decoded`, and `tooltip_inherited` and `options_inherited` beside the values.  What follows is what remains of this plan._
 
 **Not ruled on, and still only proposed** (Obsidian-Brain’s asks, which went beyond the two models’ lists):
 

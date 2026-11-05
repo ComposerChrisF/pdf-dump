@@ -67,6 +67,24 @@ pub(crate) fn inherited_page_attr<'a>(
     None
 }
 
+/// An entry a dictionary holds itself.  Null, or a reference to nothing, is the same as no entry
+/// (§ 7.3.9), so inheritance applies.
+pub(crate) fn own_entry<'a>(
+    doc: &Document,
+    dict: &'a lopdf::Dictionary,
+    key: &[u8],
+) -> Option<&'a Object> {
+    let value = dict.get(key).ok()?;
+    match value {
+        Object::Null => None,
+        Object::Reference(id) => match doc.get_object(*id) {
+            Ok(Object::Null) | Err(lopdf::Error::ObjectNotFound(_)) => None,
+            _ => Some(value),
+        },
+        _ => Some(value),
+    }
+}
+
 pub(crate) fn resolve_dict<'a>(
     doc: &'a Document,
     obj: &'a Object,

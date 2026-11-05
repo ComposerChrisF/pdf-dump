@@ -182,8 +182,9 @@ Exit codes:
       (--validate found errors; the text that --text printed or --find-text
        searched was degraded or unreliable, e.g. a CID/Type0 font without a
        ToUnicode map, >20% of codes undecodable, or a content stream not read
-       to its end, and the output is still printed; a --forms value, rich value or XFA data, or an --annotations
-       comment or rich comment, could not be read, or an annotation's appearance
+       to its end, and the output is still printed; a --forms value, rich value, tooltip,
+       option, caption or XFA data, or an --annotations comment, rich comment,
+       author, subject or flags, could not be read, or an annotation's appearance
        text is not reliable; --images could not walk a content stream for inline
        images; --extract-image wrote a JPEG or JPEG 2000 whose mask stays
        unapplied (the file is written; read mask_applied, and the mask too);
@@ -241,15 +242,16 @@ pub(crate) struct Args {
     pub tags: bool,
 
     // ── Annotations & Forms ──────────────────────────────────────────
-    /// Show every annotation: link targets, comments, rich text, and the text its
-    /// appearance shows with a reliability verdict (all pages, or filtered with --page).
-    /// Exits 3 when any of that text could not be read reliably
+    /// Show every annotation: link targets, comments, rich text, author, subject, flags,
+    /// whether its Hidden or NoView bit is set, whether it has down and rollover appearances,
+    /// and the text its normal appearance shows with a reliability verdict (all pages, or
+    /// filtered with --page).  Exits 3 when any of that could not be read reliably
     #[arg(long, help_heading = "Annotations & Forms")]
     pub annotations: bool,
 
     /// List the fields under /AcroForm /Fields, with every /V and /RV: lists, stream
-    /// values, inherited values, rich text, and XFA datasets.  Exits 3 when one could
-    /// not be read
+    /// values, inherited values, rich text; each field's tooltip, options and widget captions;
+    /// and XFA datasets.  Exits 3 when one could not be read
     #[arg(long, help_heading = "Annotations & Forms")]
     pub forms: bool,
 

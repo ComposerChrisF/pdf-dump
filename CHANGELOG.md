@@ -5,6 +5,17 @@ All notable changes to `pdf-dump` are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0/).
 
+## [0.33.0] - 2026-11-04
+### Added
+- **`--annotations` reports `author` (`/T`), `subject` (`/Subj`), `flags` and `hidden`,** the
+  last true for the Hidden or NoView bit, and `has_down_appearance` and
+  `has_rollover_appearance`.  A widget’s `/T` is its field’s name, so it is not an author.
+- **`--forms` reports `tooltip` (`/TU`), `options` (`/Opt`, as `{export, label, decoded}`) and
+  `captions` (`/MK /CA` of each widget, as `{text, decoded}`),** with `*_decoded` and, for the
+  first two, `*_inherited` beside them.
+- One that will not decode exits 3, as does an annotation’s `/F` that is not an integer.  A file
+  that used to exit 0 can therefore exit 3.
+
 ## [0.32.0] - 2026-11-04
 ### Changed
 - **`--extract-image` exits 3 when it leaves a mask unapplied.**  A JPEG or JPEG 2000 with a

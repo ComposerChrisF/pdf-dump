@@ -5,11 +5,17 @@ use std::io::Write;
 
 use crate::bookmarks::format_dest_value;
 use crate::helpers::{
-    format_dict_value, get_catalog, name_to_string, obj_to_text, page_annots, resolve_dict,
+    format_dict_value, get_catalog, name_to_string, obj_to_text, own_entry, page_annots,
+    resolve_dict,
 };
+use crate::stream::deref;
 use crate::text::{AppearanceText, Reliability, appearance_text};
-use crate::text_string::{read_rich_text, read_text_value};
+use crate::text_string::{TextString, printable, read_rich_text, read_text_value};
 use crate::types::PageSpec;
+
+/// `/F`'s Hidden and NoView bits (§ 12.5.3).  Only two of the things that decide whether a viewer
+/// shows an annotation: Invisible, ToggleNoView and `/OC` count too, and are not weighed here.
+const HIDDEN_FLAGS: u32 = (1 << 1) | (1 << 5);
 
 pub(crate) struct AnnotationInfo {
     pub page_num: u32,
@@ -22,6 +28,20 @@ pub(crate) struct AnnotationInfo {
     /// The words of `/RC`, markup removed.
     pub rich_contents: Option<String>,
     pub rich_contents_decoded: bool,
+    /// `/T`: the author on a markup annotation, a title on a Screen or Movie.  On a widget that
+    /// entry is the field's name, which `--forms` reports, so it is not read there.
+    pub author: Option<String>,
+    pub author_decoded: bool,
+    /// `/Subj`.
+    pub subject: Option<String>,
+    pub subject_decoded: bool,
+    /// `/F`, which is 0 when absent (§ 12.5.2).  `None` when it is not an integer, so whether the
+    /// annotation shows is not known.
+    pub flags: Option<u32>,
+    /// `/AP /D` exists.  Its text is not read.
+    pub has_down_appearance: bool,
+    /// `/AP /R` exists.  Its text is not read.
+    pub has_rollover_appearance: bool,
     pub link_type: Option<String>,
     pub target: Option<String>,
     pub appearance: Option<Appearance>,
@@ -39,10 +59,18 @@ pub(crate) struct Appearance {
 }
 
 impl AnnotationInfo {
-    /// Whether this annotation holds text pdf-dump could not read: a finding, exit 3.
+    /// Whether `/F` has its Hidden or NoView bit set; `None` when `/F` could not be read.
+    fn hidden(&self) -> Option<bool> {
+        self.flags.map(|flags| flags & HIDDEN_FLAGS != 0)
+    }
+
+    /// Whether this annotation holds text or flags pdf-dump could not read: a finding, exit 3.
     fn has_unread_text(&self) -> bool {
         !self.contents_decoded
             || !self.rich_contents_decoded
+            || !self.author_decoded
+            || !self.subject_decoded
+            || self.flags.is_none()
             || self.appearance.as_ref().is_some_and(|a| {
                 a.read.verdict.is_finding() && !(a.is_mark && a.read.only_symbols_unread)
             })
@@ -257,6 +285,26 @@ fn classify_link(doc: &Document, dict: &lopdf::Dictionary) -> (Cow<'static, str>
     }
 }
 
+fn annotation_flags(doc: &Document, dict: &lopdf::Dictionary) -> Option<u32> {
+    let flags = match own_entry(doc, dict, b"F") {
+        None => return Some(0),
+        Some(Object::Reference(id)) => doc.get_object(*id).ok()?,
+        Some(direct) => direct,
+    };
+    // A 32-bit field, written signed or unsigned.  Anything wider would lose bits in the cast.
+    flags
+        .as_i64()
+        .ok()
+        .filter(|flags| (i64::from(i32::MIN)..=i64::from(u32::MAX)).contains(flags))
+        .map(|flags| flags as u32)
+}
+
+fn has_appearance(doc: &Document, dict: &lopdf::Dictionary, key: &[u8]) -> bool {
+    own_entry(doc, dict, b"AP")
+        .and_then(|ap| resolve_dict(doc, ap))
+        .is_some_and(|ap| own_entry(doc, ap, key).is_some())
+}
+
 pub(crate) fn collect_annotations(
     doc: &Document,
     page_filter: Option<&PageSpec>,
@@ -303,6 +351,7 @@ fn collect(
             let subtype = annot_dict
                 .get(b"Subtype")
                 .ok()
+                .and_then(|v| deref(doc, v))
                 .and_then(name_to_string)
                 .unwrap_or_else(|| "-".to_string());
 
@@ -325,6 +374,16 @@ fn collect(
                 .and_then(|v| read_rich_text(doc, v));
             let rich_contents_decoded = rich.as_ref().is_none_or(|r| r.decoded);
             let rich_contents = rich.map(|r| r.text);
+
+            let read_string = |key: &[u8]| -> Option<TextString> {
+                read_text_value(doc, annot_dict.get(key).ok()?)
+            };
+            let author = if subtype == "Widget" {
+                None
+            } else {
+                read_string(b"T")
+            };
+            let subject = read_string(b"Subj");
 
             let (link_type, target) = if subtype == "Link" {
                 let (lt, tgt) = classify_link(doc, annot_dict);
@@ -370,6 +429,13 @@ fn collect(
                 contents_decoded,
                 rich_contents,
                 rich_contents_decoded,
+                author_decoded: author.as_ref().is_none_or(|t| t.decoded),
+                author: author.map(|t| t.text),
+                subject_decoded: subject.as_ref().is_none_or(|t| t.decoded),
+                subject: subject.map(|t| t.text),
+                flags: annotation_flags(doc, annot_dict),
+                has_down_appearance: has_appearance(doc, annot_dict, b"D"),
+                has_rollover_appearance: has_appearance(doc, annot_dict, b"R"),
                 link_type,
                 target,
                 appearance,
@@ -384,15 +450,15 @@ fn warn_unread(annotations: &[AnnotationInfo]) -> bool {
     let unread = annotations.iter().filter(|a| a.has_unread_text()).count();
     if unread > 0 {
         eprintln!(
-            "Warning: {unread} annotation(s) hold text that could not be read reliably: a comment \
-             that would not decode, malformed rich text, or an appearance whose verdict is not \
-             reliable."
+            "Warning: {unread} annotation(s) could not be read reliably: a comment, author or subject \
+             that would not decode, malformed rich text, flags that could not be read, or an \
+             appearance whose verdict is not reliable."
         );
     }
     unread > 0
 }
 
-/// Returns `true` when an annotation holds text that could not be read reliably.
+/// Returns `true` when an annotation holds text or flags that could not be read reliably.
 pub(crate) fn print_annotations(
     writer: &mut impl Write,
     doc: &Document,
@@ -433,6 +499,27 @@ pub(crate) fn print_annotations(
         if let Some(rich) = &a.rich_contents {
             wln!(writer, "        rich text: {}", rich);
         }
+        if let Some(author) = &a.author {
+            wln!(writer, "        author: {}", printable(author));
+        }
+        if let Some(subject) = &a.subject {
+            wln!(writer, "        subject: {}", printable(subject));
+        }
+        match (a.flags, a.hidden()) {
+            (Some(flags), Some(true)) => wln!(writer, "        flags: {} (hidden)", flags),
+            (Some(0), _) => {}
+            (Some(flags), _) => wln!(writer, "        flags: {}", flags),
+            (None, _) => wln!(
+                writer,
+                "        flags: could not be read, so it may be hidden"
+            ),
+        }
+        if a.has_down_appearance {
+            wln!(writer, "        has a down appearance, not read");
+        }
+        if a.has_rollover_appearance {
+            wln!(writer, "        has a rollover appearance, not read");
+        }
         if let Some(appearance) = &a.appearance {
             if !appearance.read.text.is_empty() {
                 wln!(
@@ -455,7 +542,7 @@ pub(crate) fn annotations_json_value(doc: &Document, page_filter: Option<&PageSp
     annotations_json_value_with_status(doc, page_filter).0
 }
 
-/// Returns the JSON and whether an annotation holds text that could not be read reliably.
+/// Returns the JSON and whether an annotation holds text or flags that could not be read reliably.
 pub(crate) fn annotations_json_value_with_status(
     doc: &Document,
     page_filter: Option<&PageSpec>,
@@ -474,6 +561,14 @@ pub(crate) fn annotations_json_value_with_status(
                 "contents_decoded": a.contents_decoded,
                 "rich_contents": a.rich_contents,
                 "rich_contents_decoded": a.rich_contents_decoded,
+                "author": a.author,
+                "author_decoded": a.author_decoded,
+                "subject": a.subject,
+                "subject_decoded": a.subject_decoded,
+                "flags": a.flags,
+                "hidden": a.hidden(),
+                "has_down_appearance": a.has_down_appearance,
+                "has_rollover_appearance": a.has_rollover_appearance,
                 "link_type": a.link_type,
                 "target": a.target,
                 "appearance_text": a.appearance.as_ref().map(|ap| &ap.read.text),
@@ -640,6 +735,282 @@ mod tests {
         let mut ap = Dictionary::new();
         ap.set("N", n);
         Object::Dictionary(ap)
+    }
+
+    #[test]
+    fn author_and_subject_are_read_with_their_decode_status() {
+        let doc = page_doc(
+            vec![Object::Dictionary(note(vec![
+                ("T", literal(&utf16("A. Reviewer"))),
+                ("Subj", literal(b"Gate code")),
+            ]))],
+            vec![],
+        );
+        let (v, had_issues) = annotations_json_value_with_status(&doc, None);
+        let a = &v["annotations"][0];
+        assert_eq!(a["author"], "A. Reviewer");
+        assert_eq!(a["author_decoded"], true);
+        assert_eq!(a["subject"], "Gate code");
+        assert_eq!(a["subject_decoded"], true);
+        assert!(!had_issues);
+    }
+
+    #[test]
+    fn absent_author_and_subject_are_null_and_an_empty_one_is_not() {
+        let doc = page_doc(
+            vec![Object::Dictionary(note(vec![("T", literal(b""))]))],
+            vec![],
+        );
+        let v = annotations_json_value(&doc, None);
+        assert_eq!(v["annotations"][0]["author"], "");
+        assert_eq!(v["annotations"][0]["subject"], Value::Null);
+    }
+
+    #[test]
+    fn an_author_or_subject_that_will_not_decode_is_a_finding() {
+        for key in ["T", "Subj"] {
+            let doc = page_doc(
+                vec![Object::Dictionary(note(vec![(
+                    key,
+                    literal(&[0xFE, 0xFF, 0x00]),
+                )]))],
+                vec![],
+            );
+            let (_, had_issues) = annotations_json_value_with_status(&doc, None);
+            assert!(had_issues, "{key}");
+        }
+    }
+
+    #[test]
+    fn a_widgets_t_is_its_field_name_not_an_author() {
+        let mut widget = note(vec![("T", literal(b"field1"))]);
+        widget.set("Subtype", Object::Name(b"Widget".to_vec()));
+        let doc = page_doc(vec![Object::Dictionary(widget)], vec![]);
+        let v = annotations_json_value(&doc, None);
+        assert_eq!(v["annotations"][0]["author"], Value::Null);
+    }
+
+    #[test]
+    fn flags_print_in_text_mode_whether_or_not_hidden() {
+        let text_of = |flags: i64| {
+            let doc = page_doc(
+                vec![Object::Dictionary(note(vec![(
+                    "F",
+                    Object::Integer(flags),
+                )]))],
+                vec![],
+            );
+            output_of(|w| {
+                print_annotations(w, &doc, None);
+            })
+        };
+        assert!(text_of(256).contains("flags: 256\n"));
+        assert!(text_of(1).contains("flags: 1\n"));
+        assert!(!text_of(0).contains("flags:"));
+    }
+
+    #[test]
+    fn an_indirect_widget_subtype_is_still_a_widget() {
+        let widget = Dictionary::from_iter(vec![
+            ("Subtype", Object::Reference((7, 0))),
+            ("T", literal(&[0xFE, 0xFF, 0x00])),
+        ]);
+        let doc = page_doc(
+            vec![Object::Dictionary(widget)],
+            vec![((7, 0), Object::Name(b"Widget".to_vec()))],
+        );
+        let (v, had_issues) = annotations_json_value_with_status(&doc, None);
+        assert_eq!(v["annotations"][0]["subtype"], "Widget");
+        assert_eq!(v["annotations"][0]["author"], Value::Null);
+        assert!(!had_issues);
+    }
+
+    #[test]
+    fn author_and_subject_are_escaped_for_the_terminal() {
+        let doc = page_doc(
+            vec![Object::Dictionary(note(vec![
+                ("T", literal(b"Me\rYou")),
+                ("Subj", literal(&utf16("a\u{202E}b"))),
+            ]))],
+            vec![],
+        );
+        let out = output_of(|w| {
+            print_annotations(w, &doc, None);
+        });
+        assert!(!out.contains('\r') && !out.contains('\u{202E}'), "{out:?}");
+    }
+
+    #[test]
+    fn hidden_and_noview_read_as_hidden_and_print_does_not() {
+        for (flags, hidden) in [(0, false), (4, false), (2, true), (32, true), (34, true)] {
+            let doc = page_doc(
+                vec![Object::Dictionary(note(vec![(
+                    "F",
+                    Object::Integer(flags),
+                )]))],
+                vec![],
+            );
+            let v = annotations_json_value(&doc, None);
+            assert_eq!(v["annotations"][0]["flags"], flags);
+            assert_eq!(v["annotations"][0]["hidden"], hidden, "flags {flags}");
+        }
+    }
+
+    #[test]
+    fn invisible_and_togglenoview_alone_do_not_read_as_hidden() {
+        for flags in [1, 256] {
+            let doc = page_doc(
+                vec![Object::Dictionary(note(vec![(
+                    "F",
+                    Object::Integer(flags),
+                )]))],
+                vec![],
+            );
+            let v = annotations_json_value(&doc, None);
+            assert_eq!(v["annotations"][0]["flags"], flags);
+            assert_eq!(v["annotations"][0]["hidden"], false, "flags {flags}");
+        }
+    }
+
+    #[test]
+    fn flags_wider_than_32_bits_are_not_known_and_negative_ones_are_bits() {
+        for wide in [1_i64 << 32, (1_i64 << 32) + 2, i64::MIN] {
+            let doc = page_doc(
+                vec![Object::Dictionary(note(vec![("F", Object::Integer(wide))]))],
+                vec![],
+            );
+            let (v, had_issues) = annotations_json_value_with_status(&doc, None);
+            assert_eq!(v["annotations"][0]["flags"], Value::Null, "{wide}");
+            assert!(had_issues, "{wide}");
+        }
+        let doc = page_doc(
+            vec![Object::Dictionary(note(vec![("F", Object::Integer(-1))]))],
+            vec![],
+        );
+        let v = annotations_json_value(&doc, None);
+        assert_eq!(v["annotations"][0]["flags"], u32::MAX);
+        assert_eq!(v["annotations"][0]["hidden"], true);
+    }
+
+    #[test]
+    fn a_cycle_in_flags_is_not_known_rather_than_zero() {
+        let doc = page_doc(
+            vec![Object::Dictionary(note(vec![(
+                "F",
+                Object::Reference((7, 0)),
+            )]))],
+            vec![
+                ((7, 0), Object::Reference((8, 0))),
+                ((8, 0), Object::Reference((7, 0))),
+            ],
+        );
+        let (v, had_issues) = annotations_json_value_with_status(&doc, None);
+        assert_eq!(v["annotations"][0]["flags"], Value::Null);
+        assert!(had_issues);
+    }
+
+    #[test]
+    fn flags_that_are_not_an_integer_say_so_in_text_mode() {
+        let doc = page_doc(
+            vec![Object::Dictionary(note(vec![("F", Object::Real(2.0))]))],
+            vec![],
+        );
+        let out = output_of(|w| {
+            print_annotations(w, &doc, None);
+        });
+        assert!(out.contains("flags: could not be read"), "{out}");
+    }
+
+    #[test]
+    fn flags_are_followed_by_reference_and_absent_ones_are_zero() {
+        let doc = page_doc(
+            vec![
+                Object::Dictionary(note(vec![("F", Object::Reference((7, 0)))])),
+                Object::Dictionary(note(vec![])),
+                Object::Dictionary(note(vec![("F", Object::Reference((99, 0)))])),
+            ],
+            vec![((7, 0), Object::Integer(2))],
+        );
+        let v = annotations_json_value(&doc, None);
+        assert_eq!(v["annotations"][0]["hidden"], true);
+        assert_eq!(v["annotations"][1]["flags"], 0);
+        assert_eq!(v["annotations"][1]["hidden"], false);
+        // A reference to nothing is null (§ 7.3.10), so it is absent.
+        assert_eq!(v["annotations"][2]["flags"], 0);
+    }
+
+    #[test]
+    fn flags_that_are_not_a_number_say_not_known_and_are_a_finding() {
+        let doc = page_doc(
+            vec![Object::Dictionary(note(vec![("F", literal(b"2"))]))],
+            vec![],
+        );
+        let (v, had_issues) = annotations_json_value_with_status(&doc, None);
+        assert_eq!(v["annotations"][0]["flags"], Value::Null);
+        assert_eq!(v["annotations"][0]["hidden"], Value::Null);
+        assert!(had_issues);
+    }
+
+    #[test]
+    fn down_and_rollover_appearances_are_reported_as_present() {
+        let mut direct = Dictionary::new();
+        direct.set("D", Object::Reference((7, 0)));
+        let mut by_reference = Dictionary::new();
+        by_reference.set("R", Object::Reference((7, 0)));
+        let mut dangling = Dictionary::new();
+        dangling.set("D", Object::Reference((99, 0)));
+        let doc = page_doc(
+            vec![
+                Object::Dictionary(note(vec![("AP", Object::Dictionary(direct))])),
+                Object::Dictionary(note(vec![("AP", Object::Reference((8, 0)))])),
+                Object::Dictionary(note(vec![("AP", Object::Dictionary(dangling))])),
+                Object::Dictionary(note(vec![])),
+            ],
+            vec![
+                ((7, 0), appearance_stream(b"BT (x) Tj ET")),
+                ((8, 0), Object::Dictionary(by_reference)),
+            ],
+        );
+        let v = annotations_json_value(&doc, None);
+        let has = |i: usize| {
+            let a = &v["annotations"][i];
+            (
+                a["has_down_appearance"].clone(),
+                a["has_rollover_appearance"].clone(),
+            )
+        };
+        assert_eq!(has(0), (json!(true), json!(false)));
+        assert_eq!(has(1), (json!(false), json!(true)));
+        assert_eq!(has(2), (json!(false), json!(false)));
+        assert_eq!(has(3), (json!(false), json!(false)));
+    }
+
+    #[test]
+    fn the_new_entries_print_in_text_mode() {
+        let mut ap = Dictionary::new();
+        ap.set("D", Object::Reference((7, 0)));
+        ap.set("R", Object::Reference((7, 0)));
+        let doc = page_doc(
+            vec![Object::Dictionary(note(vec![
+                ("T", literal(b"A. Reviewer")),
+                ("Subj", literal(b"Gate code")),
+                ("F", Object::Integer(2)),
+                ("AP", Object::Dictionary(ap)),
+            ]))],
+            vec![((7, 0), appearance_stream(b"q Q"))],
+        );
+        let out = output_of(|w| {
+            print_annotations(w, &doc, None);
+        });
+        for expected in [
+            "author: A. Reviewer",
+            "subject: Gate code",
+            "flags: 2 (hidden)",
+            "has a down appearance, not read",
+            "has a rollover appearance, not read",
+        ] {
+            assert!(out.contains(expected), "{expected} in {out}");
+        }
     }
 
     #[test]
