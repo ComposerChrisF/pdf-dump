@@ -13,11 +13,16 @@ Four gaps, from Fable’s and Sol’s review of the reading limits (4-Nov-2026),
 
 ## Proposed Change
 
-**How far gaps 1 and 2 go is Chris’s, asked as `row:App/Rust/Pdf/pdf-dump/0004`.**  This plan takes his answer as its scope.  Under the fullest answer:
+**Chris ruled on gaps 1 and 2 on 4-Nov-2026 (`row:App/Rust/Pdf/pdf-dump/0004`, option A):** “Both lists, as a plan after the three bugs: each string with its decode status, the flags, and presence of /D and /R”.  So this much is decided:
 
-- `--annotations` gains `author` (`/T`), `subject` (`/Subj`), `flags`, `hidden` and `has_down_appearance` / `has_rollover_appearance`, or their text.
-- `--forms` gains `tooltip` (`/TU`), `default_value` (`/DV`), `options` (`/Opt`, as `{export, label}`), and `caption`, `rollover_caption` and `down_caption` (`/MK`).
+- `--annotations` gains `author` (`/T`), `subject` (`/Subj`), `flags`, `hidden`, `has_down_appearance` and `has_rollover_appearance`.
+- `--forms` gains `tooltip` (`/TU`), `options` (`/Opt`, as `{export, label}`), and `caption` (`/MK /CA`).
 - Each string carries a `*_decoded` beside it, as the existing ones do, and one that will not decode exits 3.
+
+**Not ruled on, and still only proposed** (Obsidian-Brain’s asks, which went beyond the two models’ lists):
+
+- `--forms`: `default_value` (`/DV`), and `/MK`’s `/RC` and `/AC`.
+- `--annotations`: the text of `/AP /D` and `/AP /R`, where the ruling is presence.
 - A walk climbs `/Parent` from a widget or pop-up to an entry nothing else reported, naming how it was reached, with a depth limit and a guard against cycles.
 - `strip_markup` decodes the named references XHTML defines, and keeps unknown tags inline, so that text is not split where a viewer would not split it.
 
