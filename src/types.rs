@@ -185,7 +185,9 @@ Exit codes:
        to its end, and the output is still printed; a --forms value, rich value or XFA data, or an --annotations
        comment or rich comment, could not be read, or an annotation's appearance
        text is not reliable; --images could not walk a content stream for inline
-       images; --strict detected a malformed stream /Length; or the PDF is
+       images; --extract-image wrote a JPEG or JPEG 2000 whose mask stays
+       unapplied (the file is written; read mask_applied, and the mask too);
+       --strict detected a malformed stream /Length; or the PDF is
        encrypted and could not be decrypted — supply --password to read it)
 ")]
 pub(crate) struct Args {
@@ -285,7 +287,7 @@ pub(crate) struct Args {
     /// pixels, the stream as it is for DCTDecode (.jpg) and JPXDecode (.jp2).  The picture
     /// as drawn, in its stored orientation: predictors, /Decode and palettes applied, CMYK converted naively, masks
     /// composited onto white, except that a JPEG's or JPEG 2000's mask is left unapplied,
-    /// with a warning.  --output's extension must match; --images --json gives each image's
+    /// with a warning and exit 3.  --output's extension must match; --images --json gives each image's
     /// export_format
     #[arg(
         long,

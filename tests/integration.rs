@@ -723,6 +723,33 @@ fn extract_image_writes_a_jpeg_as_it_is() {
     assert_eq!(fs::read(&out).unwrap(), JPEG_BYTES);
 }
 
+/// Ruled by Chris on 4-Nov-2026: a mask left unapplied is a finding, and the file is still written.
+#[test]
+fn extract_image_of_a_masked_jpeg_writes_it_and_exits_3() {
+    let mut doc = Document::with_version("1.7");
+    let mask = doc.add_object(Object::Stream(gray_image(1, 1, vec![0])));
+    let mut image = jpeg_image();
+    image.dict.set("SMask", Object::Reference(mask));
+    let id = doc.add_object(Object::Stream(image));
+    let pdf = tempfile::NamedTempFile::new().unwrap();
+    doc.save(pdf.path()).unwrap();
+    let dir = tempfile::tempdir().unwrap();
+    let out = dir.path().join("a.jpg");
+
+    let output = Command::new(binary_path())
+        .arg(pdf.path())
+        .args(["--extract-image", &id.0.to_string(), "--json", "--output"])
+        .arg(&out)
+        .output()
+        .unwrap();
+
+    assert_eq!(output.status.code(), Some(3), "{output:?}");
+    assert_eq!(fs::read(&out).unwrap(), JPEG_BYTES);
+    let v: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(v["mask"], "smask");
+    assert_eq!(v["mask_applied"], false);
+}
+
 fn export_failure(pdf: &tempfile::NamedTempFile, args: &[&str], name: &str) -> (i32, String, bool) {
     let dir = tempfile::tempdir().unwrap();
     let out = dir.path().join(name);

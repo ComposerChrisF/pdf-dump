@@ -504,7 +504,8 @@ fn tool_error(message: String) -> ! {
     std::process::exit(TOOL_ERROR.into());
 }
 
-/// Exports one image and writes it.  A refusal names what stopped it, and nothing is written.
+/// Exports one image and writes it.  A refusal names what stopped it, and nothing is written.  A mask
+/// left unapplied exits 3 with the file written: the file is not the picture as drawn.
 #[allow(clippy::too_many_arguments)]
 fn write_exported_image(
     out: &mut impl Write,
@@ -568,6 +569,10 @@ fn write_exported_image(
             image.width,
             image.height
         );
+    }
+    if !image.mask_applied {
+        let _ = out.flush();
+        std::process::exit(FINDINGS.into());
     }
 }
 

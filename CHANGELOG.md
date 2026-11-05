@@ -5,6 +5,13 @@ All notable changes to `pdf-dump` are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0/).
 
+## [0.32.0] - 2026-11-04
+### Changed
+- **`--extract-image` exits 3 when it leaves a mask unapplied.**  A JPEG or JPEG 2000 with a
+  mask is still written as it is, with the warning and `mask_applied: false`, but it exited 0,
+  so a script ignoring the JSON could read a scan’s background and miss words kept in the mask.
+  Masked JPEGs are common, so a caller should read `mask_applied` before treating 3 as a problem.
+
 ## [0.31.8] - 2026-11-04
 ### Fixed
 - **An indirect `/Filter` is followed.**  It read as no filter, so `--extract-stream` wrote
@@ -42,30 +49,30 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [0.31.5] - 2026-11-04
 ### Added
 - `DEBUGGING_WITH_PDF_DUMP.md` § What pdf-dump does not read gathers the limits, and adds
-  vector lettering, text a viewer would not show, a JPEG's `/ColorTransform`, and stored
+  vector lettering, text a viewer would not show, a JPEG’s `/ColorTransform`, and stored
   orientation.  `--help` says that exit 0 does not mean every visible word was read.
 
 ## [0.31.4] - 2026-11-04
 ### Fixed
 Found by Fable, Sol and Opus, reviewing what v0.30.0 to v0.31.3 promise, and by
-Obsidian-Brain's mail gate:
+Obsidian-Brain’s mail gate:
 - **Text extraction now knows when lopdf did not reach the end of a content stream.**
   An unterminated string, an inline image with no `EI` or with an end that was guessed
   at, and syntax errors the operator count missed all lost what followed with verdict
-  `reliable` and exit 0, so `--find-text` said "No matches" of text in the file.  They
+  `reliable` and exit 0, so `--find-text` said “No matches” of text in the file.  They
   now exit 3 with a `degraded` verdict.  Shapes lopdf could not read now read: an inline
   image whose `EI` ends the stream, and a comment followed by a blank line or white space,
-  each of which lost the page's text.
+  each of which lost the page’s text.
 - **An inline image whose dictionary holds a reference no longer crashes** `--text`,
   `--operators`, `--validate` or `--object` with a panic in lopdf.  What follows it counts
   as not read.
-- **`--validate` reads a page's content streams as one,** as the spec does.  It warned of
+- **`--validate` reads a page’s content streams as one,** as the spec does.  It warned of
   invalid syntax on a page whose streams divide inside a dictionary.
 - **Malformed markup in XFA no longer reads as decoded.**  A tag that stops the search
   for `datasets`, or a `<!` that is no declaration, sets `xfa_decoded: false`, exit 3,
   where the data was lost with exit 0.
 - **`--validate` and `--page` follow an indirect `/Contents` array,** as `--text` has
-  since v0.31.0.  `--validate` missed such a page's syntax errors, and `--page` reported
+  since v0.31.0.  `--validate` missed such a page’s syntax errors, and `--page` reported
   0 bytes.
 - **An inline image with no `/CS` no longer vanishes without a word:** `--operators`
   and `--object` warn, and `--validate` reports it.
@@ -78,7 +85,7 @@ Obsidian-Brain's mail gate:
 ### Fixed
 - **`--object --decode`, `--extract-stream` and `--search stream=` undo predictors.**
   A stream with a PNG or TIFF `/Predictor` in its `/DecodeParms` came out still
-  predictor-coded, labelled "decoded", with no warning.  This is how every Acrobat
+  predictor-coded, labelled “decoded”, with no warning.  This is how every Acrobat
   cross-reference stream and much image data are stored.  `/EarlyChange 0` is honoured
   too, and parameters held by reference are followed.  A predictor that is unusable, or
   does not fit the data, is a warning, with the bytes as the filter left them.  (bug-0004)
@@ -90,14 +97,14 @@ Obsidian-Brain's mail gate:
   after it was lost with verdict `reliable` and exit 0.  `--text`, `--text --layout`
   and `--find-text` now warn, and exit 3 with a `degraded` verdict, and so do a content
   stream or form that will not decode.  `--operators` and `--object` warn, `--validate`
-  reports it, and an annotation's appearance reads `unreliable`.  (bug-0039)
+  reports it, and an annotation’s appearance reads `unreliable`.  (bug-0039)
 - **An inline image with neither `/CS` nor `/IM` no longer crashes** `--text`,
   `--operators`, `--validate` or `--object` with a panic in lopdf.  The text after it
   now survives.
 
 ## [0.31.1] - 2026-11-04
 ### Fixed
-- CI's clippy job, on a lint newer than the toolchain v0.30.0 was built with, and CI's
+- CI’s clippy job, on a lint newer than the toolchain v0.30.0 was built with, and CI’s
   minimum-Rust job, which now names 1.92.
 
 ## [0.31.0] - 2026-11-04
@@ -112,9 +119,9 @@ Obsidian-Brain's mail gate:
   format, the pixel size and the source colour space and filter.
 - **What it cannot convert it refuses:** exit 1, naming what stopped it, and nothing
   written.  An output extension no image can be written under is exit 2; one for
-  another format than this image's is exit 1, because only the document can tell.
+  another format than this image’s is exit 1, because only the document can tell.
 - **`--images` lists inline images** with their page, index, source and offset, and
-  every image's `export_format`.  It exits 3 when a content stream could not be walked.
+  every image’s `export_format`.  It exits 3 when a content stream could not be walked.
 ### Changed
 - **Minimum Rust is 1.92,** which `hayro-jbig2` and `hayro-ccitt` require.
 
@@ -123,13 +130,13 @@ Obsidian-Brain's mail gate:
 - **`--forms` reports every value** (plan-0006).  A list value is a JSON array in
   `values`; a stream value is decoded; a value inherited from a parent field is
   reported with `inherited: true`, and a parent holding its own value is an entry
-  too; `/RV` is reported as text in `rich_value`, markup removed; a signature's
+  too; `/RV` is reported as text in `rich_value`, markup removed; a signature’s
   text is reported.  `value` stays a string in every case.
 - **`--forms` reports XFA:** `xfa`, `xfa_packets`, `xfa_datasets_text`, `xfa_decoded`.
 - **`--annotations` reads each appearance:** `appearance_text`, `appearance_state`,
   `appearance_reliability`, `appearance_warnings`, through the extractor `--text`
   uses.  `/RC` is reported as text in `rich_contents`.  A widget with no `/Resources`
-  of its own uses the form's `/DR`.
+  of its own uses the form’s `/DR`.
 - **`--annotations` lists direct annotations** as well as indirect ones
   (`object_number` is then `null`), and `/Annots` held in an indirect array.
 - **`--detail embedded` counts every attachment:** every filespec with `/EF`
@@ -139,7 +146,7 @@ Obsidian-Brain's mail gate:
   `reached_from` says which; `filespec_object` is `null` for a direct filespec.
 ### Changed
 - **Text strings are decoded as the standard says** in `--forms`, `--annotations`,
-  `--detail`, `--bookmarks`, `--tags` and the overview's metadata: the UTF-16BE mark,
+  `--detail`, `--bookmarks`, `--tags` and the overview’s metadata: the UTF-16BE mark,
   the UTF-8 mark, otherwise PDFDocEncoding, with language escapes removed.  A string
   that cannot be decoded prints as hex, never passed through lossily, and `--forms`,
   `--annotations` and `--detail embedded` also flag it in `--json`
@@ -149,20 +156,20 @@ Obsidian-Brain's mail gate:
 - **Behavior change (exit codes): `--forms` and `--annotations` can exit 3.**  A value
   or comment that will not decode, malformed rich text, unreadable XFA data, or an
   appearance verdict other than `reliable` is a finding, and `--json` still emits.  A
-  checkbox's or radio button's state is excused when all it fails on is Symbol or
+  checkbox’s or radio button’s state is excused when all it fails on is Symbol or
   ZapfDingbats, since it draws a mark, not text.
 - `--forms` prints a value in full rather than cut to 20 characters.
 
 ## [0.29.1] - 2026-11-03
 ### Changed
 - **`--extract-stream --output` checks its output path before the document is
-  read.**  A missing directory, a directory in the file's place, or a dangling
+  read.**  A missing directory, a directory in the file’s place, or a dangling
   link exits 1 naming the path, where a missing directory used to fail only after
   the document was parsed.  No directory is ever created.  An existing file is
   still replaced, as before.  (plan-0007)
 - **Adopts `cli-contract` 0.6** for the exit codes, the closed-pipe check and the
   output-file checks.  A closed pipe still exits 0 with nothing on stderr, now
-  pinned by a test, and a test holds `--help`'s exit table to the contract's.
+  pinned by a test, and a test holds `--help`’s exit table to the contract’s.
 
 ## [0.29.0] - 2026-10-01
 ### Changed
