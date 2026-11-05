@@ -12,7 +12,7 @@ the decision first (they are gathered in Phase 0 and gate their dependent code f
 **Start here (a fresh Opus instance):** work top-down through the phases below.  Within a phase,
 the order is deliberate — later items in a phase may depend on earlier ones (noted inline).  Read
 the linked `bugs/bug-NNNN-*.md` before touching code.  When a bug is fixed, delete its report in the
-fixing commit and name the bug id in the message (per `~/.claude/rules/bug-reports.md`); move a
+fixing commit and name the bug id in the message (per the house rule on bug reports); move a
 one-line stub here into a `## Done` section.
 
 Severity legend: **[CRIT]** crash from a normal invocation · **[HIGH]** silent wrong output / DoS /
@@ -154,7 +154,7 @@ corrupts the text that `--layout` positions or makes the reliability verdict its
 ## Suggested implementation sequence (why this order)
 
 1. **Phase 0 spec decisions first.** Fixing code to match a wrong or undecided contract is wasted
-   work (`~/.claude/rules/strategy-defaults.md`: spec first). bug-0019, 0004, 0033, 0020, 0009,
+   work (the house strategy defaults: spec first). bug-0019, 0004, 0033, 0020, 0009,
    0025, 0028, 0017 each need a call before their code fix.
 2. **Phase 1 crashes/DoS next** — bug-0013 aborts the _default_ command, so it is the first code
    change regardless of everything else.  The other DoS items are independent one-liners/guards.
@@ -173,7 +173,7 @@ Batch by touched file to minimize churn: `validate.rs` (0034, 0027, 0035), `stre
 
 ## Open plans
 
-Proposed changes, per `~/.claude/rules/plan-files.md`.  A separate series from the bugs above —
+Proposed changes, per the house rule on plan files.  A separate series from the bugs above —
 a bug is an obligation, a plan is an option — and this list is their ordering index, not a
 priority ruling baked into the IDs.
 

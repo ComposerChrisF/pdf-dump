@@ -39,5 +39,5 @@ trailer-referenced roots, so “(none)” only appears when nothing truly refere
 
 ## Related
 [[bug-0034-validate-dangling-root-false-negative]] — both stem from not walking the trailer; fix
-together. `~/.claude/rules/positive-evidence-of-absence.md` (“(none)” must mean “looked and found
+together.  The positive-evidence-of-absence rule (“(none)” must mean “looked and found
 none”, not “did not look at the trailer”).

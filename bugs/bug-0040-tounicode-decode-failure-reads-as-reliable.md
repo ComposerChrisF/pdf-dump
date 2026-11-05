@@ -28,4 +28,4 @@ Assert: the verdict is not `reliable`, and the exit is 3.
 Two other sites drop the warning, with smaller effects.  `summary.rs` adds bytes it could not decode to the decoded-byte total, and `validate.rs` reports “invalid syntax” for a stream it could not decode.  `search.rs` is bug-0029.
 
 ## Related
-`~/.claude/rules/positive-evidence-of-absence.md`: “a tool that could not _read_ something assumed it was _empty_”.  Found by the rust-reviewer during bug-0004’s review, 4-Nov-2026.
+The positive-evidence-of-absence rule: “a tool that could not _read_ something assumed it was _empty_”.  Found by the rust-reviewer during bug-0004’s review, 4-Nov-2026.

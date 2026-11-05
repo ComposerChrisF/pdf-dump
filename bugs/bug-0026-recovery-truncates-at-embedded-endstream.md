@@ -62,5 +62,5 @@ recovered stream is the real body (or the ambiguity is surfaced) instead of a tr
 mislabeled a successful recovery.
 
 ## Related
-`~/.claude/rules/positive-evidence-of-absence.md`: a truncated recovery reported as success is an
+The positive-evidence-of-absence rule: a truncated recovery reported as success is an
 Unknown dressed as a confident answer.  Same module’s opening-keyword guards are the model to copy.

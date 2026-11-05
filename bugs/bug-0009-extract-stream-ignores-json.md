@@ -44,5 +44,5 @@ Either honoring `--json` for extract-stream or narrowing the documented claim re
 between the docs and the behavior.
 
 ## Related
-`~/.claude/rules/strategy-defaults.md` (agent-first `--json` checklist).  Doc side overlaps with
+The house strategy defaults (agent-first `--json` checklist).  Doc side overlaps with
 [[bug-0008-docs-stale-capabilities-and-exit-codes]].

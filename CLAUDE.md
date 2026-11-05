@@ -14,7 +14,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 `pdf-dump` is a Rust CLI tool that dumps the internal object structure of a PDF file.  It uses `lopdf` for PDF parsing, `clap` (derive) for CLI arguments, `flate2` for zlib/FlateDecode stream decompression, and `weezl` for LZW decoding.
 
-For CLI usage, load the `pdf-tools` skill (`~/.claude/skills/pdf-tools/SKILL.md`), or read `DEBUGGING_WITH_PDF_DUMP.md` in this repo for the JSON schemas and the debugging decision tree.
+For CLI usage, load the global `pdf-tools` skill, or read `DEBUGGING_WITH_PDF_DUMP.md` in this repo for the JSON schemas and the debugging decision tree.
 
 ## Architecture
 

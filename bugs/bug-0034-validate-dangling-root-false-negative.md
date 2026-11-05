@@ -50,5 +50,5 @@ ERROR classification routes the run to exit 3 as the contract requires.
 
 ## Related
 [[bug-0027-reverse-refs-skip-trailer]] (both stem from not walking the trailer — fix together);
-[[bug-0035-validate-objstm-false-positive]]; `~/.claude/rules/cli-exit-codes.md` (validation errors
+[[bug-0035-validate-objstm-false-positive]]; the house rule on exit codes (validation errors
 exit 3).

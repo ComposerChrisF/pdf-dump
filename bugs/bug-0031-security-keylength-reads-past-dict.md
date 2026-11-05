@@ -59,5 +59,5 @@ Bounding the dictionary makes “key absent” resolve to the correct default (f
 the next object’s field, and the delimiter check prevents the `/P`-vs-`/Perms` mismatch.
 
 ## Related
-`~/.claude/rules/positive-evidence-of-absence.md`: an unreadable/absent key must not be read as a
+The positive-evidence-of-absence rule: an unreadable/absent key must not be read as a
 neighbor’s value.

@@ -39,5 +39,5 @@ guarantee the recovery and `--strict` contracts make: a malformed file is never 
 fine.
 
 ## Related
-`~/.claude/rules/positive-evidence-of-absence.md`, `~/.claude/rules/cli-exit-codes.md`.  Same recovery
+The positive-evidence-of-absence rule, and the house rule on exit codes.  Same recovery
 subsystem as [[bug-0026-recovery-truncates-at-embedded-endstream]].

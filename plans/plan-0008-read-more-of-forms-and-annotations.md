@@ -4,7 +4,7 @@
 
 `--forms` and `--annotations` report `/V`, `/RV`, `/Contents`, `/RC` and `/AP /N`.  A viewer shows more than that, and a caller screening a PDF’s text cannot hold on the rest without holding nearly every file: Obsidian-Brain’s `webapp/deploy/kcs-mail/mailgate.py` says holding on these would hold “every dropdown and every signed comment”.
 
-Four gaps, from Fable’s and Sol’s review of the reading limits (4-Nov-2026), and from Obsidian-Brain’s answer to its request `row:Proj/Obsidian-Brain/r0001`:
+Four gaps, from Fable’s and Sol’s review of the reading limits (4-Nov-2026), and from Obsidian-Brain’s answer to its request `Obsidian-Brain/r0001`:
 
 1. **Strings a reader sees, not reported.**  An annotation’s `/T` and `/Subj`; a field’s `/TU`, `/DV` and `/Opt` display labels; `/MK`’s `/CA`, `/RC` and `/AC`.  Fable and Sol both asked for some of these, and differ on how many.
 2. **Whether an annotation shows.**  Its `/F` flags, Hidden and NoView above all, so that a caller can tell text a viewer shows from text it hides.  Both asked for this.  Sol also wants to know whether `/AP /D` and `/AP /R` exist; Obsidian-Brain wants what they say.
@@ -13,7 +13,7 @@ Four gaps, from Fable’s and Sol’s review of the reading limits (4-Nov-2026),
 
 ## Proposed Change
 
-**Chris ruled on gaps 1 and 2 on 4-Nov-2026 (`row:App/Rust/Pdf/pdf-dump/0004`, option A):** “Both lists, as a plan after the three bugs: each string with its decode status, the flags, and presence of /D and /R”.  So this much is decided:
+**Chris ruled on gaps 1 and 2 on 4-Nov-2026 (`pdf-dump/0004`, option A):** “Both lists, as a plan after the three bugs: each string with its decode status, the flags, and presence of /D and /R”.  So this much is decided:
 
 - `--annotations` gains `author` (`/T`), `subject` (`/Subj`), `flags`, `hidden`, `has_down_appearance` and `has_rollover_appearance`.
 - `--forms` gains `tooltip` (`/TU`), `options` (`/Opt`, as `{export, label}`), and `caption` (`/MK /CA`).
