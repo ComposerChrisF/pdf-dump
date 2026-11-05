@@ -16,7 +16,7 @@ Four gaps, from Fable’s and Sol’s review of the reading limits (4-Nov-2026),
 **Chris ruled on gaps 1 and 2 on 4-Nov-2026 (`pdf-dump/0004`, option A):** “Both lists, as a plan after the three bugs: each string with its decode status, the flags, and presence of /D and /R”.  So this much is decided:
 
 - `--annotations` gains `author` (`/T`), `subject` (`/Subj`), `flags`, `hidden`, `has_down_appearance` and `has_rollover_appearance`.
-- `--forms` gains `tooltip` (`/TU`), `options` (`/Opt`, as `{export, label}`), and `caption` (`/MK /CA`).
+- `--forms` gains `tooltip` (`/TU`), `options` (`/Opt`, as `{export, label}`), and `captions` (`/MK /CA`, a list, since each widget of a field has its own).
 - Each string carries a `*_decoded` beside it, as the existing ones do, and one that will not decode exits 3.
 
 **Not ruled on, and still only proposed** (Obsidian-Brain’s asks, which went beyond the two models’ lists):
@@ -25,6 +25,8 @@ Four gaps, from Fable’s and Sol’s review of the reading limits (4-Nov-2026),
 - `--annotations`: the text of `/AP /D` and `/AP /R`, where the ruling is presence.
 - A walk climbs `/Parent` from a widget or pop-up to an entry nothing else reported, naming how it was reached, with a depth limit and a guard against cycles.
 - `strip_markup` decodes the named references XHTML defines, and keeps unknown tags inline, so that text is not split where a viewer would not split it.
+- `link_type` and `target` for an action on any annotation: a `/URI` action on a widget or a text note reports neither today, since only a `/Link` is classified.
+- An action’s `/Next` chain: a `/GoTo` with `/Next << /S /URI … >>` reports only the `/GoTo`.  It needs a limit and a guard against cycles.
 
 ## Implementation Notes
 
