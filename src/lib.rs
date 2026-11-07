@@ -103,6 +103,18 @@ pub fn run() {
         }
     }
 
+    // `--output` beside the document-level modes writes `--text` alone, as plain text.
+    let text_output = match (&resolved, args.output.as_deref()) {
+        (ResolvedMode::Combined(modes), Some(path)) => {
+            if modes.as_slice() != [DocMode::Text] || args.json {
+                eprintln!("Error: --output writes --text alone, without --json or another mode.");
+                std::process::exit(USAGE.into());
+            }
+            Some(path)
+        }
+        _ => None,
+    };
+
     // Refuse an output path that cannot work before spending time on the document.
     if let ResolvedMode::Standalone(mode) = &resolved
         && let Some(output) = mode.output()
@@ -120,6 +132,12 @@ pub fn run() {
             eprintln!("Error: {}", e);
             std::process::exit(e.exit_code().into());
         }
+    }
+    if let Some(output) = text_output
+        && let Err(e) = cli_contract::check_output_file(output, CreateMode::None, Clobber::Allow)
+    {
+        eprintln!("Error: {}", e);
+        std::process::exit(e.exit_code().into());
     }
 
     // `Document::load` auto-decrypts only with the empty password. When the user
@@ -241,20 +259,65 @@ pub fn run() {
             }
             false
         }
-        ResolvedMode::Combined(modes) => dispatch_combined(
-            &mut out,
-            &doc,
-            &config,
-            page_spec.as_ref(),
-            &args,
-            &modes,
-            recovery,
-        ),
+        ResolvedMode::Combined(modes) => match text_output {
+            // The whole text is in hand before anything reaches the file, which is replaced
+            // only by a complete one.
+            Some(path) => {
+                let mut text = Vec::new();
+                let had = dispatch_combined(
+                    &mut text,
+                    &doc,
+                    &config,
+                    page_spec.as_ref(),
+                    &args,
+                    &modes,
+                    recovery,
+                );
+                if let Err(e) = write_atomically(path, &text) {
+                    tool_error(format!("writing {}: {e}", path.display()));
+                }
+                had
+            }
+            None => dispatch_combined(
+                &mut out,
+                &doc,
+                &config,
+                page_spec.as_ref(),
+                &args,
+                &modes,
+                recovery,
+            ),
+        },
     };
 
     if had_issues || strict_malformed || encrypted_undecrypted {
         std::process::exit(FINDINGS.into());
     }
+}
+
+/// Write `bytes` to `path` whole or not at all: into a new file beside it, then renamed over it,
+/// so a run killed part way never leaves a partial file under the real name.  On failure the
+/// temporary file this call created is removed; one it could not create is never touched.
+fn write_atomically(path: &std::path::Path, bytes: &[u8]) -> io::Result<()> {
+    let name = path
+        .file_name()
+        .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "the output names no file"))?;
+    let mut temp_name = std::ffi::OsString::from(".");
+    temp_name.push(name);
+    temp_name.push(format!(".pdf-dump-{}.tmp", std::process::id()));
+    let temp = path.with_file_name(temp_name);
+    let mut file = std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(&temp)?;
+    let result = file
+        .write_all(bytes)
+        .and_then(|()| file.sync_all())
+        .and_then(|()| std::fs::rename(&temp, path));
+    if result.is_err() {
+        let _ = std::fs::remove_file(&temp);
+    }
+    result
 }
 
 /// Print a JSON root, first merging an optional top-level `recovery` diagnostic

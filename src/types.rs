@@ -130,6 +130,7 @@ pub(crate) enum ResolvedMode {
 /// Dumps the internal structure of a PDF file.
 #[derive(Parser, Debug)]
 #[command(group(ArgGroup::new("export").args(["extract_stream", "extract_image", "extract_inline_image"])))]
+#[command(group(ArgGroup::new("writes_file").multiple(true).args(["extract_stream", "extract_image", "extract_inline_image", "text"])))]
 #[command(author, version, about, long_about = None, after_long_help = "\
 Common workflows:
   pdf-dump file.pdf                      Overview (metadata + validation + stats)
@@ -170,14 +171,15 @@ Exit codes:
       is not there, or that has several generations with nothing to say which is
       live (even in a range), or an image export that cannot be done: not an image, a
       filter or colour space it cannot convert, data that will not decode, or
-      an output named for another format than the image is written in.  Nothing
-      is written then.  With --object, an explicit number that is
+      an output named for another format than the image is written in, or a
+      --text --output file that could not be written.  Nothing is written then.  With --object, an explicit number that is
       missing exits 1, and so does a range holding no objects at all; gaps
       within a range are fine.  Whatever was found is still printed
   2   Usage error: bad arguments — clap's own (unknown flag, missing required
       arg) plus semantic ones (--raw with --decode, --raw without --object,
       a malformed --page value, object number 0, an invalid --search
-      expression, an image output named other than .png, .jpg, .jpeg or .jp2)
+      expression, an image output named other than .png, .jpg, .jpeg or .jp2,
+      --text --output with --json or with another mode)
   3   Findings: the tool ran correctly but the input had problems
       (--validate found errors; the text that --text printed or --find-text
        searched was degraded or unreliable, e.g. a CID/Type0 font without a
@@ -310,9 +312,14 @@ pub(crate) struct Args {
     )]
     pub extract_inline_image: Option<(u32, u32)>,
 
-    /// Output file for extracted stream or image.  Its directory must already exist
-    /// (exit 1 otherwise, before the document is read); an existing file is replaced
-    #[arg(long, requires = "export", help_heading = "Export")]
+    /// Output file for an extracted stream or image, or for --text (with --layout and
+    /// --page as usual, but no --json and no other mode): the text stdout would carry,
+    /// byte for byte, and none of it on stdout.  Text is written to a temporary file
+    /// beside it and renamed into place, so a killed run leaves no partial file; a run
+    /// that exits 1 writes nothing, and one that exits 3 still writes the text.  Its
+    /// directory must already exist (exit 1 otherwise, before the document is read); an
+    /// existing file is replaced (a symlink by a file, for --text)
+    #[arg(long, requires = "writes_file", help_heading = "Export")]
     pub output: Option<PathBuf>,
 
     // ── Modifiers ────────────────────────────────────────────────────

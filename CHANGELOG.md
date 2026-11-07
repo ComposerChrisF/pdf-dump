@@ -5,6 +5,16 @@ All notable changes to `pdf-dump` are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0/).
 
+## [0.34.0] - 2026-11-06
+### Added
+- **`--text [--layout] [--page …] --output <file>` writes the text to a file,** the same bytes
+  stdout would carry, and none of it to stdout.  It is written to a temporary file beside the
+  output, synced, then renamed into place, so a failed run leaves no partial file and an
+  existing file is replaced whole.  A run that exits 1 writes nothing; one that exits 3
+  (degraded or unreliable text) still writes the file.  The output directory must exist, and is
+  checked before the document is read.  `--output` with `--json`, or with another mode beside
+  `--text`, is a usage error (exit 2).
+
 ## [0.33.0] - 2026-11-04
 ### Added
 - **`--annotations` reports `author` (`/T`), `subject` (`/Subj`), `flags` and `hidden`,** the

@@ -236,7 +236,7 @@ fn no_arguments_shows_error() {
 
 #[test]
 fn output_without_extract_object_fails() {
-    // --output requires --extract-stream (clap `requires` constraint)
+    // --output requires an extract flag or --text (clap `requires` constraint)
     let pdf = create_minimal_pdf();
     let output = Command::new(binary_path())
         .arg(pdf.path())
@@ -249,7 +249,7 @@ fn output_without_extract_object_fails() {
     let stderr = String::from_utf8_lossy(&output.stderr);
     assert!(
         stderr.contains("extract") || stderr.contains("required"),
-        "Should indicate --output requires --extract-stream: {}",
+        "Should indicate what --output requires: {}",
         stderr
     );
 }
@@ -4486,4 +4486,135 @@ fn a_form_value_with_an_indirect_filter_reads_as_itself() {
         "{json}"
     );
     assert_eq!(json["fields"][0]["value_decoded"], true);
+}
+
+// ── --text --output (plan-0010) ──────────────────────────────────────────────
+
+#[test]
+fn text_output_writes_what_stdout_carries_and_prints_none_of_it() {
+    let pdf = create_minimal_pdf();
+    let dir = tempfile::tempdir().unwrap();
+    for args in [&["--text"][..], &["--text", "--layout", "--page", "1"][..]] {
+        // --layout over Helvetica without /Widths is degraded (exit 3): the code must match too.
+        let stdout = run_args(&pdf, args);
+        let out = dir.path().join("file.pdf.txt");
+        let written = Command::new(binary_path())
+            .arg(pdf.path())
+            .args(args)
+            .arg("--output")
+            .arg(&out)
+            .output()
+            .unwrap();
+        assert_eq!(written.status.code(), stdout.status.code(), "{written:?}");
+        assert!(written.stdout.is_empty(), "stdout: {:?}", written.stdout);
+        assert!(String::from_utf8_lossy(&stdout.stdout).contains("Hello"));
+        assert_eq!(fs::read(&out).unwrap(), stdout.stdout, "{args:?}");
+    }
+}
+
+#[test]
+fn text_output_degraded_exits_3_and_still_writes_the_file() {
+    let pdf = create_pdf_with_font(degraded_font_dict(), None, b"BT /F1 12 Tf (Hi) Tj ET");
+    let dir = tempfile::tempdir().unwrap();
+    let out = dir.path().join("out.txt");
+    let output = Command::new(binary_path())
+        .arg(pdf.path())
+        .args(["--text", "--output"])
+        .arg(&out)
+        .output()
+        .unwrap();
+    assert_eq!(output.status.code(), Some(3), "{output:?}");
+    assert!(String::from_utf8_lossy(&output.stderr).contains("DEGRADED"));
+    assert!(output.stdout.is_empty());
+    assert!(fs::read_to_string(&out).unwrap().contains("Hi"));
+}
+
+#[test]
+fn text_output_replaces_an_existing_file_and_leaves_no_temporary() {
+    let pdf = create_minimal_pdf();
+    let dir = tempfile::tempdir().unwrap();
+    let out = dir.path().join("out.txt");
+    fs::write(
+        &out,
+        "old content, much longer than the text that replaces it ".repeat(20),
+    )
+    .unwrap();
+    let output = run_args(&pdf, &["--text", "--output", out.to_str().unwrap()]);
+    assert_eq!(output.status.code(), Some(0), "{output:?}");
+    assert_eq!(fs::read(&out).unwrap(), run_args(&pdf, &["--text"]).stdout);
+    let names: Vec<_> = fs::read_dir(dir.path())
+        .unwrap()
+        .map(|e| e.unwrap().file_name())
+        .collect();
+    assert_eq!(names, vec![std::ffi::OsString::from("out.txt")]);
+}
+
+#[test]
+fn text_output_exit_1_writes_nothing_and_keeps_an_existing_file() {
+    let pdf = create_minimal_pdf();
+    let dir = tempfile::tempdir().unwrap();
+    let out = dir.path().join("out.txt");
+    fs::write(&out, "kept").unwrap();
+    let output = run_args(
+        &pdf,
+        &["--text", "--page", "9", "--output", out.to_str().unwrap()],
+    );
+    assert_eq!(output.status.code(), Some(1), "{output:?}");
+    assert_eq!(fs::read_to_string(&out).unwrap(), "kept");
+
+    let fresh = dir.path().join("fresh.txt");
+    let bad = dir.path().join("corrupt.pdf");
+    fs::write(&bad, b"not a pdf").unwrap();
+    let output = Command::new(binary_path())
+        .arg(&bad)
+        .args(["--text", "--output"])
+        .arg(&fresh)
+        .output()
+        .unwrap();
+    assert_eq!(output.status.code(), Some(1), "{output:?}");
+    assert!(!fresh.exists(), "exit 1 must write no file");
+    assert_eq!(
+        fs::read_dir(dir.path()).unwrap().count(),
+        2,
+        "no temporary left"
+    );
+}
+
+#[test]
+fn text_output_missing_dir_is_refused_before_the_document_is_read() {
+    let dir = tempfile::tempdir().unwrap();
+    let out = dir.path().join("absent/out.txt");
+    let bad = dir.path().join("corrupt.pdf");
+    fs::write(&bad, b"not a pdf").unwrap();
+    let output = Command::new(binary_path())
+        .arg(&bad)
+        .args(["--text", "--output"])
+        .arg(&out)
+        .output()
+        .unwrap();
+    assert_eq!(output.status.code(), Some(1));
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(stderr.contains("absent"), "stderr: {stderr}");
+    assert!(!stderr.contains("Failed to load"), "stderr: {stderr}");
+    assert!(
+        !dir.path().join("absent").exists(),
+        "must create no directory"
+    );
+}
+
+#[test]
+fn text_output_with_json_or_another_mode_is_a_usage_error() {
+    let pdf = create_minimal_pdf();
+    let dir = tempfile::tempdir().unwrap();
+    let out = dir.path().join("out.txt");
+    let out = out.to_str().unwrap();
+    for args in [
+        &["--text", "--json", "--output", out][..],
+        &["--text", "--fonts", "--output", out][..],
+        &["--fonts", "--output", out][..],
+    ] {
+        let output = run_args(&pdf, args);
+        assert_eq!(output.status.code(), Some(2), "{args:?}: {output:?}");
+    }
+    assert!(!dir.path().join("out.txt").exists());
 }

@@ -35,6 +35,7 @@ Use `pdf-dump` instead of writing Python/shell scripts to inspect PDF internals.
 | Search decoded stream content | `pdf-dump f.pdf --search "stream=text"` |
 | Regex search | `pdf-dump f.pdf --search "regex=D:20(23\|24)"` |
 | Extract stream to file | `pdf-dump f.pdf --extract-stream 12 --output out.bin` (the directory must exist; an existing file is replaced) |
+| Write the text to a file, never through stdout | `pdf-dump f.pdf --text --output f.txt` (also with `--layout`, `--page`; atomic, nothing written on exit 1, still written on exit 3; not with `--json`) |
 | Write an image a viewer or OCR engine opens | `pdf-dump f.pdf --extract-image 12 --output a.png`, or `--extract-inline-image 3:1` for an inline image (see `--images --json`) |
 | GraphViz DOT graph | `pdf-dump f.pdf --tree --dot` |
 | Any of the above as JSON | Add `--json` to any command |

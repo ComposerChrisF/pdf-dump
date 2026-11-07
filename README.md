@@ -89,6 +89,10 @@ Positions honor the CTM, form XObject `/Matrix`, `/Rotate` and the CropBox origi
 
 Why not just use `pdftotext -layout`?  It does most of this, but it gives no verdict.  It has no reliable/degraded distinction and no exit 3 for undecodable fonts, so an extraction that silently mangled the account-number line looks exactly like a clean one.  A pipeline that must not pass bad text on (such as id-redact, which redacts identifiers from extracted statements) depends on being told when extraction cannot be trusted.  That verdict is what `--layout` adds.
 
+### Text to a file (`--text --output`)
+
+`--text --output file.txt` (with `--layout` and `--page` as usual) writes the text to a file instead of stdout, byte for byte what stdout would carry, so sensitive text never passes through a stream a build tool captures.  It is written to a temporary file beside the output and renamed into place, so a killed run leaves no partial file.  Exit 1 writes nothing; exit 3 (degraded or unreliable text) still writes it, as stdout gets it.  The directory must exist, and an existing file is replaced.  `--output` with `--json` or another mode is a usage error (exit 2).
+
 ### Lenient stream recovery (and `--strict`)
 
 pdf-dump is a tolerant reader by default.  When a content stream declares a wrong `/Length`, a strict parser fails to find `endstream`, drops the body, and the page text silently vanishes; pdf-dump instead re-reads the raw file, recovers the true body by scanning to `endstream`, and carries on.  Every recovery is announced loudly on **stderr** and, in `--json` mode, surfaced as a top-level `recovery` object — `{repaired, strict, count, streams: [{object, generation, file_offset, declared_length, actual_length}]}` — so machine consumers never mistake repaired output for the original document.  The key is absent for well-formed PDFs, and recovery keeps the default exit code **0**.
