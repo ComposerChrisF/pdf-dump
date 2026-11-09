@@ -34,6 +34,7 @@ macro_rules! w {
     };
 }
 
+pub(crate) mod afm;
 pub(crate) mod annotations;
 pub(crate) mod bookmarks;
 pub(crate) mod cmap;

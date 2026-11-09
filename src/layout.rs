@@ -1710,23 +1710,87 @@ mod tests {
 
     // ── Reliability ─────────────────────────────────────────────────────
 
+    /// Helvetica’s AFM width for a WinAnsi code, in glyph space.
+    fn helvetica_width(code: u8) -> i64 {
+        let name = crate::afm::encoding("WinAnsiEncoding").unwrap()[code as usize].unwrap();
+        i64::from(
+            crate::afm::core14("Helvetica")
+                .unwrap()
+                .width(name)
+                .unwrap(),
+        )
+    }
+
+    /// Each glyph in its own `BT … Tm … Tj ET` at its true Helvetica advance,
+    /// words one space apart and with no space glyph: a statement generator’s
+    /// way of drawing text.
+    fn glyph_by_glyph(rows: &[(f64, &str)]) -> String {
+        let mut content = String::new();
+        for (y, row) in rows {
+            let mut x = 50.0;
+            for word in row.split(' ') {
+                for c in word.bytes() {
+                    content.push_str(&at(x, *y, &(c as char).to_string()));
+                    x += helvetica_width(c) as f64 / 100.0;
+                }
+                x += helvetica_width(b' ') as f64 / 100.0;
+            }
+        }
+        content
+    }
+
     #[test]
-    fn standard_14_without_widths_is_degraded_under_layout_only() {
+    fn standard_14_without_widths_lays_out_as_with_its_real_widths() {
+        let rows = [(700.0, "Statement Period"), (680.0, "Account 1234 5678")];
+        let content = glyph_by_glyph(&rows);
+        let mut bare = Dictionary::new();
+        bare.set("Type", Object::Name(b"Font".to_vec()));
+        bare.set("Subtype", Object::Name(b"Type1".to_vec()));
+        bare.set("BaseFont", Object::Name(b"Helvetica".to_vec()));
+        bare.set("Encoding", Object::Name(b"WinAnsiEncoding".to_vec()));
+        let without = fixture(bare, content.as_bytes(), None, &[]);
+        let with = fixture(
+            font_with_widths("Helvetica", helvetica_width),
+            content.as_bytes(),
+            None,
+            &[],
+        );
+        let (json, had_issues) = layout_json_value(&without.doc, None, None);
+        assert_eq!(json["reliability"]["verdict"], "reliable", "{json}");
+        assert!(!had_issues);
+        let (json_with, _) = layout_json_value(&with.doc, None, None);
+        assert_eq!(json["pages"][0]["text"], json_with["pages"][0]["text"]);
+        // Words stay whole: no space after a wide capital or an `m`.
+        let page = layout(&without);
+        let words: Vec<Vec<&str>> = lines(&page)
+            .iter()
+            .map(|l| l.split_whitespace().collect())
+            .collect();
+        assert_eq!(
+            words,
+            [vec!["Statement", "Period"], vec!["Account", "1234", "5678"]]
+        );
+    }
+
+    #[test]
+    fn a_differences_glyph_the_afm_lacks_degrades_the_standard_14_font() {
+        let mut enc = Dictionary::new();
+        enc.set(
+            "Differences",
+            // The AGL knows Alpha, so text decodes; Helvetica has no such glyph.
+            Object::Array(vec![Object::Integer(65), Object::Name(b"Alpha".to_vec())]),
+        );
         let mut helv = Dictionary::new();
         helv.set("Type", Object::Name(b"Font".to_vec()));
         helv.set("Subtype", Object::Name(b"Type1".to_vec()));
         helv.set("BaseFont", Object::Name(b"Helvetica".to_vec()));
-        let f = fixture(helv, at(50.0, 700.0, "Hi").as_bytes(), None, &[]);
+        helv.set("Encoding", Object::Dictionary(enc));
+        let f = fixture(helv, at(50.0, 700.0, "AB").as_bytes(), None, &[]);
         let (json, had_issues) = layout_json_value(&f.doc, None, None);
         assert_eq!(json["reliability"]["verdict"], "degraded", "{json}");
         assert!(had_issues, "degraded layout must exit 3");
         let reason = json["reliability"]["fonts"][0]["reason"].as_str().unwrap();
         assert!(reason.contains("AFM"), "{reason}");
-        // The text is still extracted, and plain --text is unaffected.
-        assert_eq!(json["pages"][0]["text"], "Hi");
-        let (plain, plain_issues) = crate::text::text_json_value(&f.doc, None);
-        assert_eq!(plain["reliability"]["verdict"], "reliable");
-        assert!(!plain_issues);
     }
 
     #[test]

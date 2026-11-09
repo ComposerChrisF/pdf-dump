@@ -4022,17 +4022,30 @@ fn layout_json_reports_page_geometry() {
 
 #[test]
 fn layout_with_unknown_widths_exits_3_and_still_prints() {
-    let mut helv = Dictionary::new();
-    helv.set("Type", Object::Name(b"Font".to_vec()));
-    helv.set("Subtype", Object::Name(b"Type1".to_vec()));
-    helv.set("BaseFont", Object::Name(b"Helvetica".to_vec()));
-    let pdf = create_pdf_with_font(helv, None, b"BT /F1 10 Tf 50 700 Td (Hello) Tj ET");
+    let font = |base: &[u8]| {
+        let mut font = Dictionary::new();
+        font.set("Type", Object::Name(b"Font".to_vec()));
+        font.set("Subtype", Object::Name(b"Type1".to_vec()));
+        font.set("BaseFont", Object::Name(base.to_vec()));
+        font.set("Encoding", Object::Name(b"WinAnsiEncoding".to_vec()));
+        font
+    };
+    let content = b"BT /F1 10 Tf 50 700 Td (Hello) Tj ET";
+    let pdf = create_pdf_with_font(font(b"NotAStandardFont"), None, content);
     let out = run_pdf_dump(&["--text", "--layout"], &pdf);
     assert_eq!(out.status.code(), Some(3));
     assert!(String::from_utf8_lossy(&out.stdout).contains("Hello"));
     assert!(String::from_utf8_lossy(&out.stderr).contains("DEGRADED"));
     // Plain --text of the same file stays reliable: widths only matter to layout.
     assert_eq!(run_pdf_dump(&["--text"], &pdf).status.code(), Some(0));
+    // A Standard-14 font needs no /Widths: its AFM widths are built in.
+    let helvetica = create_pdf_with_font(font(b"Helvetica"), None, content);
+    assert_eq!(
+        run_pdf_dump(&["--text", "--layout"], &helvetica)
+            .status
+            .code(),
+        Some(0)
+    );
 }
 
 #[test]
@@ -4065,14 +4078,6 @@ fn layout_agrees_with_pdftotext_word_order_where_installed() {
         return;
     };
     let _ = probe;
-    let pdf = create_pdf_with_font(mono_font_dict(), None, &statement_content());
-    let ours = run_pdf_dump(&["--text", "--layout"], &pdf);
-    let theirs = Command::new("pdftotext")
-        .args(["-layout"])
-        .arg(pdf.path())
-        .arg("-")
-        .output()
-        .unwrap();
     let words = |s: &str, skip_header: bool| -> Vec<Vec<String>> {
         s.lines()
             .filter(|l| !(skip_header && l.starts_with("--- Page")))
@@ -4080,10 +4085,64 @@ fn layout_agrees_with_pdftotext_word_order_where_installed() {
             .filter(|w| !w.is_empty())
             .collect()
     };
-    assert_eq!(
-        words(&String::from_utf8_lossy(&ours.stdout), true),
-        words(&String::from_utf8_lossy(&theirs.stdout), false)
-    );
+    for pdf in [
+        create_pdf_with_font(mono_font_dict(), None, &statement_content()),
+        create_pdf_with_font(bare_helvetica(), None, &helvetica_glyph_by_glyph()),
+    ] {
+        let ours = run_pdf_dump(&["--text", "--layout"], &pdf);
+        let theirs = Command::new("pdftotext")
+            .args(["-layout"])
+            .arg(pdf.path())
+            .arg("-")
+            .output()
+            .unwrap();
+        assert_eq!(
+            words(&String::from_utf8_lossy(&ours.stdout), true),
+            words(&String::from_utf8_lossy(&theirs.stdout), false)
+        );
+    }
+}
+
+/// Helvetica with no `/Widths`, as a Standard-14 font may be.
+fn bare_helvetica() -> Dictionary {
+    let mut font = Dictionary::new();
+    font.set("Type", Object::Name(b"Font".to_vec()));
+    font.set("Subtype", Object::Name(b"Type1".to_vec()));
+    font.set("BaseFont", Object::Name(b"Helvetica".to_vec()));
+    font.set("Encoding", Object::Name(b"WinAnsiEncoding".to_vec()));
+    font
+}
+
+/// Each glyph in its own `BT … Tm … Tj ET` at its Helvetica AFM advance, at
+/// 10 pt, words one Helvetica space apart and with no space glyph.
+fn helvetica_glyph_by_glyph() -> Vec<u8> {
+    let width = |c: u8| match c {
+        b'0'..=b'9' | b'a' | b'd' | b'e' | b'n' | b'o' | b'u' => 556,
+        b'A' | b'P' | b'S' => 667,
+        b'c' => 500,
+        b'i' => 222,
+        b'm' => 833,
+        b'r' => 333,
+        b't' | b' ' => 278,
+        _ => panic!("no width for {c}"),
+    };
+    let mut content = String::new();
+    for (y, row) in [(700, "Statement Period"), (680, "Account 1234 5678")] {
+        let mut x = 5000;
+        for c in row.bytes() {
+            if c != b' ' {
+                content.push_str(&format!(
+                    "BT /F1 10 Tf 1 0 0 1 {}.{:02} {y} Tm ({}) Tj ET\n",
+                    x / 100,
+                    x % 100,
+                    c as char
+                ));
+            }
+            // 1/1000 em at 10 pt is 1/100 pt, the unit of `x`.
+            x += width(c);
+        }
+    }
+    content.into_bytes()
 }
 
 /// bug-0004's reproduction, by way of the modes the report names.
@@ -4495,7 +4554,7 @@ fn text_output_writes_what_stdout_carries_and_prints_none_of_it() {
     let pdf = create_minimal_pdf();
     let dir = tempfile::tempdir().unwrap();
     for args in [&["--text"][..], &["--text", "--layout", "--page", "1"][..]] {
-        // --layout over Helvetica without /Widths is degraded (exit 3): the code must match too.
+        // The exit code must match too, whatever the verdict.
         let stdout = run_args(&pdf, args);
         let out = dir.path().join("file.pdf.txt");
         let written = Command::new(binary_path())

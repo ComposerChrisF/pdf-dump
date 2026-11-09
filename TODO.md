@@ -174,10 +174,6 @@ Proposed changes, per the house rule on plan files.  A separate series from the 
 a bug is an obligation, a plan is an option — and this list is their ordering index, not a
 priority ruling baked into the IDs.
 
-- [ ] **plan-0004** Built-in AFM widths for the Standard-14 fonts, so `--layout` stops Degrading a
-      Helvetica/Times/Courier with no `/Widths`.  Split from plan-0002 (implemented v0.26.0).
-      Quality, not a blocker: id-redact accepts the fail-closed interim.
-      `plans/plan-0004-standard-14-afm-widths.md`
 - [ ] **plan-0003** Public library API for text extraction (typed verdict, no printing, no exit;
       the CLI becomes its consumer).  **Low priority**: id-redact’s in-process PDF path is its last
       phase (Chris 2026-09-23).  `plans/plan-0003-library-text-api.md`

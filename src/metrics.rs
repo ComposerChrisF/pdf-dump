@@ -15,15 +15,15 @@
 //!   indexed by CID.  Only the `Identity-H`/`Identity-V` encodings map code → CID
 //!   without a CMap table, so any other `/Encoding` leaves the widths unknown.
 //!
-//! Standard-14 fonts may legally omit `/Widths`, relying on the reader’s built-in
-//! AFM metrics.  pdf-dump does not embed those tables yet, so such a font is
-//! `Unknown` for now: the fail-closed state id-redact accepts until
-//! `plans/plan-0004-standard-14-afm-widths.md` embeds them.
+//! - Standard-14 fonts with no `/Widths` (§9.6.2.2): Adobe’s AFM widths
+//!   (`afm.rs`), reached by glyph name through the font’s effective encoding.  A
+//!   code whose glyph the AFM does not have is unknown.
 
 use lopdf::{Document, Object};
 use std::borrow::Cow;
 use std::collections::HashMap;
 
+use crate::afm;
 use crate::helpers;
 
 /// The widths source for one font.
@@ -54,6 +54,9 @@ enum MetricsKind {
         /// for Type3.
         scale: f64,
     },
+    /// A Standard-14 font without `/Widths`: one entry per code, `None` where
+    /// the code names no glyph the font’s AFM has.
+    Afm(Box<[Option<f64>; 256]>),
     Cid {
         default: f64,
         widths: HashMap<u32, f64>,
@@ -94,6 +97,12 @@ impl FontMetrics {
                 };
                 Ok(w * scale)
             }
+            MetricsKind::Afm(widths) => usize::try_from(code)
+                .ok()
+                .and_then(|i| widths.get(i).copied().flatten())
+                .ok_or(Cow::Borrowed(
+                    "a code whose glyph has no width in the Standard-14 font’s AFM metrics",
+                )),
             MetricsKind::Cid {
                 default,
                 widths,
@@ -175,16 +184,15 @@ pub(crate) fn font_metrics(doc: &Document, dict: &lopdf::Dictionary) -> FontMetr
 
     let Some(widths) = array_of(doc, dict, b"Widths") else {
         let base_font = name_of(doc, dict, b"BaseFont").unwrap_or_default();
-        return if crate::text::STANDARD_14_TEXT.contains(&base_font.as_str())
-            || base_font == "Symbol"
-            || base_font == "ZapfDingbats"
-        {
-            unknown(format!(
-                "Standard-14 font {base_font} has no /Widths and pdf-dump does not yet embed \
-                 the built-in AFM metrics; positions are estimated"
-            ))
-        } else {
-            unknown("font has no /Widths; positions are estimated".to_string())
+        return match afm::core14(&base_font) {
+            Some(font) if subtype != "Type3" => match afm_widths(doc, dict, font) {
+                Ok(widths) => simple(MetricsKind::Afm(widths)),
+                Err(reason) => unknown(format!(
+                    "Standard-14 font {base_font} has no /Widths and {reason}; \
+                     positions are estimated"
+                )),
+            },
+            _ => unknown("font has no /Widths; positions are estimated".to_string()),
         };
     };
     // `/FirstChar` is required alongside `/Widths`; guessing it would shift
@@ -214,6 +222,55 @@ pub(crate) fn font_metrics(doc: &Document, dict: &lopdf::Dictionary) -> FontMetr
         missing,
         scale,
     })
+}
+
+/// Each code’s AFM width, through the font’s effective encoding: its named
+/// base encoding (or its builtin one), with `/Differences` on top.  `Err` when
+/// the base encoding is one pdf-dump has no glyph names for.
+fn afm_widths(
+    doc: &Document,
+    dict: &lopdf::Dictionary,
+    font: &afm::Core14Font,
+) -> Result<Box<[Option<f64>; 256]>, String> {
+    let encoding = dict.get(b"Encoding").ok().map(|enc| match enc {
+        Object::Reference(id) => doc.get_object(*id).unwrap_or(enc),
+        other => other,
+    });
+    let (base, differences) = match encoding {
+        None => (None, None),
+        Some(Object::Dictionary(d)) => (
+            name_of(doc, d, b"BaseEncoding"),
+            array_of(doc, d, b"Differences"),
+        ),
+        Some(other) => match helpers::name_to_string(other) {
+            Some(name) => (Some(name), None),
+            None => return Err("its /Encoding is neither a name nor a dictionary".to_string()),
+        },
+    };
+    let names = match base.as_deref() {
+        None => &font.builtin,
+        Some(name) => afm::encoding(name)
+            .ok_or_else(|| format!("pdf-dump has no glyph names for its /Encoding {name}"))?,
+    };
+    let width = |name: &str| font.width(name).map(|w| f64::from(w) / 1000.0);
+    let mut widths = Box::new([None; 256]);
+    for (slot, name) in widths.iter_mut().zip(names) {
+        *slot = name.and_then(width);
+    }
+    // `/Differences` renames codes from each integer onward; a glyph name the
+    // AFM lacks leaves its code unknown.
+    let mut code: i64 = 0;
+    for item in differences.unwrap_or_default() {
+        if let Object::Name(glyph) = item {
+            if let Some(slot) = usize::try_from(code).ok().and_then(|i| widths.get_mut(i)) {
+                *slot = std::str::from_utf8(glyph).ok().and_then(width);
+            }
+            code += 1;
+        } else if let Some(n) = number(item) {
+            code = n as i64;
+        }
+    }
+    Ok(widths)
 }
 
 fn type0_metrics(doc: &Document, dict: &lopdf::Dictionary) -> FontMetrics {
@@ -375,14 +432,80 @@ mod tests {
         assert!(m.advance(32).unwrap_err().contains("MissingWidth"));
     }
 
-    #[test]
-    fn standard_14_without_widths_is_unknown_never_invented() {
-        let doc = Document::new();
+    fn base14(base_font: &str, encoding: Option<Object>) -> Dictionary {
         let mut font = Dictionary::new();
         font.set("Subtype", Object::Name(b"Type1".to_vec()));
-        font.set("BaseFont", Object::Name(b"Helvetica".to_vec()));
-        let m = font_metrics(&doc, &font);
-        assert!(m.advance(65).unwrap_err().contains("AFM"));
+        font.set("BaseFont", Object::Name(base_font.as_bytes().to_vec()));
+        if let Some(enc) = encoding {
+            font.set("Encoding", enc);
+        }
+        font
+    }
+
+    #[test]
+    fn standard_14_without_widths_takes_the_afm_widths() {
+        let doc = Document::new();
+        let m = font_metrics(&doc, &base14("Helvetica", None));
+        assert_close(m.advance(u32::from(b'a')), 0.556);
+        assert_close(m.advance(u32::from(b'm')), 0.833);
+        assert_close(m.advance(32), 0.278);
+        // StandardEncoding is the builtin: 0x27 is quoteright (222), not quotesingle.
+        assert_close(m.advance(0x27), 0.222);
+        assert!(
+            m.advance(0x7F).unwrap_err().contains("AFM"),
+            "no glyph at 0x7F"
+        );
+        assert!(m.advance(256).is_err());
+        let symbol = font_metrics(&doc, &base14("Symbol", None));
+        assert_close(symbol.advance(u32::from(b'A')), 0.722); // Alpha
+    }
+
+    #[test]
+    fn standard_14_afm_widths_follow_a_named_encoding() {
+        let doc = Document::new();
+        let winansi = Object::Name(b"WinAnsiEncoding".to_vec());
+        let m = font_metrics(&doc, &base14("Helvetica", Some(winansi)));
+        assert_close(m.advance(0x27), 0.191); // quotesingle
+        assert_close(m.advance(0x80), 0.556); // Euro
+        let expert = Object::Name(b"MacExpertEncoding".to_vec());
+        let m = font_metrics(&doc, &base14("Helvetica", Some(expert)));
+        assert!(
+            m.advance(u32::from(b'a'))
+                .unwrap_err()
+                .contains("MacExpertEncoding")
+        );
+    }
+
+    #[test]
+    fn differences_rename_codes_and_a_glyph_the_afm_lacks_is_unknown() {
+        let doc = Document::new();
+        let mut enc = Dictionary::new();
+        enc.set("BaseEncoding", Object::Name(b"WinAnsiEncoding".to_vec()));
+        enc.set(
+            "Differences",
+            Object::Array(vec![
+                Object::Integer(65),
+                Object::Name(b"m".to_vec()),
+                Object::Name(b"g0042".to_vec()),
+            ]),
+        );
+        let m = font_metrics(&doc, &base14("Helvetica", Some(Object::Dictionary(enc))));
+        assert_close(m.advance(65), 0.833);
+        assert!(m.advance(66).unwrap_err().contains("AFM"));
+        assert_close(m.advance(67), 0.722); // C, untouched
+    }
+
+    #[test]
+    fn subset_prefixed_standard_14_resolves_and_other_fonts_stay_unknown() {
+        let doc = Document::new();
+        let m = font_metrics(&doc, &base14("ABCDEF+Helvetica-Bold", None));
+        assert_close(m.advance(u32::from(b'M')), 0.833);
+        let m = font_metrics(&doc, &base14("Arial", None));
+        assert!(
+            m.advance(u32::from(b'a'))
+                .unwrap_err()
+                .contains("no /Widths")
+        );
     }
 
     #[test]

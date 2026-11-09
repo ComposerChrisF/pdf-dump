@@ -5,6 +5,21 @@ All notable changes to `pdf-dump` are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0/).
 
+## [0.35.0] - 2026-11-08
+### Added
+- **A Standard-14 font that omits `/Widths` takes Adobe’s Core 14 AFM widths under
+  `--text --layout`** (Courier, Helvetica and Times in four styles each, Symbol, ZapfDingbats).
+  A glyph is reached by name through the font’s encoding: a named WinAnsi, MacRoman or Standard
+  base, or the font’s builtin encoding, with `/Differences` applied on top.  A subset prefix is
+  stripped from the `/BaseFont`; no aliases are recognised.  A glyph missing from the AFM, or an
+  encoding with no glyph-name table (MacExpertEncoding, for one), stays unknown and degrades the
+  verdict (exit 3) as before.
+- Such fonts were always degraded and placed with a 0.5 em guess, so text drawn glyph by glyph
+  in them gained a space after every wide glyph (capitals, `m`, `w`).  They now lay out with true
+  widths.  Plain `--text` is unchanged.  The request came from id-redact, on a real case.
+- `src/core14.txt` keeps Adobe’s copyright notices and the AFM notice; the README License
+  section says so.
+
 ## [0.34.0] - 2026-11-06
 ### Added
 - **`--text [--layout] [--page …] --output <file>` writes the text to a file,** the same bytes
