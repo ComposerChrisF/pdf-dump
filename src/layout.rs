@@ -27,7 +27,13 @@
 //!
 //! Glyphs that are not left-to-right horizontal in visual space (rotated labels,
 //! vertical writing) are not spliced into rows; they follow the grid under a
-//! `[non-horizontal text]` line, in content order.  Glyphs positioned outside the
+//! `[non-horizontal text]` line.  There they are laid out by direction (plan-0011,
+//! implemented in v0.36.0): the glyphs of each baseline direction, in whole
+//! degrees, are turned into that direction’s own frame and form a small grid of
+//! their own, by the same chunk and line rules, so a rotated block drawn glyph by
+//! glyph keeps its words and lines.  Glyphs no frame can turn to read left to
+//! right (vertical writing, mirrored text) follow in content order, one line per
+//! show-string.  Glyphs positioned outside the
 //! CropBox (or at a non-finite position) follow under `[off-page text]`: shown,
 //! never dropped, and never allowed to stretch a line.
 //!
@@ -331,6 +337,20 @@ struct Glyph {
     word_gap: f64,
     text: String,
     placement: Placement,
+    /// For a non-horizontal glyph, the same glyph in its direction’s own
+    /// baseline frame; `None` when it fits none (vertical writing, mirrored text).
+    turned: Option<Turned>,
+}
+
+/// A non-horizontal glyph turned into the baseline frame of its direction,
+/// so that its text runs left to right there.
+#[derive(Clone, Copy, Debug)]
+struct Turned {
+    /// The baseline direction in visual space, in whole degrees counterclockwise.
+    angle: i32,
+    x: f64,
+    end_x: f64,
+    y: f64,
 }
 
 /// Accumulators for one page.
@@ -696,7 +716,7 @@ fn show(
                 let p = trm.point(0.0, 0.0);
                 frame.point(p.0, p.1)
             };
-            let (ex, _) = {
+            let (ex, ey) = {
                 let p = trm.point(w0, 0.0);
                 frame.point(p.0, p.1)
             };
@@ -704,10 +724,11 @@ fn show(
                 let v = trm.vector(1.0, 0.0);
                 frame.vector(v.0, v.1)
             };
-            let size = {
+            let (ux, uy) = {
                 let v = trm.vector(0.0, 1.0);
-                v.0.hypot(v.1)
+                frame.vector(v.0, v.1)
             };
+            let size = ux.hypot(uy);
             let margin = size.max(1.0);
             let on_page = [ox, oy, ex, size].iter().all(|v| v.is_finite())
                 && (-margin..=page_w + margin).contains(&ox)
@@ -719,6 +740,24 @@ fn show(
             } else {
                 Placement::NonHorizontal
             };
+            // A right-handed frame (up to the left of the baseline) can be turned
+            // to read left to right; a mirrored one cannot.
+            let turned = (placement == Placement::NonHorizontal
+                && !metrics.vertical
+                && dx * uy - dy * ux > 0.0
+                && ey.is_finite())
+            .then(|| {
+                let angle = (dy.atan2(dx).to_degrees().round() as i32).rem_euclid(360);
+                let (sin, cos) = f64::from(angle).to_radians().sin_cos();
+                let turn = |x: f64, y: f64| (x * cos + y * sin, y * cos - x * sin);
+                let ((x0, y), (x1, _)) = (turn(ox, oy), turn(ex, ey));
+                Turned {
+                    angle,
+                    x: x0.min(x1),
+                    end_x: x0.max(x1),
+                    y,
+                }
+            });
             state.glyphs.push(Glyph {
                 seq: state.glyphs.len(),
                 string,
@@ -729,6 +768,7 @@ fn show(
                 word_gap: WORD_GAP_FRACTION * space * dx.hypot(dy),
                 text: decoded.to_string(),
                 placement,
+                turned,
             });
             let word = if nbytes == 1 && code == 32 {
                 gs.word_spacing
@@ -928,10 +968,94 @@ fn side_section(glyphs: &[Glyph], placement: Placement) -> Vec<String> {
         .collect()
 }
 
+/// The non-horizontal glyphs, laid out by direction.  Each direction’s glyphs,
+/// turned into its own baseline frame, form a small grid of their own, in the
+/// order of the direction’s first glyph; glyphs that fit no frame follow in
+/// content order, one line per show-string.
+fn non_horizontal_section(glyphs: &[Glyph], cell_override: Option<f64>) -> Vec<String> {
+    let mut groups: Vec<(i32, Vec<Glyph>)> = Vec::new();
+    let mut rest: Vec<Glyph> = Vec::new();
+    for g in glyphs
+        .iter()
+        .filter(|g| g.placement == Placement::NonHorizontal)
+    {
+        let Some(t) = g.turned else {
+            rest.push(g.clone());
+            continue;
+        };
+        let turned = Glyph {
+            x: t.x,
+            end_x: t.end_x,
+            y: t.y,
+            placement: Placement::Grid,
+            turned: None,
+            ..g.clone()
+        };
+        match groups.iter_mut().find(|(angle, _)| *angle == t.angle) {
+            Some((_, group)) => group.push(turned),
+            None => groups.push((t.angle, vec![turned])),
+        }
+    }
+    let mut out = Vec::new();
+    for (_, mut group) in groups {
+        // `render_line` clamps negative columns to 0, so start the group at x = 0.
+        let left = group.iter().map(|g| g.x).fold(f64::INFINITY, f64::min);
+        for g in &mut group {
+            g.x -= left;
+            g.end_x -= left;
+        }
+        let cell = cell_override
+            .unwrap_or_else(|| grid_cell(&group))
+            .max(MIN_CELL);
+        out.extend(grid_lines(&group, cell).lines().map(str::to_string));
+    }
+    out.extend(side_section(&rest, Placement::NonHorizontal));
+    out
+}
+
 fn render_grid(glyphs: &[Glyph], cell_override: Option<f64>) -> Grid {
     let cell = cell_override
         .unwrap_or_else(|| grid_cell(glyphs))
         .max(MIN_CELL);
+    let mut text = grid_lines(glyphs, cell);
+
+    let mut counts = [0usize; 2];
+    for (i, (placement, marker)) in [
+        (Placement::NonHorizontal, NON_HORIZONTAL_MARKER),
+        (Placement::OffPage, OFF_PAGE_MARKER),
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        counts[i] = glyphs.iter().filter(|g| g.placement == placement).count();
+        if counts[i] == 0 {
+            continue;
+        }
+        if !text.is_empty() {
+            text.push('\n');
+        }
+        text.push_str(marker);
+        let runs = match placement {
+            Placement::NonHorizontal => non_horizontal_section(glyphs, cell_override),
+            _ => side_section(glyphs, placement),
+        };
+        for run in runs {
+            text.push('\n');
+            text.push_str(&run);
+        }
+    }
+    Grid {
+        text,
+        cell,
+        non_horizontal: counts[0],
+        off_page: counts[1],
+    }
+}
+
+/// The grid glyphs as lines of text: chunks clustered into lines by baseline,
+/// top to bottom, each laid onto columns of width `cell`, with the empty lines
+/// at the top and bottom dropped and the shared left margin shifted out.
+fn grid_lines(glyphs: &[Glyph], cell: f64) -> String {
     let mut chunks = build_chunks(glyphs);
 
     // Top to bottom, then left to right.
@@ -970,39 +1094,10 @@ fn render_grid(glyphs: &[Glyph], cell_override: Option<f64>) -> Grid {
         .map(|l| l.len() - l.trim_start_matches(' ').len())
         .min()
         .unwrap_or(0);
-    let mut text = out
-        .iter()
+    out.iter()
         .map(|l| l.get(margin..).unwrap_or(""))
         .collect::<Vec<_>>()
-        .join("\n");
-
-    let mut counts = [0usize; 2];
-    for (i, (placement, marker)) in [
-        (Placement::NonHorizontal, NON_HORIZONTAL_MARKER),
-        (Placement::OffPage, OFF_PAGE_MARKER),
-    ]
-    .into_iter()
-    .enumerate()
-    {
-        counts[i] = glyphs.iter().filter(|g| g.placement == placement).count();
-        if counts[i] == 0 {
-            continue;
-        }
-        if !text.is_empty() {
-            text.push('\n');
-        }
-        text.push_str(marker);
-        for run in side_section(glyphs, placement) {
-            text.push('\n');
-            text.push_str(&run);
-        }
-    }
-    Grid {
-        text,
-        cell,
-        non_horizontal: counts[0],
-        off_page: counts[1],
-    }
+        .join("\n")
 }
 
 /// Drop a chunk that repeats an earlier chunk’s text at (nearly) the same spot:
@@ -1487,6 +1582,111 @@ mod tests {
         let page = layout(&f);
         assert_eq!(lines(&page), ["Body", NON_HORIZONTAL_MARKER, "Label"]);
         assert_eq!(page.non_horizontal_glyphs, 5);
+    }
+
+    /// Like `glyph_by_glyph`, but each glyph is drawn with the text matrix
+    /// `[a b c d]`: rows are `(x, y, text)`, and the glyphs of a row advance
+    /// from `(x, y)` along `(a, b)` at their true Helvetica advance.
+    fn turned_glyph_by_glyph(m: [f64; 4], rows: &[(f64, f64, &str)]) -> String {
+        let [a, b, c, d] = m;
+        let mut content = String::new();
+        for (x0, y0, row) in rows {
+            let mut s = 0.0;
+            for word in row.split(' ') {
+                for ch in word.bytes() {
+                    let (x, y) = (x0 + a * s, y0 + b * s);
+                    let escape = if b"()\\".contains(&ch) { "\\" } else { "" };
+                    content += &format!(
+                        "BT /F1 10 Tf {a} {b} {c} {d} {x} {y} Tm ({escape}{}) Tj ET\n",
+                        ch as char
+                    );
+                    s += helvetica_width(ch) as f64 / 100.0;
+                }
+                s += helvetica_width(b' ') as f64 / 100.0;
+            }
+        }
+        content
+    }
+
+    fn words(lines: &[&str]) -> Vec<Vec<String>> {
+        lines
+            .iter()
+            .map(|l| l.split_whitespace().map(str::to_string).collect())
+            .collect()
+    }
+
+    #[test]
+    fn rotated_text_drawn_glyph_by_glyph_keeps_its_words_and_lines() {
+        let mut content = at(50.0, 700.0, "Statement Period");
+        // Up the page (90° counterclockwise): the first line is the leftmost.
+        content += &turned_glyph_by_glyph(
+            [0.0, 1.0, -1.0, 0.0],
+            &[
+                (40.0, 300.0, "Jane Q Sample"),
+                (52.0, 300.0, "123 Main St"),
+                (64.0, 300.0, "Kona HI 96740"),
+            ],
+        );
+        // Down the page (270°): the first line is the rightmost.
+        content += &turned_glyph_by_glyph([0.0, -1.0, 1.0, 0.0], &[(580.0, 500.0, "Dollars ($)")]);
+        let f = fixture(
+            font_with_widths("Helvetica", helvetica_width),
+            content.as_bytes(),
+            None,
+            &[],
+        );
+        let page = layout(&f);
+        let all = lines(&page);
+        assert_eq!(all[..2], ["Statement Period", NON_HORIZONTAL_MARKER]);
+        assert_eq!(
+            words(&all[2..]),
+            [
+                vec!["Jane", "Q", "Sample"],
+                vec!["123", "Main", "St"],
+                vec!["Kona", "HI", "96740"],
+                vec!["Dollars", "($)"],
+            ],
+            "{:?}",
+            page.text
+        );
+        assert_eq!(page.non_horizontal_glyphs, 41);
+        let (json, had_issues) = layout_json_value(&f.doc, None, None);
+        assert_eq!(json["reliability"]["verdict"], "reliable", "{json}");
+        assert!(!had_issues);
+    }
+
+    #[test]
+    fn rotated_lines_keep_their_columns() {
+        // Two lines up the page, `Data` starting where `Value` does (`Name ` is
+        // 29.45 pt in Helvetica at 10 pt).
+        let content = turned_glyph_by_glyph(
+            [0.0, 1.0, -1.0, 0.0],
+            &[(40.0, 300.0, "Name Value"), (52.0, 300.0 + 29.45, "Data")],
+        );
+        let f = fixture(
+            font_with_widths("Helvetica", helvetica_width),
+            content.as_bytes(),
+            None,
+            &[],
+        );
+        let page = layout(&f);
+        let all = lines(&page);
+        assert_eq!(all[0], NON_HORIZONTAL_MARKER);
+        assert_eq!(col(all[1], "Name"), 0, "{all:?}");
+        assert_eq!(col(all[2], "Data"), col(all[1], "Value"), "{all:?}");
+    }
+
+    #[test]
+    fn mirrored_text_stays_in_content_order() {
+        // Tz -100 alone mirrors the glyphs, so their frame is left-handed: turned
+        // to read left to right, its lines would come out upside down (`Bottom`
+        // first).  It stays in content order instead.
+        let content = b"BT /F1 10 Tf -100 Tz 1 0 0 1 300 700 Tm (Top) Tj ET \
+                        BT /F1 10 Tf -100 Tz 1 0 0 1 300 680 Tm (Bottom) Tj ET";
+        let f = fixture(mono(), content, None, &[]);
+        let page = layout(&f);
+        assert_eq!(lines(&page), [NON_HORIZONTAL_MARKER, "Top", "Bottom"]);
+        assert_eq!(page.non_horizontal_glyphs, 9);
     }
 
     #[test]

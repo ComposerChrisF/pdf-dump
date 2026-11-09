@@ -39,7 +39,7 @@ The tool is split across the modules in `src/`.  The flow is:
 | `--inspect` | `inspect.rs` | `print_info`, `inspect_json_value` |
 | `--search` | `search.rs` | `search_objects`, `search_json_value` |
 | `--text` | `text.rs` | `print_text`, `text_json_value` (font-aware: decodes via `/ToUnicode` + WinAnsi/MacRoman) |
-| `--text --layout` | `layout.rs` | `print_layout`, `layout_json_value`, `layout_page` (text-state machine → visual-space glyphs → `build_chunks`: inked runs in content order, never split → lines by baseline → `render_line` onto the grid; off-page and non-horizontal glyphs go to side sections) |
+| `--text --layout` | `layout.rs` | `print_layout`, `layout_json_value`, `layout_page` (text-state machine → visual-space glyphs → `build_chunks`: inked runs in content order, never split → lines by baseline → `render_line` onto the grid; off-page and non-horizontal glyphs go to side sections; `non_horizontal_section` lays rotated glyphs out per direction, turned into their own baseline frame) |
 | `--operators` | `operators.rs` | `print_operators`, `operators_json_value` |
 | `--find-text` | `find_text.rs` | `print_find_text`, `find_text_json_value` |
 | `--fonts` | `fonts.rs` | `print_fonts`, `fonts_json_value` |

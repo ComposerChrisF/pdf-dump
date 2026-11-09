@@ -5,6 +5,17 @@ All notable changes to `pdf-dump` are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0/).
 
+## [0.36.0] - 2026-11-09
+### Added
+- **Rotated text is laid out by direction under `--text --layout`.**  Glyphs whose baseline is
+  not horizontal used to print under `[non-horizontal text]` in content order, one line per
+  show-string, so a rotated block drawn one glyph per `BT`/`Tm`/`Tj`/`ET` printed one glyph per
+  line, and a multi-line rotated block lost its lines.  Each baseline direction (in whole
+  degrees) now becomes its own frame and is laid out as a small grid by the same chunk and line
+  rules as the page: words and lines are kept and columns are aligned.  Vertical writing and
+  mirrored (left-handed) text stay in content order.  Plain `--text` is unchanged.  The request
+  came from id-redact, a statement pipeline.
+
 ## [0.35.0] - 2026-11-08
 ### Added
 - **A Standard-14 font that omits `/Widths` takes Adobe’s Core 14 AFM widths under

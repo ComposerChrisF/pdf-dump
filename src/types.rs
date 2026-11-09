@@ -335,7 +335,8 @@ pub(crate) struct Args {
     /// stay aligned (like `pdftotext -layout`); text from forms, rotated pages and
     /// out-of-order content streams lands where it displays.  Column 0 is the
     /// page's leftmost text, not its edge.  Rotated or vertical text follows the
-    /// grid under a `[non-horizontal text]` line, and text outside the CropBox
+    /// grid under a `[non-horizontal text]` line (rotated text as a small grid
+    /// per direction, read along its baseline), and text outside the CropBox
     /// under `[off-page text]`; those marker lines are pdf-dump's, not the
     /// document's.  A font whose glyph widths are unknown makes the verdict
     /// degraded (exit 3)
