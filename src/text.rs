@@ -8,6 +8,7 @@ use crate::cmap::{CodeWidth, ToUnicodeCMap};
 use crate::encodings;
 use crate::helpers;
 use crate::inline_image::decode_content;
+use crate::paint;
 use crate::types::PageSpec;
 
 /// Fraction of attempted-decode codes that may go unmapped before a document's
@@ -1287,10 +1288,13 @@ pub(crate) fn print_text(
     let mut all_fonts = Vec::new();
     let mut total_codes: u64 = 0;
     let mut unmapped_codes: u64 = 0;
+    let mut without_text = Vec::new();
 
     for (pn, page_id) in &page_list {
         wln!(writer, "--- Page {} ---", pn);
         let result = extract_text_from_page_with_warnings(doc, *page_id);
+        without_text
+            .extend(paint::lacking_text(doc, *page_id, result.total_codes).map(|p| (*pn, p)));
         for warn in &result.warnings {
             if !warn.contains(FONT_WARNING_MARKER) {
                 content_warnings.insert(warn.clone());
@@ -1307,6 +1311,7 @@ pub(crate) fn print_text(
     for warn in &content_warnings {
         eprintln!("Warning: {}", warn);
     }
+    paint::print_note(&without_text);
 
     let fonts = dedup_font_records(all_fonts);
     print_reliability_banner(&fonts, total_codes, unmapped_codes);
@@ -1327,9 +1332,12 @@ pub(crate) fn text_json_value(doc: &Document, page_filter: Option<&PageSpec>) ->
     let mut all_fonts = Vec::new();
     let mut total_codes: u64 = 0;
     let mut unmapped_codes: u64 = 0;
+    let mut without_text = Vec::new();
 
     for (pn, page_id) in &page_list {
         let result = extract_text_from_page_with_warnings(doc, *page_id);
+        without_text
+            .extend(paint::lacking_text(doc, *page_id, result.total_codes).map(|p| (*pn, p)));
         total_codes += result.total_codes;
         unmapped_codes += result.unmapped_codes;
         let mut entry = serde_json::Map::new();
@@ -1344,11 +1352,16 @@ pub(crate) fn text_json_value(doc: &Document, page_filter: Option<&PageSpec>) ->
 
     let fonts = dedup_font_records(all_fonts);
     // Print the loud banner to stderr even in JSON mode; stdout stays clean.
+    paint::print_note(&without_text);
     print_reliability_banner(&fonts, total_codes, unmapped_codes);
     let reliability = reliability_json_value(&fonts, total_codes, unmapped_codes);
     let had_issues = document_verdict(&fonts, total_codes, unmapped_codes).is_finding();
+    let without_text: Vec<Value> = without_text
+        .iter()
+        .map(|(pn, p)| paint::page_json(*pn, p))
+        .collect();
     (
-        json!({"pages": page_results, "reliability": reliability}),
+        json!({"pages": page_results, "reliability": reliability, "pages_without_text": without_text}),
         had_issues,
     )
 }

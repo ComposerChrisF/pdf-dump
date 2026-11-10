@@ -53,6 +53,7 @@ use std::io::Write;
 
 use crate::helpers;
 use crate::metrics::{FontMetrics, font_metrics};
+use crate::paint;
 use crate::text::{
     self, FONT_WARNING_MARKER, FontDecoder, FontReliabilityRecord, MAX_FORM_DEPTH, Reliability,
 };
@@ -1179,9 +1180,11 @@ pub(crate) fn print_layout(
     let mut content_warnings = BTreeSet::new();
     let mut all_fonts = Vec::new();
     let (mut total, mut unmapped) = (0u64, 0u64);
+    let mut without_text = Vec::new();
     for (pn, page_id) in &page_list {
         wln!(writer, "--- Page {} ---", pn);
         let page = layout_page(doc, *page_id, cell_override);
+        without_text.extend(paint::lacking_text(doc, *page_id, page.total_codes).map(|p| (*pn, p)));
         content_warnings.extend(
             page.warnings
                 .into_iter()
@@ -1195,6 +1198,7 @@ pub(crate) fn print_layout(
     for warn in &content_warnings {
         eprintln!("Warning: {warn}");
     }
+    paint::print_note(&without_text);
     let fonts = text::dedup_font_records(all_fonts);
     text::print_reliability_banner(&fonts, total, unmapped);
     text::document_verdict(&fonts, total, unmapped).is_finding()
@@ -1217,8 +1221,10 @@ pub(crate) fn layout_json_value(
     let mut pages = Vec::new();
     let mut all_fonts = Vec::new();
     let (mut total, mut unmapped) = (0u64, 0u64);
+    let mut without_text = Vec::new();
     for (pn, page_id) in &page_list {
         let page = layout_page(doc, *page_id, cell_override);
+        without_text.extend(paint::lacking_text(doc, *page_id, page.total_codes).map(|p| (*pn, p)));
         total += page.total_codes;
         unmapped += page.unmapped_codes;
         let mut entry = serde_json::Map::new();
@@ -1242,11 +1248,16 @@ pub(crate) fn layout_json_value(
         all_fonts.extend(page.fonts);
     }
     let fonts = text::dedup_font_records(all_fonts);
+    paint::print_note(&without_text);
     text::print_reliability_banner(&fonts, total, unmapped);
     let reliability = text::reliability_json_value(&fonts, total, unmapped);
     let had_issues = text::document_verdict(&fonts, total, unmapped).is_finding();
+    let without_text: Vec<Value> = without_text
+        .iter()
+        .map(|(pn, p)| paint::page_json(*pn, p))
+        .collect();
     (
-        json!({"layout": true, "pages": pages, "reliability": reliability}),
+        json!({"layout": true, "pages": pages, "reliability": reliability, "pages_without_text": without_text}),
         had_issues,
     )
 }

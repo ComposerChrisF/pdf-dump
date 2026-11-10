@@ -5,6 +5,21 @@ All notable changes to `pdf-dump` are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0/).
 
+## [0.37.0] - 2026-11-09
+### Added
+- **`--text` and `--text --layout` name each page that draws but shows no text.**  A new module,
+  `paint.rs`, reads from a page's operators alone, through form XObjects, whether the page shows
+  text, fills or strokes paths, or draws images, and whether its content could not be read to
+  its end.  A page that draws paths or images but shows no text (outlined words, a scan) is named
+  in a stderr note and, under `--json`, in `pages_without_text: [{page_number, paths, images,
+  unread}]`, which is always present.  The verdict and the exit code are unchanged: one caller
+  withholds a PDF on exit 3 but sends it to OCR on exit 0.
+- **`--require-text` (requires `--text`).**  The caller asserts that every selected page carries
+  text.  A page that draws but shows no text exits 1 and is named, and so does a locked or
+  pageless document.  Nothing is written: no stdout, and no `--output` file is created or
+  replaced.  A blank page passes.  The exit-1 entry in `--help` names it, and the `--help`
+  preamble about OCR mentions both.  The request came from id-redact, a statement pipeline.
+
 ## [0.36.0] - 2026-11-09
 ### Added
 - **Rotated text is laid out by direction under `--text --layout`.**  Glyphs whose baseline is

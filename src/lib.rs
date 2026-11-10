@@ -56,6 +56,7 @@ pub(crate) mod object;
 pub(crate) mod operators;
 pub(crate) mod page_info;
 pub(crate) mod page_labels;
+pub(crate) mod paint;
 pub(crate) mod recover;
 pub(crate) mod refs;
 pub(crate) mod resources;
@@ -242,6 +243,31 @@ pub fn run() {
     {
         eprintln!("Error: {}", msg);
         std::process::exit(TOOL_ERROR.into());
+    }
+
+    // `--require-text` is a claim about the document, checked before anything is written.
+    // A document whose pages could not be read (locked, or none at all) cannot be shown to
+    // carry text, so it fails the claim too.
+    if args.require_text {
+        let pages = helpers::build_page_list(&doc, page_spec.as_ref()).unwrap_or_default();
+        let mut failures: Vec<String> = pages
+            .iter()
+            .map(|(pn, id)| (*pn, paint::page_paint(&doc, *id)))
+            .filter(|(_, p)| p.lacks_text())
+            .map(|(pn, p)| format!("page {pn} {}", p.describe()))
+            .collect();
+        if encrypted_undecrypted {
+            failures.push("the document is encrypted and could not be decrypted".to_string());
+        } else if pages.is_empty() {
+            failures.push("the document has no pages".to_string());
+        }
+        if !failures.is_empty() {
+            for failure in &failures {
+                eprintln!("Error: --require-text: {failure}");
+            }
+            eprintln!("Error: --require-text: nothing was written");
+            std::process::exit(TOOL_ERROR.into());
+        }
     }
 
     let mut out = io::stdout().lock();

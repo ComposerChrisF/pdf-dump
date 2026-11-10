@@ -4677,3 +4677,183 @@ fn text_output_with_json_or_another_mode_is_a_usage_error() {
     }
     assert!(!dir.path().join("out.txt").exists());
 }
+
+// ── Pages that draw but show no text (plan-0012) ────────────────────────
+
+/// Words drawn as filled outlines, with no font anywhere: a print-to-PDF step
+/// that outlined the text.
+const OUTLINED_PAGE: &[u8] =
+    b"0 0 0 rg 72 700 m 80 700 l 76 712 l h f 84 700 m 90 712 l 96 700 l h f*";
+/// A page that is one page-sized image: a scan.
+const SCANNED_PAGE: &[u8] = b"q 612 0 0 792 0 0 cm /Im0 Do Q";
+const TEXT_PAGE: &[u8] = b"BT /F1 12 Tf 72 700 Td (Statement) Tj ET";
+
+/// One page per entry, all sharing `/F1` (Helvetica, WinAnsi) and `/Im0` (an image).
+fn pdf_of_pages(contents: &[&[u8]]) -> tempfile::NamedTempFile {
+    let mut doc = Document::new();
+    let mut font = Dictionary::new();
+    font.set("Type", Object::Name(b"Font".to_vec()));
+    font.set("Subtype", Object::Name(b"Type1".to_vec()));
+    font.set("BaseFont", Object::Name(b"Helvetica".to_vec()));
+    font.set("Encoding", Object::Name(b"WinAnsiEncoding".to_vec()));
+    let font_id = doc.add_object(Object::Dictionary(font));
+    let image_id = doc.add_object(Object::Stream(gray_image(1, 1, vec![0])));
+    let mut fonts = Dictionary::new();
+    fonts.set("F1", Object::Reference(font_id));
+    let mut xobjects = Dictionary::new();
+    xobjects.set("Im0", Object::Reference(image_id));
+    let mut resources = Dictionary::new();
+    resources.set("Font", Object::Dictionary(fonts));
+    resources.set("XObject", Object::Dictionary(xobjects));
+    let resources_id = doc.add_object(Object::Dictionary(resources));
+    let pages_id = doc.new_object_id();
+    let kids: Vec<Object> = contents
+        .iter()
+        .map(|content| {
+            let c_id = doc.add_object(Object::Stream(Stream::new(
+                Dictionary::new(),
+                content.to_vec(),
+            )));
+            let mut page = Dictionary::new();
+            page.set("Type", Object::Name(b"Page".to_vec()));
+            page.set("Parent", Object::Reference(pages_id));
+            page.set("Contents", Object::Reference(c_id));
+            page.set("Resources", Object::Reference(resources_id));
+            page.set(
+                "MediaBox",
+                Object::Array(vec![0.into(), 0.into(), 612.into(), 792.into()]),
+            );
+            Object::Reference(doc.add_object(Object::Dictionary(page)))
+        })
+        .collect();
+    let mut pages = Dictionary::new();
+    pages.set("Type", Object::Name(b"Pages".to_vec()));
+    pages.set("Count", Object::Integer(kids.len() as i64));
+    pages.set("Kids", Object::Array(kids));
+    doc.objects.insert(pages_id, Object::Dictionary(pages));
+    let mut catalog = Dictionary::new();
+    catalog.set("Type", Object::Name(b"Catalog".to_vec()));
+    catalog.set("Pages", Object::Reference(pages_id));
+    let cat_id = doc.add_object(Object::Dictionary(catalog));
+    doc.trailer.set("Root", Object::Reference(cat_id));
+    let mut file = tempfile::NamedTempFile::new().unwrap();
+    doc.save_to(&mut file).unwrap();
+    file
+}
+
+#[test]
+fn pages_that_draw_but_show_no_text_are_listed_and_the_exit_is_unchanged() {
+    let pdf = pdf_of_pages(&[TEXT_PAGE, OUTLINED_PAGE, SCANNED_PAGE, b""]);
+    for layout in [false, true] {
+        let mut args = vec!["--text", "--json"];
+        if layout {
+            args.push("--layout");
+        }
+        let output = run_args(&pdf, &args);
+        assert_eq!(output.status.code(), Some(0), "{args:?}: {output:?}");
+        let json: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+        assert_eq!(
+            json["pages_without_text"],
+            serde_json::json!([
+                {"page_number": 2, "paths": true, "images": false, "unread": false},
+                {"page_number": 3, "paths": false, "images": true, "unread": false},
+            ]),
+            "{args:?}"
+        );
+        assert_eq!(json["reliability"]["verdict"], "reliable");
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert!(
+            stderr.contains("page 2 draws paths but shows no text"),
+            "{stderr}"
+        );
+        assert!(
+            stderr.contains("page 3 draws images but shows no text"),
+            "{stderr}"
+        );
+        assert!(
+            !stderr.contains("page 4"),
+            "a blank page is not listed: {stderr}"
+        );
+    }
+    // Plain text notes it too.
+    let output = run_args(&pdf, &["--text"]);
+    assert_eq!(output.status.code(), Some(0));
+    assert!(String::from_utf8_lossy(&output.stderr).contains("page 2 draws paths"));
+
+    let clean = pdf_of_pages(&[TEXT_PAGE, b""]);
+    let json: serde_json::Value =
+        serde_json::from_slice(&run_args(&clean, &["--text", "--json"]).stdout).unwrap();
+    assert_eq!(json["pages_without_text"], serde_json::json!([]));
+}
+
+#[test]
+fn require_text_exits_1_naming_the_pages_and_writes_nothing() {
+    let pdf = pdf_of_pages(&[TEXT_PAGE, OUTLINED_PAGE, SCANNED_PAGE]);
+    let dir = tempfile::tempdir().unwrap();
+    let kept = dir.path().join("kept.txt");
+    fs::write(&kept, "earlier run").unwrap();
+    let fresh = dir.path().join("fresh.txt");
+    for args in [
+        &["--text", "--require-text"][..],
+        &["--text", "--layout", "--require-text"][..],
+        &["--text", "--json", "--require-text"][..],
+    ] {
+        let output = run_args(&pdf, args);
+        assert_eq!(output.status.code(), Some(1), "{args:?}: {output:?}");
+        assert!(output.stdout.is_empty(), "{args:?}: {:?}", output.stdout);
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert!(
+            stderr.contains("page 2 draws paths but shows no text"),
+            "{stderr}"
+        );
+        assert!(
+            stderr.contains("page 3 draws images but shows no text"),
+            "{stderr}"
+        );
+    }
+    for out in [&kept, &fresh] {
+        let output = Command::new(binary_path())
+            .arg(pdf.path())
+            .args(["--text", "--require-text", "--output"])
+            .arg(out)
+            .output()
+            .unwrap();
+        assert_eq!(output.status.code(), Some(1), "{output:?}");
+    }
+    assert_eq!(fs::read_to_string(&kept).unwrap(), "earlier run");
+    assert!(!fresh.exists());
+}
+
+#[test]
+fn require_text_passes_text_and_blank_pages_and_honors_page() {
+    let pdf = pdf_of_pages(&[TEXT_PAGE, b"", OUTLINED_PAGE]);
+    let output = run_args(&pdf, &["--text", "--require-text", "--page", "1-2"]);
+    assert_eq!(output.status.code(), Some(0), "{output:?}");
+    assert!(String::from_utf8_lossy(&output.stdout).contains("Statement"));
+    let output = run_args(&pdf, &["--text", "--require-text", "--page", "3"]);
+    assert_eq!(output.status.code(), Some(1), "{output:?}");
+    // Without --text it is a usage error.
+    assert_eq!(run_args(&pdf, &["--require-text"]).status.code(), Some(2));
+}
+
+#[test]
+fn require_text_fails_a_document_it_cannot_show_carries_text() {
+    // Locked: without the password no page can be read, so the claim fails
+    // rather than passing an empty text with exit 3.
+    let locked = create_encrypted_pdf("secret");
+    let output = run_args(&locked, &["--text", "--require-text"]);
+    assert_eq!(output.status.code(), Some(1), "{output:?}");
+    assert!(output.stdout.is_empty());
+    assert!(String::from_utf8_lossy(&output.stderr).contains("could not be decrypted"));
+    // With the password it reads, and its text passes.
+    let output = run_args(
+        &locked,
+        &["--text", "--require-text", "--password", "secret"],
+    );
+    assert_eq!(output.status.code(), Some(0), "{output:?}");
+    // No pages at all.
+    let empty = pdf_of_pages(&[]);
+    let output = run_args(&empty, &["--text", "--require-text"]);
+    assert_eq!(output.status.code(), Some(1), "{output:?}");
+    assert!(String::from_utf8_lossy(&output.stderr).contains("has no pages"));
+}

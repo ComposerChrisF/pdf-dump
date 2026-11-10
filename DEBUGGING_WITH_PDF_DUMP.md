@@ -36,6 +36,7 @@ Use `pdf-dump` instead of writing Python/shell scripts to inspect PDF internals.
 | Regex search | `pdf-dump f.pdf --search "regex=D:20(23\|24)"` |
 | Extract stream to file | `pdf-dump f.pdf --extract-stream 12 --output out.bin` (the directory must exist; an existing file is replaced) |
 | Write the text to a file, never through stdout | `pdf-dump f.pdf --text --output f.txt` (also with `--layout`, `--page`; atomic, nothing written on exit 1, still written on exit 3; not with `--json`) |
+| Fail when a page’s words are outlined or scanned | `pdf-dump f.pdf --text --require-text` (exit 1 naming each page that draws but shows no text; nothing written) |
 | Write an image a viewer or OCR engine opens | `pdf-dump f.pdf --extract-image 12 --output a.png`, or `--extract-inline-image 3:1` for an inline image (see `--images --json`) |
 | GraphViz DOT graph | `pdf-dump f.pdf --tree --dot` |
 | Any of the above as JSON | Add `--json` to any command |
@@ -122,7 +123,9 @@ Add `--json` to any mode.  All schemas below show the structure of a single mode
 `{role, description, details: [[key, value]], domain_details: [str], page_associations: [N], forward_references: [{key, object, summary}], reverse_references: [{from_object, key_path}], object: {...}}`
 
 **Text** (`--text --json`):
-`{pages: [{page_number, text, warnings?: [str]}], reliability: {verdict: "reliable"|"degraded"|"unreliable", total_codes, unmapped_codes, unmapped_ratio, fonts: [{name, base_font, subtype, classification, has_to_unicode, reason}]}}`
+`{pages: [{page_number, text, warnings?: [str]}], reliability: {verdict: "reliable"|"degraded"|"unreliable", total_codes, unmapped_codes, unmapped_ratio, fonts: [{name, base_font, subtype, classification, has_to_unicode, reason}]}, pages_without_text: [{page_number, paths, images, unread}]}`
+
+`pages_without_text` lists each page that shows no text (no `Tj`, `TJ`, `'` or `"` with a non-empty string, in the page or any form it invokes) yet fills or strokes a path, paints a shading, or draws an image, or whose content could not be read to its end (`unread`).  Its words, if any, are outlined or scanned, and only rendering and OCR read them.  A blank page is not listed, and the list is empty when there is none.  It does not change the verdict or the exit code.  A stderr note names the same pages.  `--require-text` turns any such page into exit 1, with nothing written; it fails as well on a document that could not be decrypted or has no pages.
 
 Text extraction is font-aware: show-strings are decoded through each font’s `/ToUnicode` CMap (the fix for CID/Type0 mojibake) and through WinAnsiEncoding/MacRomanEncoding tables for simple fonts lacking ToUnicode; undecodable fonts fall back to raw byte passthrough.  A loud reliability banner prints to **stderr** (stdout stays clean for piping) when a document is not fully reliable, and `--text` exits **3** whenever the verdict is not `reliable`: `unreliable` (a CID/Type0 font with no ToUnicode map) or `degraded` (partly-known encoding, more than 20 % of shown codes undecodable, or a content stream not read to its end).  The text is still printed and `--json` still emits on exit 3.  Through v0.24.x only `unreliable` exited 3.
 
@@ -135,7 +138,7 @@ When a content stream declares a wrong `/Length`, a strict parser drops its body
 `{pages: [{page_number, operation_count, operations: [{operator, operands: [str]}], warnings?: [str]}]}`
 
 **Layout text** (`--text --layout --json`):
-`{layout: true, pages: [{page_number, text, rotate, crop_box: [x0, y0, x1, y1], cell, non_horizontal_glyphs, off_page_glyphs, warnings?: [str]}], reliability: {…same as --text…}}`
+`{layout: true, pages: [{page_number, text, rotate, crop_box: [x0, y0, x1, y1], cell, non_horizontal_glyphs, off_page_glyphs, warnings?: [str]}], reliability: {…same as --text…}, pages_without_text: […same as --text…]}`
 
 `text` is the character grid (lines top to bottom in visual space; column 0 is the page’s leftmost text; rotated or vertical text after a `[non-horizontal text]` line, each rotation laid out as a small grid of its own along its baseline, and vertical or mirrored text in content order; text outside the CropBox after `[off-page text]`).  `rotate` is the page’s normalized `/Rotate`; `crop_box` is the effective CropBox (CropBox ∩ MediaBox, inherited) in default user space; `cell` is the grid column width in points.  A glyph whose width is unknown makes its font’s verdict `degraded`, which exits 3.  That covers a font without `/Widths` (a Standard-14 font takes its built-in AFM widths instead, and is unknown only for a glyph its AFM lacks), `/Widths` without `/FirstChar`, a non-numeric or missing entry, an out-of-range code with no explicit `/MissingWidth`, a malformed CID `/W`, a Type0 font with a non-Identity `/Encoding`, and text shown with no usable font.
 
@@ -251,7 +254,7 @@ Unsupported (reported as warnings, decoding stops): DCTDecode, JPXDecode, JBIG2D
 pdf-dump reads a PDF’s structure and draws nothing.  Exit 0 means a mode did what it says over what it reads, not that every word a viewer shows was read; `--help` lists what exit 3 reports.  This list gathers the limits named above and adds the first three.  It is not exhaustive.
 
 - **Text in pixels:** a scan’s words are in an image.  Export it with `--extract-image` and OCR the file.
-- **Lettering drawn as vector paths:** it is neither text nor an image, so `--text` and `--images` come back empty with exit 0.  Only rendering the page and OCR reads it.
+- **Lettering drawn as vector paths:** it is neither text nor an image, so `--text` and `--images` come back empty with exit 0.  Only rendering the page and OCR reads it.  `--text` names a page that draws but shows no text (`pages_without_text`), and `--require-text` makes it exit 1.  A page holding both text and outlined or scanned words is not named.
 - **Whether text shows:** `--text` reports the text in a page’s content, which can include text a viewer would not show: invisible, clipped, covered, off the page, or on a hidden layer.
 - **Images:** a JPEG’s or JPEG 2000’s mask stays unapplied in its file, though the mask exports on its own, and a JPEG’s `/ColorTransform` is not applied, so a viewer of the file follows the file’s own markers.  Inline images in Type 3 glyph procedures, and in forms and patterns nothing invokes, are not listed.  Exports keep their stored orientation.
 - **Forms:** only fields `/AcroForm /Fields` reaches, and of those not `/DV`, `/MK`’s `/RC` and `/AC`, or a parent’s `/MK` and overridden `/TU` and `/Opt`, or `/TU` and `/Opt` on a widget.  Of XFA, only the character data of the datasets packets.

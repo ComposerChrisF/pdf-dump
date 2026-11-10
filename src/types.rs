@@ -159,7 +159,9 @@ warns loudly on stderr, and—in --json mode—adds a top-level \"recovery\" obj
 Use --strict to refuse the repair and exit 3 instead (a hard gate for CI).
 
 pdf-dump reads a PDF's structure and draws nothing, so exit 0 does not mean every word a
-viewer shows was read: text in images or drawn as paths needs rendering and OCR.
+viewer shows was read: text in images or drawn as paths needs rendering and OCR.  --text
+names each page that draws paths or images but shows no text (`pages_without_text` in
+--json, a note on stderr); --require-text makes such a page exit 1.
 
 Exit codes:
   0   Success (or validation passed with no errors)
@@ -172,7 +174,8 @@ Exit codes:
       live (even in a range), or an image export that cannot be done: not an image, a
       filter or colour space it cannot convert, data that will not decode, or
       an output named for another format than the image is written in, or a
-      --text --output file that could not be written.  Nothing is written then.  With --object, an explicit number that is
+      --text --output file that could not be written, or --require-text and a
+      page that draws paths or images but shows no text.  Nothing is written then.  With --object, an explicit number that is
       missing exits 1, and so does a range holding no objects at all; gaps
       within a range are fine.  Whatever was found is still printed
   2   Usage error: bad arguments — clap's own (unknown flag, missing required
@@ -342,6 +345,17 @@ pub(crate) struct Args {
     /// degraded (exit 3)
     #[arg(long, requires = "text", help_heading = "Modifiers")]
     pub layout: bool,
+
+    /// With --text: assert that every selected page carries text.  A page that
+    /// draws paths or images but shows no text (words outlined as paths, or
+    /// scanned), or whose content could not be read to its end, makes the run exit
+    /// 1, naming each such page and what it draws; so does a document that could
+    /// not be decrypted or has no pages.  Nothing is written then, to stdout or to
+    /// --output.  A blank page passes.  Without this flag such pages
+    /// are listed as `pages_without_text` in --json and noted on stderr, and the
+    /// exit code is unchanged
+    #[arg(long, requires = "text", help_heading = "Modifiers")]
+    pub require_text: bool,
 
     /// With --layout: grid cell width in points, at least 1 (default: the page's
     /// median glyph advance at its dominant font size)
