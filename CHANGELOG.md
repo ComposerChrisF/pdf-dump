@@ -5,6 +5,18 @@ All notable changes to `pdf-dump` are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0/).
 
+## [0.38.0] - 2026-11-10
+### Fixed
+- **Plain `--text` and `--find-text` take line breaks and word spaces from glyph positions.**
+  They decided lines and spaces from the operators alone, so text placed glyph by glyph (a `BT`
+  per glyph, a `Tm` per glyph, or a `Td` per glyph, with words separated by position) printed a
+  glyph per line or ran its words together, under a `reliable` verdict, and `--find-text`
+  reported no match, with exit 0, for a word on the page.  Each show-string's position now comes
+  from the `--layout` text-state walk (`layout::string_positions`), and the separator between two
+  consecutive strings is a new line when the baseline moves and a space for a word gap.  Where a
+  width is unknown, the operators' separators stand, as before.  Content order is kept and the
+  verdict is unchanged.
+
 ## [0.37.0] - 2026-11-09
 ### Added
 - **`--text` and `--text --layout` name each page that draws but shows no text.**  A new module,

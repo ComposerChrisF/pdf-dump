@@ -341,6 +341,8 @@ struct Glyph {
     /// For a non-horizontal glyph, the same glyph in its direction’s own
     /// baseline frame; `None` when it fits none (vertical writing, mirrored text).
     turned: Option<Turned>,
+    /// The glyph’s advance is known, not `FALLBACK_ADVANCE`.
+    known: bool,
 }
 
 /// A non-horizontal glyph turned into the baseline frame of its direction,
@@ -415,6 +417,95 @@ pub(crate) fn layout_page(
     page_id: ObjectId,
     cell_override: Option<f64>,
 ) -> LayoutPage {
+    let state = walk_page(doc, page_id);
+    let frame = state.frame;
+    let grid = render_grid(&state.glyphs, cell_override);
+    LayoutPage {
+        text: grid.text,
+        warnings: state.warnings,
+        total_codes: state.total_codes,
+        unmapped_codes: state.unmapped_codes,
+        fonts: state.fonts,
+        rotate: frame.rotate,
+        crop_box: frame.crop,
+        cell: grid.cell,
+        non_horizontal_glyphs: grid.non_horizontal,
+        off_page_glyphs: grid.off_page,
+    }
+}
+
+/// Where one show-string landed, in the baseline frame of its direction: enough
+/// for plain `--text` to tell a new line from a word gap (bug-0044).
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct StringPos {
+    /// The baseline direction, in whole degrees (0 for horizontal text).
+    angle: i32,
+    /// Left edge of the first glyph.
+    x: f64,
+    /// Baseline.
+    y: f64,
+    /// Right edge of the last glyph.
+    end_x: f64,
+    size: f64,
+    /// A gap wider than this, after the string, is a word gap.
+    word_gap: f64,
+}
+
+/// Each show-string of the page, in content order (forms included, as plain
+/// `--text` walks them): where it landed, or `None` when that is not known
+/// (no glyphs, an advance not known, off the page, or a direction no frame turns
+/// to read left to right).
+pub(crate) fn string_positions(doc: &Document, page_id: ObjectId) -> Vec<Option<StringPos>> {
+    let state = walk_page(doc, page_id);
+    let mut positions: Vec<Option<StringPos>> = vec![None; state.strings];
+    let frame = |g: &Glyph| match (g.placement, g.turned) {
+        _ if !g.known => None,
+        (Placement::Grid, _) => Some((0, g.x, g.y, g.end_x)),
+        (Placement::NonHorizontal, Some(t)) => Some((t.angle, t.x, t.y, t.end_x)),
+        _ => None,
+    };
+    // Glyphs are recorded in content order, so a string’s glyphs are contiguous.
+    for glyphs in state.glyphs.chunk_by(|a, b| a.string == b.string) {
+        let (first, last) = (&glyphs[0], &glyphs[glyphs.len() - 1]);
+        let Some(framed) = glyphs.iter().map(frame).collect::<Option<Vec<_>>>() else {
+            continue;
+        };
+        let (angle, x, y, _) = framed[0];
+        if framed.iter().any(|f| f.0 != angle) {
+            continue;
+        }
+        positions[first.string] = Some(StringPos {
+            angle,
+            x,
+            y,
+            end_x: framed[framed.len() - 1].3,
+            size: glyphs.iter().map(|g| g.size).fold(first.size, f64::max),
+            word_gap: last.word_gap,
+        });
+    }
+    positions
+}
+
+/// What plain `--text` puts between two show-strings drawn one after the other:
+/// a line break when the baseline moves (or the direction changes), a space for
+/// a word gap or a jump backwards on the line, else nothing.  The same baseline
+/// and gap rules as the `--layout` chunks.
+pub(crate) fn separator(prev: &StringPos, cur: &StringPos) -> &'static str {
+    if prev.angle != cur.angle
+        || (cur.y - prev.y).abs() > BASELINE_TOLERANCE * prev.size.min(cur.size)
+    {
+        return "\n";
+    }
+    let gap = cur.x - prev.end_x;
+    if gap > prev.word_gap || gap < -MAX_KERN_OVERLAP * cur.size {
+        " "
+    } else {
+        ""
+    }
+}
+
+/// Run the text-state machine over the page, positioning every glyph.
+fn walk_page(doc: &Document, page_id: ObjectId) -> PageState {
     let mut warnings = Vec::new();
     if let Ok(Object::Dictionary(page_dict)) = doc.get_object(page_id) {
         warnings.extend(text::check_page_font_encodings(doc, page_dict));
@@ -458,19 +549,7 @@ pub(crate) fn layout_page(
             }
         }
     }
-    let grid = render_grid(&state.glyphs, cell_override);
-    LayoutPage {
-        text: grid.text,
-        warnings: state.warnings,
-        total_codes: state.total_codes,
-        unmapped_codes: state.unmapped_codes,
-        fonts: state.fonts,
-        rotate: frame.rotate,
-        crop_box: frame.crop,
-        cell: grid.cell,
-        non_horizontal_glyphs: grid.non_horizontal,
-        off_page_glyphs: grid.off_page,
-    }
+    state
 }
 
 /// Walk one content stream, positioning every glyph it shows.  Recurses into
@@ -705,7 +784,9 @@ fn show(
             if decoded == "\u{FFFD}" {
                 state.unmapped_codes += 1;
             }
-            let w0 = match metrics.advance(code) {
+            let advance = metrics.advance(code);
+            let known = advance.is_ok();
+            let w0 = match advance {
                 Ok(w) => w,
                 Err(reason) => {
                     state.flag_unknown_widths(gs.font, &reason);
@@ -770,6 +851,7 @@ fn show(
                 text: decoded.to_string(),
                 placement,
                 turned,
+                known,
             });
             let word = if nbytes == 1 && code == 32 {
                 gs.word_spacing

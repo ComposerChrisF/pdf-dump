@@ -4857,3 +4857,47 @@ fn require_text_fails_a_document_it_cannot_show_carries_text() {
     assert_eq!(output.status.code(), Some(1), "{output:?}");
     assert!(String::from_utf8_lossy(&output.stderr).contains("has no pages"));
 }
+
+/// bug-0044: each glyph in its own `BT … Tm … Tj ET`, in Courier with `/Widths`,
+/// and the words separated by position alone.
+fn bt_per_glyph_pdf() -> tempfile::NamedTempFile {
+    let mut font = Dictionary::new();
+    font.set("Type", Object::Name(b"Font".to_vec()));
+    font.set("Subtype", Object::Name(b"Type1".to_vec()));
+    font.set("BaseFont", Object::Name(b"Courier".to_vec()));
+    font.set("Encoding", Object::Name(b"WinAnsiEncoding".to_vec()));
+    font.set("FirstChar", 32);
+    font.set("LastChar", 126);
+    font.set("Widths", Object::Array(vec![Object::Integer(600); 95]));
+    let mut content = String::new();
+    for (text, y) in [("Statement Period", 700), ("Account 1234 5678", 680)] {
+        let mut x = 72.0;
+        for c in text.chars() {
+            if c == ' ' {
+                x += 10.8;
+                continue;
+            }
+            content += &format!("BT /F1 12 Tf 1 0 0 1 {x:.2} {y} Tm ({c}) Tj ET\n");
+            x += 7.2;
+        }
+    }
+    create_pdf_with_font(font, None, content.as_bytes())
+}
+
+#[test]
+fn text_and_find_text_read_words_placed_glyph_by_glyph() {
+    let pdf = bt_per_glyph_pdf();
+    let text = run_args(&pdf, &["--text"]);
+    assert_eq!(text.status.code(), Some(0), "{text:?}");
+    let stdout = String::from_utf8_lossy(&text.stdout);
+    assert!(
+        stdout.contains("Statement Period\nAccount 1234 5678"),
+        "{stdout}"
+    );
+    for needle in ["Statement", "Statement Period", "1234 5678"] {
+        let find = run_args(&pdf, &["--find-text", needle]);
+        assert_eq!(find.status.code(), Some(0), "{needle}: {find:?}");
+        let stdout = String::from_utf8_lossy(&find.stdout);
+        assert!(stdout.contains("Found"), "{needle}: {stdout}");
+    }
+}

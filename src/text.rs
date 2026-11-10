@@ -8,6 +8,7 @@ use crate::cmap::{CodeWidth, ToUnicodeCMap};
 use crate::encodings;
 use crate::helpers;
 use crate::inline_image::decode_content;
+use crate::layout::{self, StringPos};
 use crate::paint;
 use crate::types::PageSpec;
 
@@ -146,6 +147,14 @@ struct ExtractState {
     used_fonts: Vec<FontReliabilityRecord>,
     /// Text was shown with no font this walk could name, or a `gs` set one it does not model.
     unknown_font_shown: bool,
+    /// Where each show-string of the page landed, by content order (empty when
+    /// not known, as for an appearance stream).
+    positions: Vec<Option<StringPos>>,
+    /// Show-strings walked so far: the index into `positions`.
+    shown: usize,
+    /// Where the last non-empty show-string landed, and the length of `text`
+    /// just after it.
+    last_shown: Option<(StringPos, usize)>,
 }
 
 impl ExtractState {
@@ -159,7 +168,38 @@ impl ExtractState {
             first_bt: true,
             used_fonts: Vec::new(),
             unknown_font_shown: false,
+            positions: Vec::new(),
+            shown: 0,
+            last_shown: None,
         }
+    }
+
+    /// Append one show-string.  When it and the last one both landed where the
+    /// layout walk can say, what separates them comes from where they landed: the
+    /// line breaks and spaces the operators since then pushed are replaced, so a
+    /// `BT` per glyph is not a line per glyph, and a word gap made by positioning
+    /// is a space (bug-0044).  Otherwise the operators’ separators stand.
+    fn show(&mut self, bytes: &[u8], font: Option<&FontDecoder>) {
+        let pos = self.positions.get(self.shown).copied().flatten();
+        self.shown += 1;
+        if bytes.is_empty() {
+            return;
+        }
+        if let (Some((prev, mark)), Some(cur)) = (self.last_shown, pos) {
+            self.text.truncate(mark);
+            let sep = layout::separator(&prev, &cur);
+            if !(sep == " " && self.text.ends_with(char::is_whitespace)) {
+                self.text.push_str(sep);
+            }
+        }
+        emit_show_string(
+            &mut self.text,
+            bytes,
+            font,
+            &mut self.total_codes,
+            &mut self.unmapped_codes,
+        );
+        self.last_shown = pos.map(|p| (p, self.text.len()));
     }
 
     fn into_result(self) -> TextResult {
@@ -208,6 +248,7 @@ pub(crate) fn extract_text_from_page_with_warnings(
     page_id: ObjectId,
 ) -> TextResult {
     let mut state = ExtractState::new();
+    state.positions = layout::string_positions(doc, page_id);
 
     // Check font encodings for this page (legacy per-page warning strings,
     // retained for the JSON `warnings` field and page_info's garbled heuristic).
@@ -456,28 +497,14 @@ fn process_content(
             }
             "Tj" => {
                 if let Some(Object::String(bytes, _)) = op.operands.first() {
-                    emit_show_string(
-                        &mut state.text,
-                        bytes,
-                        current_font,
-                        &mut state.total_codes,
-                        &mut state.unmapped_codes,
-                    );
+                    state.show(bytes, current_font);
                 }
             }
             "TJ" => {
                 if let Some(Object::Array(arr)) = op.operands.first() {
                     for item in arr {
                         match item {
-                            Object::String(bytes, _) => {
-                                emit_show_string(
-                                    &mut state.text,
-                                    bytes,
-                                    current_font,
-                                    &mut state.total_codes,
-                                    &mut state.unmapped_codes,
-                                );
-                            }
+                            Object::String(bytes, _) => state.show(bytes, current_font),
                             Object::Integer(n) if *n < -100 => {
                                 state.text.push(' ');
                             }
@@ -492,26 +519,14 @@ fn process_content(
             "'" => {
                 state.text.push('\n');
                 if let Some(Object::String(bytes, _)) = op.operands.first() {
-                    emit_show_string(
-                        &mut state.text,
-                        bytes,
-                        current_font,
-                        &mut state.total_codes,
-                        &mut state.unmapped_codes,
-                    );
+                    state.show(bytes, current_font);
                 }
             }
             "\"" => {
                 state.text.push('\n');
                 // Third operand is the string
                 if let Some(Object::String(bytes, _)) = op.operands.get(2) {
-                    emit_show_string(
-                        &mut state.text,
-                        bytes,
-                        current_font,
-                        &mut state.total_codes,
-                        &mut state.unmapped_codes,
-                    );
+                    state.show(bytes, current_font);
                 }
             }
             "Do" => {
@@ -2958,5 +2973,106 @@ mod tests {
             "a depth-cap warning is expected, got: {:?}",
             result.warnings
         );
+    }
+
+    /// Courier with `/Widths`: 600/1000 em for every code from 32 to 126.
+    fn courier() -> Dictionary {
+        let mut font = Dictionary::new();
+        font.set("Type", Object::Name(b"Font".to_vec()));
+        font.set("Subtype", Object::Name(b"Type1".to_vec()));
+        font.set("BaseFont", Object::Name(b"Courier".to_vec()));
+        font.set("Encoding", Object::Name(b"WinAnsiEncoding".to_vec()));
+        font.set("FirstChar", 32);
+        font.set("LastChar", 126);
+        font.set("Widths", Object::Array(vec![Object::Integer(600); 95]));
+        font
+    }
+
+    /// bug-0044’s two lines, a glyph at a time: Courier at 12 pt advances 7.2,
+    /// and a word gap is 1.5 glyphs wide with no space glyph drawn.
+    fn glyph_positions() -> Vec<(f64, f64, char)> {
+        let mut glyphs = Vec::new();
+        for (text, y) in [("Statement Period", 700.0), ("Account 1234 5678", 680.0)] {
+            let mut x = 72.0;
+            for c in text.chars() {
+                if c == ' ' {
+                    x += 10.8;
+                    continue;
+                }
+                glyphs.push((x, y, c));
+                x += 7.2;
+            }
+        }
+        glyphs
+    }
+
+    const TWO_LINES: &str = "Statement Period\nAccount 1234 5678";
+
+    #[test]
+    fn text_placed_glyph_by_glyph_keeps_its_lines_and_words() {
+        let glyphs = glyph_positions();
+        let bt: String = glyphs
+            .iter()
+            .map(|(x, y, c)| format!("BT /F1 12 Tf 1 0 0 1 {x} {y} Tm ({c}) Tj ET\n"))
+            .collect();
+        let tm: String = glyphs
+            .iter()
+            .map(|(x, y, c)| format!("1 0 0 1 {x} {y} Tm ({c}) Tj\n"))
+            .collect();
+        let mut td = String::new();
+        let (mut px, mut py) = (0.0, 0.0);
+        for (x, y, c) in &glyphs {
+            td += &format!("{} {} Td ({c}) Tj\n", x - px, y - py);
+            (px, py) = (*x, *y);
+        }
+        for content in [
+            bt,
+            format!("BT /F1 12 Tf\n{tm}ET"),
+            format!("BT /F1 12 Tf\n{td}ET"),
+        ] {
+            let (doc, p_id) = doc_with_font(courier(), None, content.as_bytes());
+            let result = extract_text_from_page_with_warnings(&doc, p_id);
+            assert_eq!(result.text, TWO_LINES, "{content}");
+        }
+    }
+
+    #[test]
+    fn rotated_text_placed_glyph_by_glyph_keeps_its_lines_and_words() {
+        // Read up the page (90° counterclockwise): the baseline runs along y, and
+        // the second line lies to the right of the first.
+        let content: String = glyph_positions()
+            .iter()
+            .map(|(x, y, c)| {
+                format!(
+                    "BT /F1 12 Tf 0 1 -1 0 {} {} Tm ({c}) Tj ET\n",
+                    300.0 + (700.0 - y) * 0.7,
+                    x + 28.0
+                )
+            })
+            .collect();
+        let (doc, p_id) = doc_with_font(courier(), None, content.as_bytes());
+        assert_eq!(extract_text_from_page(&doc, p_id), TWO_LINES);
+    }
+
+    #[test]
+    fn a_font_without_widths_keeps_the_operators_line_breaks() {
+        // No advance is known, so no gap can be measured: each `BT` still starts a
+        // line, as before.
+        let mut font = Dictionary::new();
+        font.set("Type", Object::Name(b"Font".to_vec()));
+        font.set("Subtype", Object::Name(b"Type1".to_vec()));
+        font.set("BaseFont", Object::Name(b"ABCDEF+Custom".to_vec()));
+        font.set("Encoding", Object::Name(b"WinAnsiEncoding".to_vec()));
+        let content =
+            b"BT /F1 12 Tf 1 0 0 1 72 700 Tm (A) Tj ET BT /F1 12 Tf 1 0 0 1 80 700 Tm (B) Tj ET";
+        let (doc, p_id) = doc_with_font(font, None, content);
+        assert_eq!(extract_text_from_page(&doc, p_id), "A\nB");
+    }
+
+    #[test]
+    fn a_word_gap_after_a_trailing_space_adds_no_second_space() {
+        let content = b"BT /F1 12 Tf 72 700 Td (Name ) Tj ET BT /F1 12 Tf 130 700 Td (Value) Tj ET";
+        let (doc, p_id) = doc_with_font(courier(), None, content);
+        assert_eq!(extract_text_from_page(&doc, p_id), "Name Value");
     }
 }
