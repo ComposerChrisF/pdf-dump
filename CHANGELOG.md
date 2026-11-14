@@ -5,6 +5,17 @@ All notable changes to `pdf-dump` are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0/).
 
+## [0.38.1] - 2026-11-13
+### Fixed
+- **Integration tests find the binary under cargo 1.100.**  Cargo 1.100 moved integration-test
+  binaries out of `target/debug/deps`, so the walk up from `current_exe()` in `binary_path()` no
+  longer found `pdf-dump` and most integration tests failed with NotFound.  It now uses
+  `env!("CARGO_BIN_EXE_pdf-dump")`.
+
+### Changed
+- **`package.homepage` removed from `Cargo.toml`.**  Cargo 1.100's manifest lint warns that it is
+  redundant with `package.repository`, which holds the same URL.
+
 ## [0.38.0] - 2026-11-10
 ### Fixed
 - **Plain `--text` and `--find-text` take line breaks and word spaces from glyph positions.**

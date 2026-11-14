@@ -12,16 +12,9 @@ use lopdf::{Dictionary, Document, Object, Stream};
 
 /// Path to the compiled binary under test.
 fn binary_path() -> PathBuf {
-    // `cargo test` puts the test binary in target/debug/deps;
-    // the actual binary is in target/debug/.
-    let mut path = std::env::current_exe().unwrap();
-    // Walk up from target/debug/deps/<test-binary> to target/debug/
-    path.pop(); // remove test binary name
-    if path.ends_with("deps") {
-        path.pop(); // remove "deps"
-    }
-    path.push("pdf-dump");
-    path
+    // Cargo names the built binary for integration tests; where test
+    // binaries live under target/ is not stable across cargo versions.
+    PathBuf::from(env!("CARGO_BIN_EXE_pdf-dump"))
 }
 
 /// Create a minimal synthetic PDF with a single page and return the temp file path.
