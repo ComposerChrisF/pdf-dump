@@ -45,7 +45,7 @@ jobs:
       - run: cargo check
 
   # A static Linux binary for the KCS server, whose ai@ mail gate reads PDF
-  # attachments with pdf-dump (Obsidian-Brain plan-0014).  Same treatment as
+  # attachments with pdf-dump.  Same treatment as
   # eml-tool's linux-binary job: download the artifact, never build on the box.
   linux-binary:
     name: linux binary (musl, static)

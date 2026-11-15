@@ -5,6 +5,15 @@ All notable changes to `pdf-dump` are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0/).
 
+## [0.38.2] - 2026-11-15
+### Changed
+- **A shared lint set is adopted.**  `clippy.toml` disallows `Path::exists`, `is_dir`, `is_file`,
+  `fs::create_dir_all` and `process::exit`, and the `[lints]` table warns on unwrap, expect,
+  panic, string slicing, ignored `#[must_use]` results, and unreasoned suppressions.  Every site
+  that is sound carries an `#[expect(…, reason = "…")]` saying why.  The 23 `process::exit` sites
+  carry expects naming plan-0013, which replaces them with an `ExitCode` returned from `run()`.
+  No behavior change.
+
 ## [0.38.1] - 2026-11-13
 ### Fixed
 - **Integration tests find the binary under cargo 1.100.**  Cargo 1.100 moved integration-test

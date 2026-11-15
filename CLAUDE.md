@@ -8,7 +8,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 - **Run:** `cargo run -- <file.pdf> [options]`
 - **Test:** `cargo test`
 - **Check (fast lint):** `cargo check`
-- **Clippy:** `cargo clippy`
+- **Clippy:** `cargo clippy --all-targets -- -D warnings`, as CI runs it (a plain `cargo clippy` skips the tests’ `#[expect]`s)
 
 ## What This Is
 
