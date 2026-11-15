@@ -1022,6 +1022,10 @@ pub(crate) fn decode_content(bytes: &[u8]) -> Result<DecodedContent, lopdf::Erro
 }
 
 #[cfg(test)]
+#[expect(
+    clippy::let_underscore_must_use,
+    reason = "a test that only checks the scanner does not panic discards its result"
+)]
 mod tests {
     use super::*;
     use crate::image_export::export_image;

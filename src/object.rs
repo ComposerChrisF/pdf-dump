@@ -137,8 +137,10 @@ pub(crate) fn print_content_data(
     }
 }
 
-#[allow(clippy::too_many_arguments)]
-#[allow(clippy::only_used_in_recursion)]
+#[expect(
+    clippy::too_many_arguments,
+    reason = "the recursive printer threads its traversal state through its arguments"
+)]
 pub(crate) fn print_object(
     writer: &mut impl Write,
     obj: &Object,
@@ -470,7 +472,6 @@ fn object_json_entry(doc: &Document, obj_num: u32, config: &DumpConfig) -> Value
 
 // ── JSON output (Phase 1) ────────────────────────────────────────────
 
-#[allow(clippy::only_used_in_recursion)]
 pub(crate) fn object_to_json(obj: &Object, doc: &Document, config: &DumpConfig) -> Value {
     match obj {
         Object::Null => json!({"type": "null"}),

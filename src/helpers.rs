@@ -268,6 +268,10 @@ pub(crate) fn get_catalog(doc: &Document) -> Option<&lopdf::Dictionary> {
     }
 }
 
+#[expect(
+    clippy::expect_used,
+    reason = "serializing a serde_json::Value cannot fail: its map keys are strings and its numbers finite"
+)]
 pub(crate) fn json_pretty(value: &Value) -> String {
     serde_json::to_string_pretty(value).expect("JSON serialization of Value")
 }

@@ -1,0 +1,17 @@
+# house-lints v1 (2026-11-14) — copy this file verbatim to the crate or workspace root.
+# The canonical copy lives in Chris's coding hub, under house-lints/; a copy that
+# differs from it is drift.  Each `reason` names the fix, so the warning tells an
+# agent what to write instead.
+
+# Tests may unwrap, expect, and panic: a failing test is meant to stop.
+allow-unwrap-in-tests = true
+allow-expect-in-tests = true
+allow-panic-in-tests = true
+
+disallowed-methods = [
+  { path = "std::path::Path::exists", reason = "answers false for every error, not only NotFound (EACCES, EIO, ELOOP). Use cli_contract::paths::presence_resolved where available (it follows a link, as exists does; a link to nothing is an error), else fs::metadata, reading NotFound as absent only when fs::symlink_metadata answers NotFound too (a link to nothing is not absent); any other error is Unknown, never absent" },
+  { path = "std::path::Path::is_dir", reason = "answers false for every error, not only NotFound. Use cli_contract::paths::presence_resolved where available, else fs::metadata, reading NotFound as absent only when fs::symlink_metadata answers NotFound too (a link to nothing is not absent); any other error is Unknown, never absent" },
+  { path = "std::path::Path::is_file", reason = "answers false for every error, not only NotFound. Use cli_contract::paths::presence_resolved where available, else fs::metadata, reading NotFound as absent only when fs::symlink_metadata answers NotFound too (a link to nothing is not absent); any other error is Unknown, never absent" },
+  { path = "std::fs::create_dir_all", reason = "creates a caller-asserted directory, or a mount point, silently. Use cli_contract::paths::ensure_destination with the caller's --create-destination mode; a tool-owned cache may keep this with #[expect(clippy::disallowed_methods, reason = \"tool-owned\")]" },
+  { path = "std::process::exit", reason = "skips destructors and buffered output, and hides the exit table. Return std::process::ExitCode from main, with the codes from cli_contract::exit" },
+]

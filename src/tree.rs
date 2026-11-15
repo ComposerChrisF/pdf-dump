@@ -228,7 +228,10 @@ pub(crate) fn print_tree_dot(writer: &mut impl Write, doc: &Document, config: &D
     wln!(writer, "}}");
 }
 
-#[allow(clippy::too_many_arguments)]
+#[expect(
+    clippy::too_many_arguments,
+    reason = "the recursive printer threads its traversal state through its arguments"
+)]
 fn emit_dot_node(
     writer: &mut impl Write,
     obj_id: ObjectId,

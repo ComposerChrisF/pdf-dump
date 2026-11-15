@@ -574,6 +574,7 @@ fn read_xfa_packet(doc: &Document, obj: &Object) -> Option<String> {
     Some(text.trim_start_matches('\u{FEFF}').to_string())
 }
 
+#[expect(clippy::string_slice, reason = "the index comes from char_indices")]
 fn truncate_str(s: &str, max_chars: usize) -> &str {
     match s.char_indices().nth(max_chars) {
         Some((idx, _)) => &s[..idx],

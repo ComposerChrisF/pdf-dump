@@ -574,8 +574,10 @@ pub(crate) fn format_hex_dump(data: &[u8]) -> String {
     use std::fmt::Write;
     let mut result = String::new();
     for (offset, chunk) in data.chunks(16).enumerate() {
+        #[expect(clippy::unwrap_used, reason = "fmt::Write into a String cannot fail")]
         write!(result, "{:08x}  ", offset * 16).unwrap();
         for (i, &b) in chunk.iter().enumerate() {
+            #[expect(clippy::unwrap_used, reason = "fmt::Write into a String cannot fail")]
             write!(result, "{:02x} ", b).unwrap();
             if i == 7 {
                 result.push(' ');
@@ -605,6 +607,10 @@ pub(crate) fn format_hex_dump(data: &[u8]) -> String {
 }
 
 #[cfg(test)]
+#[expect(
+    clippy::let_underscore_must_use,
+    reason = "a test that only checks a decoder does not panic discards its result"
+)]
 mod tests {
     use super::*;
     use crate::object::print_single_object;

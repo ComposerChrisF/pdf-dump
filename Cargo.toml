@@ -1,6 +1,6 @@
 [package]
 name = "pdf-dump"
-version = "0.38.1"
+version = "0.38.2"
 edition = "2024"
 rust-version = "1.92"
 description = "CLI tool for inspecting and debugging PDF internals"
@@ -34,3 +34,24 @@ regex = "1"
 [dev-dependencies]
 pretty_assertions = "1.4"
 tempfile = "3.14"
+
+# house-lints v1 (2026-11-14) — the [lints] table, to paste into Cargo.toml.
+# A single crate: paste as is.  A workspace: rename the table to
+# [workspace.lints.clippy] in the root manifest, and put `[lints] workspace = true`
+# in each member.  Every level is "warn": existing violations do not block, and
+# review refuses new ones.  The canonical copy lives in Chris's coding hub, under
+# house-lints/.
+
+[lints.clippy]
+# Every suppression says why, and an #[expect] warns once its lint stops firing.
+allow_attributes = "warn"
+allow_attributes_without_reason = "warn"
+# No panics on input in production code (tests are allowed by clippy.toml).
+unwrap_used = "warn"
+expect_used = "warn"
+panic = "warn"
+# Each of these caught a filed bug in the 2026-11-14 census.
+string_slice = "warn"
+let_underscore_must_use = "warn"
+undocumented_unsafe_blocks = "warn"
+# disallowed_methods is on by default; its list is clippy.toml.

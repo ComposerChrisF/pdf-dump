@@ -42,6 +42,10 @@ const ASCII_PRINTABLE: &str = " !\"#$%&'()*+,-./0123456789:;<=>?@ABCDEFGHIJKLMNO
 const LATIN1_HIGH: &str = "\u{00A0}¡¢£¤¥¦§¨©ª«¬\u{00AD}®¯°±²³´µ¶·¸¹º»¼½¾¿ÀÁÂÃÄÅÆÇÈÉÊËÌÍÎÏÐÑÒÓÔÕÖ×ØÙÚÛÜÝÞßàáâãäåæçèéêëìíîïðñòóôõö÷øùúûüýþÿ";
 
 /// One printable-ASCII byte (`0x20..=0x7E`) as a `&'static str`.
+#[expect(
+    clippy::string_slice,
+    reason = "every caller passes a byte in 0x20..=0x7E, and each char of ASCII_PRINTABLE is one byte"
+)]
 #[inline]
 fn ascii_str(b: u8) -> &'static str {
     let i = (b - 0x20) as usize;
@@ -49,6 +53,10 @@ fn ascii_str(b: u8) -> &'static str {
 }
 
 /// One Latin-1-supplement byte (`0xA0..=0xFF`) as a `&'static str`.
+#[expect(
+    clippy::string_slice,
+    reason = "every caller passes a byte in 0xA0..=0xFF, and each char of LATIN1_HIGH is two bytes, so an even offset is a char boundary"
+)]
 #[inline]
 fn latin1_str(b: u8) -> &'static str {
     let i = (b - 0xA0) as usize * 2;

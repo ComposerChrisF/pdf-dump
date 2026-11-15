@@ -19,6 +19,15 @@
 //! If any of these tests fail, lopdf's behavior has changed and our workarounds
 //! should be revisited. Each test documents which workaround it guards.
 
+#![expect(
+    clippy::disallowed_methods,
+    reason = "the XRef canary skips when its optional out.pdf fixture is not in the crate root; a missing or unreadable file just skips the test"
+)]
+#![expect(
+    clippy::let_underscore_must_use,
+    reason = "a should_panic canary discards a result it never reaches"
+)]
+
 use lopdf::{
     Dictionary, Document, EncryptionState, EncryptionVersion, LoadOptions, Object, Permissions,
     StringFormat,

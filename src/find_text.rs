@@ -61,6 +61,10 @@ fn fold_case(s: &str) -> (String, Vec<(usize, usize)>) {
 }
 
 /// The byte offset `n` characters before `pos` in `s` (or 0).
+#[expect(
+    clippy::string_slice,
+    reason = "the one caller passes a match start that fold_case's spans took from char_indices"
+)]
 fn chars_before(s: &str, pos: usize, n: usize) -> usize {
     s[..pos]
         .char_indices()
@@ -70,6 +74,10 @@ fn chars_before(s: &str, pos: usize, n: usize) -> usize {
 }
 
 /// The byte offset `n` characters after `pos` in `s` (or `s.len()`).
+#[expect(
+    clippy::string_slice,
+    reason = "the one caller passes a match end that fold_case's spans took from char_indices"
+)]
 fn chars_after(s: &str, pos: usize, n: usize) -> usize {
     s[pos..]
         .char_indices()
@@ -110,6 +118,10 @@ fn find_matches(doc: &Document, pattern: &str, page_filter: Option<&PageSpec>) -
         // All search offsets live in `lower_text`; `spans` maps a match back
         // onto `text`, since lowercasing can change a character's byte length
         // (İ is 2 bytes and folds to 3; ẞ is 3 and folds to 2).
+        #[expect(
+            clippy::string_slice,
+            reason = "offsets into lower_text come from find and end a whole match; offsets into text come from char_indices, through spans and chars_before/after"
+        )]
         while let Some(pos) = lower_text[search_start..].find(&lower_pattern) {
             let lower_start = search_start + pos;
             let lower_end = lower_start + lower_pattern.len();

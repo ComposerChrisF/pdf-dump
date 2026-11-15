@@ -41,6 +41,11 @@ impl Core14Font {
     }
 }
 
+#[expect(
+    clippy::panic,
+    clippy::expect_used,
+    reason = "parses core14.txt, embedded at build time; a malformed line is a defect in the binary that the module's tests catch, never input"
+)]
 fn fonts() -> &'static HashMap<&'static str, Core14Font> {
     static FONTS: OnceLock<HashMap<&'static str, Core14Font>> = OnceLock::new();
     FONTS.get_or_init(|| {
@@ -80,6 +85,10 @@ fn fonts() -> &'static HashMap<&'static str, Core14Font> {
     })
 }
 
+#[expect(
+    clippy::expect_used,
+    reason = "parses encoding_names.txt and core14.txt, embedded at build time; a malformed line is a defect in the binary that the module's tests catch, never input"
+)]
 fn named_encodings() -> &'static HashMap<&'static str, NameTable> {
     static TABLES: OnceLock<HashMap<&'static str, NameTable>> = OnceLock::new();
     TABLES.get_or_init(|| {

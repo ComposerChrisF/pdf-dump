@@ -1530,6 +1530,10 @@ pub(crate) fn reliability_json_value(
 }
 
 #[cfg(test)]
+#[expect(
+    clippy::string_slice,
+    reason = "tests slice extracted text at indices find returned for ASCII markers"
+)]
 mod tests {
     use super::*;
     use crate::test_utils::*;

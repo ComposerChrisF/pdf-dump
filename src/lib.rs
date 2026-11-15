@@ -1,6 +1,10 @@
 /// Ends the process after a failed write to stdout: a closed pipe (`pdf-dump … | head -1`) is a
 /// clean exit, since the reader has what it wanted; any other write error is a tool error.
 #[doc(hidden)]
+#[expect(
+    clippy::disallowed_methods,
+    reason = "plan-0013: process::exit stays until run() returns an ExitCode"
+)]
 pub fn exit_on_write_error(e: std::io::Error) -> ! {
     if cli_contract::is_broken_pipe(&e) {
         std::process::exit(cli_contract::OK.into());
@@ -86,6 +90,10 @@ pub fn run() {
 
     let resolved = args.resolve_mode().unwrap_or_else(|e| {
         eprintln!("Error: {}", e);
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "plan-0013: process::exit stays until run() returns an ExitCode"
+        )]
         std::process::exit(USAGE.into());
     });
 
@@ -97,10 +105,18 @@ pub fn run() {
             ResolvedMode::Standalone(StandaloneMode::Object { .. })
         ) {
             eprintln!("Error: --raw requires --object.");
+            #[expect(
+                clippy::disallowed_methods,
+                reason = "plan-0013: process::exit stays until run() returns an ExitCode"
+            )]
             std::process::exit(USAGE.into());
         }
         if args.decode {
             eprintln!("Error: --raw and --decode cannot be used together.");
+            #[expect(
+                clippy::disallowed_methods,
+                reason = "plan-0013: process::exit stays until run() returns an ExitCode"
+            )]
             std::process::exit(USAGE.into());
         }
     }
@@ -110,6 +126,10 @@ pub fn run() {
         (ResolvedMode::Combined(modes), Some(path)) => {
             if modes.as_slice() != [DocMode::Text] || args.json {
                 eprintln!("Error: --output writes --text alone, without --json or another mode.");
+                #[expect(
+                    clippy::disallowed_methods,
+                    reason = "plan-0013: process::exit stays until run() returns an ExitCode"
+                )]
                 std::process::exit(USAGE.into());
             }
             Some(path)
@@ -128,10 +148,18 @@ pub fn run() {
                  hold: {}",
                 output.display()
             );
+            #[expect(
+                clippy::disallowed_methods,
+                reason = "plan-0013: process::exit stays until run() returns an ExitCode"
+            )]
             std::process::exit(USAGE.into());
         }
         if let Err(e) = cli_contract::check_output_file(output, CreateMode::None, Clobber::Allow) {
             eprintln!("Error: {}", e);
+            #[expect(
+                clippy::disallowed_methods,
+                reason = "plan-0013: process::exit stays until run() returns an ExitCode"
+            )]
             std::process::exit(e.exit_code().into());
         }
     }
@@ -139,6 +167,10 @@ pub fn run() {
         && let Err(e) = cli_contract::check_output_file(output, CreateMode::None, Clobber::Allow)
     {
         eprintln!("Error: {}", e);
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "plan-0013: process::exit stays until run() returns an ExitCode"
+        )]
         std::process::exit(e.exit_code().into());
     }
 
@@ -158,6 +190,10 @@ pub fn run() {
             } else {
                 eprintln!("Reason: {}", e);
             }
+            #[expect(
+                clippy::disallowed_methods,
+                reason = "plan-0013: process::exit stays until run() returns an ExitCode"
+            )]
             std::process::exit(TOOL_ERROR.into());
         }
     };
@@ -227,6 +263,10 @@ pub fn run() {
     let page_spec = args.page.as_deref().map(|s| {
         PageSpec::parse(s).unwrap_or_else(|e| {
             eprintln!("Error: {}", e);
+            #[expect(
+                clippy::disallowed_methods,
+                reason = "plan-0013: process::exit stays until run() returns an ExitCode"
+            )]
             std::process::exit(USAGE.into());
         })
     });
@@ -242,6 +282,10 @@ pub fn run() {
         && let Err(msg) = helpers::build_page_list(&doc, Some(spec))
     {
         eprintln!("Error: {}", msg);
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "plan-0013: process::exit stays until run() returns an ExitCode"
+        )]
         std::process::exit(TOOL_ERROR.into());
     }
 
@@ -266,6 +310,10 @@ pub fn run() {
                 eprintln!("Error: --require-text: {failure}");
             }
             eprintln!("Error: --require-text: nothing was written");
+            #[expect(
+                clippy::disallowed_methods,
+                reason = "plan-0013: process::exit stays until run() returns an ExitCode"
+            )]
             std::process::exit(TOOL_ERROR.into());
         }
     }
@@ -281,7 +329,15 @@ pub fn run() {
             if dispatch_standalone(&mut out, &doc, &config, mode, recovery) {
                 // A named object the document lacks is a caller-claim/world
                 // mismatch (exit 1), like --page past the end (bug-0019).
+                #[expect(
+                    clippy::let_underscore_must_use,
+                    reason = "best-effort flush before exit: every write went through w!/wln!, which already handled any write error, and the most this flush can still fail on is a trailing partial line, whose error std would discard at exit as well"
+                )]
                 let _ = out.flush();
+                #[expect(
+                    clippy::disallowed_methods,
+                    reason = "plan-0013: process::exit stays until run() returns an ExitCode"
+                )]
                 std::process::exit(TOOL_ERROR.into());
             }
             false
@@ -318,6 +374,10 @@ pub fn run() {
     };
 
     if had_issues || strict_malformed || encrypted_undecrypted {
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "plan-0013: process::exit stays until run() returns an ExitCode"
+        )]
         std::process::exit(FINDINGS.into());
     }
 }
@@ -342,6 +402,10 @@ fn write_atomically(path: &std::path::Path, bytes: &[u8]) -> io::Result<()> {
         .and_then(|()| file.sync_all())
         .and_then(|()| std::fs::rename(&temp, path));
     if result.is_err() {
+        #[expect(
+            clippy::let_underscore_must_use,
+            reason = "cleanup after a failed write: the write's own error is the one returned and reported"
+        )]
         let _ = std::fs::remove_file(&temp);
     }
     result
@@ -423,10 +487,18 @@ fn dispatch_standalone(
                         cli_contract::prepare_output_file(output, CreateMode::None, Clobber::Allow)
                     {
                         eprintln!("Error: {}", e);
+                        #[expect(
+                            clippy::disallowed_methods,
+                            reason = "plan-0013: process::exit stays until run() returns an ExitCode"
+                        )]
                         std::process::exit(e.exit_code().into());
                     }
                     if let Err(e) = std::fs::write(output, &*decoded_content) {
                         eprintln!("Error writing to output file: {}", e);
+                        #[expect(
+                            clippy::disallowed_methods,
+                            reason = "plan-0013: process::exit stays until run() returns an ExitCode"
+                        )]
                         std::process::exit(TOOL_ERROR.into());
                     }
                     wln!(
@@ -442,10 +514,18 @@ fn dispatch_standalone(
                         "Error: Object {} is not a stream and cannot be extracted to a file.",
                         obj_num
                     );
+                    #[expect(
+                        clippy::disallowed_methods,
+                        reason = "plan-0013: process::exit stays until run() returns an ExitCode"
+                    )]
                     std::process::exit(TOOL_ERROR.into());
                 }
                 Err(reason) => {
                     eprintln!("Error: {reason}");
+                    #[expect(
+                        clippy::disallowed_methods,
+                        reason = "plan-0013: process::exit stays until run() returns an ExitCode"
+                    )]
                     std::process::exit(TOOL_ERROR.into());
                 }
             }
@@ -572,6 +652,10 @@ fn dispatch_standalone(
                 Err(e) => {
                     // A malformed --search expression is a usage error (exit 2).
                     eprintln!("Error: Invalid search expression: {}", e);
+                    #[expect(
+                        clippy::disallowed_methods,
+                        reason = "plan-0013: process::exit stays until run() returns an ExitCode"
+                    )]
                     std::process::exit(USAGE.into());
                 }
             };
@@ -591,12 +675,19 @@ fn dispatch_standalone(
 
 fn tool_error(message: String) -> ! {
     eprintln!("Error: {message}");
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "plan-0013: process::exit stays until run() returns an ExitCode"
+    )]
     std::process::exit(TOOL_ERROR.into());
 }
 
 /// Exports one image and writes it.  A refusal names what stopped it, and nothing is written.  A mask
 /// left unapplied exits 3 with the file written: the file is not the picture as drawn.
-#[allow(clippy::too_many_arguments)]
+#[expect(
+    clippy::too_many_arguments,
+    reason = "one export takes its document, source, destination, labels, and the run's output settings"
+)]
 fn write_exported_image(
     out: &mut impl Write,
     doc: &Document,
@@ -619,6 +710,10 @@ fn write_exported_image(
         .unwrap_or_else(|why| tool_error(format!("{what} cannot be exported: {why}.")));
     if let Err(e) = cli_contract::prepare_output_file(output, CreateMode::None, Clobber::Allow) {
         eprintln!("Error: {}", e);
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "plan-0013: process::exit stays until run() returns an ExitCode"
+        )]
         std::process::exit(e.exit_code().into());
     }
     if let Err(e) = std::fs::write(output, &image.bytes) {
@@ -661,7 +756,15 @@ fn write_exported_image(
         );
     }
     if !image.mask_applied {
+        #[expect(
+            clippy::let_underscore_must_use,
+            reason = "best-effort flush before exit: every write went through w!/wln!, which already handled any write error, and the most this flush can still fail on is a trailing partial line, whose error std would discard at exit as well"
+        )]
         let _ = out.flush();
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "plan-0013: process::exit stays until run() returns an ExitCode"
+        )]
         std::process::exit(FINDINGS.into());
     }
 }

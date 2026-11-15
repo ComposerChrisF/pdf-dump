@@ -21,6 +21,10 @@ impl TextString {
         let mut text = String::with_capacity(bytes.len() * 2 + 2);
         text.push('<');
         for b in bytes {
+            #[expect(
+                clippy::let_underscore_must_use,
+                reason = "fmt::Write into a String cannot fail"
+            )]
             let _ = write!(text, "{b:02X}");
         }
         text.push('>');
@@ -186,6 +190,10 @@ pub(crate) fn hex_digits(bytes: &[u8]) -> String {
     use std::fmt::Write;
     let mut out = String::with_capacity(bytes.len() * 2);
     for b in bytes {
+        #[expect(
+            clippy::let_underscore_must_use,
+            reason = "fmt::Write into a String cannot fail"
+        )]
         let _ = write!(out, "{b:02x}");
     }
     out
@@ -227,6 +235,10 @@ fn decode_utf16be(bytes: &[u8]) -> Option<String> {
 }
 
 /// Under UTF-8 a language code is its letters, so 2 or 4 bytes.
+#[expect(
+    clippy::string_slice,
+    reason = "every index comes from find on a one-byte ESC, or is one past it"
+)]
 fn decode_utf8(bytes: &[u8]) -> Option<String> {
     let s = std::str::from_utf8(bytes).ok()?;
     let mut out = String::with_capacity(s.len());
@@ -265,6 +277,10 @@ pub(crate) fn strip_markup(xml: &str) -> (String, bool) {
     }
 }
 
+#[expect(
+    clippy::string_slice,
+    reason = "every index comes from find, is one past an ASCII '<', or is a markup end that markup_end returns just past an ASCII delimiter; CDATA's 9 and 3 are its ASCII opener and closer, and end - 3 >= 9 because markup_end finds ]]> from offset 0 and <![CDATA[ holds no ], so the match cannot start before byte 9"
+)]
 fn try_strip_markup(xml: &str) -> Option<String> {
     let mut out = String::with_capacity(xml.len());
     let mut open: Vec<&str> = Vec::new();
@@ -336,6 +352,10 @@ fn markup_end(s: &str) -> Option<(usize, Markup<'_>)> {
 
 /// The end of a `<!DOCTYPE`, past its internal subset if it has one.  Any other `<!` is malformed, as
 /// is a `<` before the end, so that a declaration cannot swallow a tag.
+#[expect(
+    clippy::string_slice,
+    reason = "every index comes from find, is one past an ASCII byte, or advances by a char's len_utf8"
+)]
 fn doctype_end(s: &str) -> Option<usize> {
     if !s.get(..9)?.eq_ignore_ascii_case("<!DOCTYPE") {
         return None;
@@ -361,6 +381,10 @@ fn doctype_end(s: &str) -> Option<usize> {
 }
 
 /// One element tag: a name, then attributes of the form `name="value"`.
+#[expect(
+    clippy::string_slice,
+    reason = "s starts with '<' (or '</' when closing), and every other index comes from find, a trim_start, or is one past an ASCII '/', '=' or quote"
+)]
 fn parse_tag(s: &str) -> Option<(usize, Markup<'_>)> {
     let closing = s.starts_with("</");
     let name_start = if closing { 2 } else { 1 };
@@ -413,6 +437,10 @@ fn parse_tag(s: &str) -> Option<(usize, Markup<'_>)> {
 /// Every element named `local`, under any namespace prefix: from its `<` through its closing tag, or
 /// to the end of the input if it has none, which `strip_markup` then reports.  The walk goes
 /// by markup, so an element inside a comment or CDATA does not count.
+#[expect(
+    clippy::string_slice,
+    reason = "every index comes from find, is one past an ASCII '<', or is a markup end that markup_end returns just past an ASCII delimiter"
+)]
 pub(crate) fn find_elements<'a>(xml: &'a str, local: &str) -> (Vec<&'a str>, bool) {
     let mut found = Vec::new();
     let mut read_to_end = true;
@@ -459,6 +487,10 @@ pub(crate) fn find_elements<'a>(xml: &'a str, local: &str) -> (Vec<&'a str>, boo
 }
 
 /// A `<` that cannot open markup: nothing that could start a name follows it.
+#[expect(
+    clippy::string_slice,
+    reason = "both callers pass a string that starts with an ASCII '<'"
+)]
 fn is_literal_lt(s: &str) -> bool {
     match s[1..].chars().next() {
         Some('/' | '?' | '!' | '_' | ':') => false,
@@ -484,6 +516,10 @@ fn start_new_line(out: &mut String) {
     }
 }
 
+#[expect(
+    clippy::string_slice,
+    reason = "every index comes from find, or is one past an ASCII '&' or ';'"
+)]
 fn push_character_data(out: &mut String, data: &str) {
     let mut rest = data;
     while let Some(amp) = rest.find('&') {

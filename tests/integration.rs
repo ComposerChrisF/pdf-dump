@@ -3,6 +3,11 @@
 //! These tests exercise the CLI binary end-to-end using synthetic PDF files
 //! created via lopdf, verifying both dump and extract modes.
 
+#![expect(
+    clippy::disallowed_methods,
+    reason = "tests assert on fixtures in a temp dir"
+)]
+
 use std::fs;
 use std::io::Write;
 use std::path::PathBuf;
