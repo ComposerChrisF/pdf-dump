@@ -714,7 +714,12 @@ fn process_content(
                                     &no_font
                                 },
                             ),
-                            other => {
+                            other =>
+                            {
+                                #[expect(
+                                    clippy::excessive_nesting,
+                                    reason = "plan-0014: nested more than 6 blocks deep; flattening it is that plan's work"
+                                )]
                                 if let Some(n) = number(other) {
                                     let adj = -n / 1000.0 * gs.size;
                                     let vertical = gs.font.is_some_and(|f| f.metrics.vertical);

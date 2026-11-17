@@ -267,12 +267,20 @@ impl<'a> PageWalk<'a, '_> {
                                 Ok(read) => {
                                     let index = self.next_index;
                                     self.next_index += 1;
+                                    #[expect(
+                                        clippy::excessive_nesting,
+                                        reason = "plan-0014: nested more than 6 blocks deep; flattening it is that plan's work"
+                                    )]
                                     if read.ambiguous {
                                         self.warn(format!(
                                             "inline image at offset {offset}: where its data ends is a guess"
                                         ));
                                     }
                                     let keep = self.keep_data_of == Some(index);
+                                    #[expect(
+                                        clippy::excessive_nesting,
+                                        reason = "plan-0014: nested more than 6 blocks deep; flattening it is that plan's work"
+                                    )]
                                     self.scan.images.push(InlineImage {
                                         page: self.page,
                                         index,
@@ -507,6 +515,10 @@ impl<'b> Tokens<'b> {
                             let mut value = u32::from(next - b'0');
                             for _ in 0..2 {
                                 match self.bytes.get(self.pos) {
+                                    #[expect(
+                                        clippy::excessive_nesting,
+                                        reason = "plan-0014: nested more than 6 blocks deep; flattening it is that plan's work"
+                                    )]
                                     Some(d @ b'0'..=b'7') => {
                                         value = value * 8 + u32::from(d - b'0');
                                         self.pos += 1;

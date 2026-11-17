@@ -5,6 +5,11 @@ All notable changes to `pdf-dump` are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0/).
 
+## [0.38.3] - 2026-11-16
+### Changed
+- **Lint set v2.**  Clippy's `excessive_nesting` is on at a threshold of 6; the four existing deeper
+  blocks carry an `#[expect]` naming plan-0014, which flattens them.  No behavior change.
+
 ## [0.38.2] - 2026-11-15
 ### Changed
 - **A shared lint set is adopted.**  `clippy.toml` disallows `Path::exists`, `is_dir`, `is_file`,
