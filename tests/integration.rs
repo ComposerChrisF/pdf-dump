@@ -4686,7 +4686,11 @@ const OUTLINED_PAGE: &[u8] =
 const SCANNED_PAGE: &[u8] = b"q 612 0 0 792 0 0 cm /Im0 Do Q";
 const TEXT_PAGE: &[u8] = b"BT /F1 12 Tf 72 700 Td (Statement) Tj ET";
 
-/// One page per entry, all sharing `/F1` (Helvetica, WinAnsi) and `/Im0` (an image).
+/// One page per entry, all sharing `/F1` (Helvetica, WinAnsi) and these XObjects:
+/// `/Im0`, an image; `/Im1`, another object with the same data; `/Im2`, other data;
+/// `/Im3` and `/Im4`, Im0's data under an `/SMask` and a `/Decode`; and `/Fm0`, a form
+/// drawing `/Im0`.  `/GS0` sets a soft mask and `/GS1` sets none; `/CS0` and `/CS1`
+/// are two palettes.
 fn pdf_of_pages(contents: &[&[u8]]) -> tempfile::NamedTempFile {
     let mut doc = Document::new();
     let mut font = Dictionary::new();
@@ -4696,13 +4700,58 @@ fn pdf_of_pages(contents: &[&[u8]]) -> tempfile::NamedTempFile {
     font.set("Encoding", Object::Name(b"WinAnsiEncoding".to_vec()));
     let font_id = doc.add_object(Object::Dictionary(font));
     let image_id = doc.add_object(Object::Stream(gray_image(1, 1, vec![0])));
+    let copy_id = doc.add_object(Object::Stream(gray_image(1, 1, vec![0])));
+    let other_id = doc.add_object(Object::Stream(gray_image(1, 1, vec![255])));
+    let mut masked = gray_image(1, 1, vec![0]);
+    masked.dict.set("SMask", Object::Reference(other_id));
+    let masked_id = doc.add_object(Object::Stream(masked));
+    let mut inverted = gray_image(1, 1, vec![0]);
+    inverted.dict.set("Decode", vec![1.into(), 0.into()]);
+    let inverted_id = doc.add_object(Object::Stream(inverted));
+    let mut form = Dictionary::new();
+    form.set("Type", Object::Name(b"XObject".to_vec()));
+    form.set("Subtype", Object::Name(b"Form".to_vec()));
+    let form_id = doc.add_object(Object::Stream(Stream::new(
+        form,
+        b"q 50 0 0 20 72 750 cm /Im0 Do Q".to_vec(),
+    )));
+    let mut soft_mask = Dictionary::new();
+    soft_mask.set("S", Object::Name(b"Luminosity".to_vec()));
+    soft_mask.set("G", Object::Reference(form_id));
+    let mut states = Dictionary::new();
+    states.set(
+        "GS0",
+        Dictionary::from_iter(vec![("SMask", Object::Dictionary(soft_mask))]),
+    );
+    states.set(
+        "GS1",
+        Dictionary::from_iter(vec![("SMask", Object::Name(b"None".to_vec()))]),
+    );
+    let palette = |rgb: &[u8]| {
+        Object::Array(vec![
+            Object::Name(b"Indexed".to_vec()),
+            Object::Name(b"DeviceRGB".to_vec()),
+            0.into(),
+            Object::String(rgb.to_vec(), lopdf::StringFormat::Hexadecimal),
+        ])
+    };
+    let mut spaces = Dictionary::new();
+    spaces.set("CS0", palette(&[0, 0, 0]));
+    spaces.set("CS1", palette(&[255, 0, 0]));
     let mut fonts = Dictionary::new();
     fonts.set("F1", Object::Reference(font_id));
     let mut xobjects = Dictionary::new();
     xobjects.set("Im0", Object::Reference(image_id));
+    xobjects.set("Im1", Object::Reference(copy_id));
+    xobjects.set("Im2", Object::Reference(other_id));
+    xobjects.set("Im3", Object::Reference(masked_id));
+    xobjects.set("Im4", Object::Reference(inverted_id));
+    xobjects.set("Fm0", Object::Reference(form_id));
     let mut resources = Dictionary::new();
     resources.set("Font", Object::Dictionary(fonts));
     resources.set("XObject", Object::Dictionary(xobjects));
+    resources.set("ExtGState", Object::Dictionary(states));
+    resources.set("ColorSpace", Object::Dictionary(spaces));
     let resources_id = doc.add_object(Object::Dictionary(resources));
     let pages_id = doc.new_object_id();
     let kids: Vec<Object> = contents
@@ -4753,8 +4802,8 @@ fn pages_that_draw_but_show_no_text_are_listed_and_the_exit_is_unchanged() {
         assert_eq!(
             json["pages_without_text"],
             serde_json::json!([
-                {"page_number": 2, "paths": true, "images": false, "unread": false},
-                {"page_number": 3, "paths": false, "images": true, "unread": false},
+                {"page_number": 2, "paths": true, "images": false, "unread": false, "repeated_images": false},
+                {"page_number": 3, "paths": false, "images": true, "unread": false, "repeated_images": false},
             ]),
             "{args:?}"
         );
@@ -4854,6 +4903,170 @@ fn require_text_fails_a_document_it_cannot_show_carries_text() {
     let output = run_args(&empty, &["--text", "--require-text"]);
     assert_eq!(output.status.code(), Some(1), "{output:?}");
     assert!(String::from_utf8_lossy(&output.stderr).contains("has no pages"));
+}
+
+/// A small logo, `/Im0`, at the top of a page with text.
+const LOGO_TEXT_PAGE: &[u8] =
+    b"q 50 0 0 20 72 750 cm /Im0 Do Q BT /F1 12 Tf 72 700 Td (Statement) Tj ET";
+/// The same logo, alone.
+const LOGO_PAGE: &[u8] = b"q 50 0 0 20 72 750 cm /Im0 Do Q";
+
+#[test]
+fn a_page_that_only_repeats_a_text_pages_logo_passes_require_text_audibly() {
+    let pdf = pdf_of_pages(&[LOGO_TEXT_PAGE, LOGO_TEXT_PAGE, LOGO_PAGE]);
+    for args in [
+        &["--text", "--require-text"][..],
+        &["--text", "--layout", "--require-text"][..],
+        &["--text", "--require-text", "--page", "3"][..],
+    ] {
+        let output = run_args(&pdf, args);
+        assert_eq!(output.status.code(), Some(0), "{args:?}: {output:?}");
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert!(
+            stderr.contains("page 3 draws only an image that a page with text draws too"),
+            "{args:?}: {stderr}"
+        );
+    }
+    for layout in [false, true] {
+        let mut args = vec!["--text", "--json", "--require-text"];
+        if layout {
+            args.push("--layout");
+        }
+        let output = run_args(&pdf, &args);
+        assert_eq!(output.status.code(), Some(0), "{args:?}: {output:?}");
+        let json: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+        assert_eq!(
+            json["pages_without_text"],
+            serde_json::json!([{"page_number": 3, "paths": false, "images": true,
+                                "unread": false, "repeated_images": true}]),
+            "{args:?}"
+        );
+    }
+    // Another object holding the same data is the same image, a logo drawn through a
+    // form is the logo, an inline logo repeats an inline logo, and a state with no
+    // soft mask changes nothing.
+    const INLINE_LOGO: &[u8] = b"q 50 0 0 20 72 750 cm BI /W 1 /H 1 /BPC 8 /CS /CS0 ID \x00\nEI Q";
+    let inline_text_page = [INLINE_LOGO, b" BT /F1 12 Tf 72 700 Td (Statement) Tj ET"].concat();
+    for (text_page, logo_page, why) in [
+        (
+            LOGO_TEXT_PAGE,
+            &b"q 50 0 0 20 72 750 cm /Im1 Do Q"[..],
+            "a copy",
+        ),
+        (LOGO_TEXT_PAGE, b"/Fm0 Do", "the logo page uses a form"),
+        (
+            b"/Fm0 Do BT /F1 12 Tf 72 700 Td (Statement) Tj ET",
+            LOGO_PAGE,
+            "the text page uses a form",
+        ),
+        (&inline_text_page[..], INLINE_LOGO, "an inline logo"),
+        (
+            LOGO_TEXT_PAGE,
+            b"/GS1 gs q 50 0 0 20 72 750 cm /Im0 Do Q",
+            "no soft mask",
+        ),
+        (
+            LOGO_TEXT_PAGE,
+            b"q 72 750 50 20 re W n 50 0 0 20 72 750 cm /Im0 Do Q",
+            "a logo clipped to its box",
+        ),
+    ] {
+        let pdf = pdf_of_pages(&[text_page, logo_page]);
+        let output = run_args(&pdf, &["--text", "--require-text"]);
+        assert_eq!(output.status.code(), Some(0), "{why}: {output:?}");
+        assert!(
+            String::from_utf8_lossy(&output.stderr).contains("page 2 draws only an image"),
+            "{why}: {output:?}"
+        );
+    }
+}
+
+#[test]
+fn require_text_still_fails_an_image_page_that_repeats_nothing_from_a_text_page() {
+    let palette_text = [
+        &b"q 50 0 0 20 72 750 cm BI /W 1 /H 1 /BPC 8 /CS /CS0 ID \x00\nEI Q "[..],
+        TEXT_PAGE,
+    ]
+    .concat();
+    for (pages, why) in [
+        (&[LOGO_PAGE][..], "no page has text"),
+        (&[LOGO_PAGE, LOGO_PAGE][..], "no page has text"),
+        (&[TEXT_PAGE, LOGO_PAGE][..], "the text page draws no image"),
+        (
+            &[LOGO_TEXT_PAGE, b"q 50 0 0 20 72 750 cm /Im2 Do Q"][..],
+            "other image data",
+        ),
+        (
+            &[LOGO_TEXT_PAGE, b"q 50 0 0 20 72 750 cm /Im0 Do /Im2 Do Q"][..],
+            "one image is new",
+        ),
+        (
+            &[
+                LOGO_TEXT_PAGE,
+                b"q 50 0 0 20 72 750 cm /Im0 Do Q 0 0 m 9 9 l S",
+            ][..],
+            "it draws a path too",
+        ),
+        (
+            &[LOGO_TEXT_PAGE, b"q 50 0 0 20 72 750 cm /Im3 Do Q"][..],
+            "the same data under a soft mask",
+        ),
+        (
+            &[LOGO_TEXT_PAGE, b"q 50 0 0 20 72 750 cm /Im4 Do Q"][..],
+            "the same data, inverted",
+        ),
+        (
+            &[LOGO_TEXT_PAGE, b"/GS0 gs q 50 0 0 20 72 750 cm /Im0 Do Q"][..],
+            "a soft mask set by gs",
+        ),
+        (
+            &[LOGO_TEXT_PAGE, b"/GSX gs q 50 0 0 20 72 750 cm /Im0 Do Q"][..],
+            "a graphics state that is not there",
+        ),
+        (
+            &[
+                LOGO_TEXT_PAGE,
+                b"72 700 m 80 700 l 76 712 l h W n q 612 0 0 792 0 0 cm /Im0 Do Q",
+            ][..],
+            "letters cut out of the logo by a clip",
+        ),
+        (
+            &[
+                LOGO_TEXT_PAGE,
+                b"q 2 0 0 12 72 700 cm /Im0 Do Q q 8 0 0 2 72 700 cm /Im0 Do Q",
+            ][..],
+            "copies of the logo laid out as a letter",
+        ),
+        (
+            &[LOGO_TEXT_PAGE, b"/Fm0 Do /Fm0 Do"][..],
+            "a form drawing the logo, drawn twice",
+        ),
+        (
+            &[LOGO_TEXT_PAGE, b"q 50 0 0 20 72 750 cm /Im0 Do /Im1 Do Q"][..],
+            "the logo and its copy",
+        ),
+        (
+            &[
+                &palette_text[..],
+                b"q 50 0 0 20 72 750 cm BI /W 1 /H 1 /BPC 8 /CS /CS1 ID \x00\nEI Q",
+            ][..],
+            "the same inline data in another palette",
+        ),
+        (
+            &[
+                LOGO_TEXT_PAGE,
+                b"q 50 0 0 20 72 750 cm BI /W 1 /H 1 /BPC 8 /CS /CSX ID \x00\nEI Q",
+            ][..],
+            "an inline palette that is not there",
+        ),
+    ] {
+        let pdf = pdf_of_pages(pages);
+        let output = run_args(&pdf, &["--text", "--require-text"]);
+        assert_eq!(output.status.code(), Some(1), "{why}: {output:?}");
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert!(stderr.contains("but shows no text"), "{why}: {stderr}");
+        assert!(!stderr.contains("draws only"), "{why}: {stderr}");
+    }
 }
 
 /// bug-0044: each glyph in its own `BT … Tm … Tj ET`, in Courier with `/Widths`,

@@ -5,9 +5,18 @@ All notable changes to `pdf-dump` are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0/).
 
+## [0.39.0] - 2026-11-18
+### Changed
+- **`--require-text` passes a page that draws one image, once, that a page with text also draws**
+  (a logo on every page), with nothing else drawn and only plain drawing state around it.  Such a
+  page stays listed in `pages_without_text` with the new field `repeated_images: true` and a
+  stderr note.  Images match only when their data and dictionaries (every reference resolved) are
+  identical.  The check compares images, not what a viewer shows, and is no defence against a PDF
+  built to fool it.  Filed plan-0016 (read annotation appearances).
+
 ## [0.38.3] - 2026-11-16
 ### Changed
-- **Lint set v2.**  Clippy's `excessive_nesting` is on at a threshold of 6; the four existing deeper
+- **Lint set v2.**  Clippy’s `excessive_nesting` is on at a threshold of 6; the four existing deeper
   blocks carry an `#[expect]` naming plan-0014, which flattens them.  No behavior change.
 
 ## [0.38.2] - 2026-11-15
@@ -27,7 +36,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `env!("CARGO_BIN_EXE_pdf-dump")`.
 
 ### Changed
-- **`package.homepage` removed from `Cargo.toml`.**  Cargo 1.100's manifest lint warns that it is
+- **`package.homepage` removed from `Cargo.toml`.**  Cargo 1.100’s manifest lint warns that it is
   redundant with `package.repository`, which holds the same URL.
 
 ## [0.38.0] - 2026-11-10
@@ -36,16 +45,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   They decided lines and spaces from the operators alone, so text placed glyph by glyph (a `BT`
   per glyph, a `Tm` per glyph, or a `Td` per glyph, with words separated by position) printed a
   glyph per line or ran its words together, under a `reliable` verdict, and `--find-text`
-  reported no match, with exit 0, for a word on the page.  Each show-string's position now comes
+  reported no match, with exit 0, for a word on the page.  Each show-string’s position now comes
   from the `--layout` text-state walk (`layout::string_positions`), and the separator between two
   consecutive strings is a new line when the baseline moves and a space for a word gap.  Where a
-  width is unknown, the operators' separators stand, as before.  Content order is kept and the
+  width is unknown, the operators’ separators stand, as before.  Content order is kept and the
   verdict is unchanged.
 
 ## [0.37.0] - 2026-11-09
 ### Added
 - **`--text` and `--text --layout` name each page that draws but shows no text.**  A new module,
-  `paint.rs`, reads from a page's operators alone, through form XObjects, whether the page shows
+  `paint.rs`, reads from a page’s operators alone, through form XObjects, whether the page shows
   text, fills or strokes paths, or draws images, and whether its content could not be read to
   its end.  A page that draws paths or images but shows no text (outlined words, a scan) is named
   in a stderr note and, under `--json`, in `pages_without_text: [{page_number, paths, images,

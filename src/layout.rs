@@ -1285,6 +1285,7 @@ pub(crate) fn print_layout(
     for warn in &content_warnings {
         eprintln!("Warning: {warn}");
     }
+    paint::mark_repeats(doc, &mut without_text);
     paint::print_note(&without_text);
     let fonts = text::dedup_font_records(all_fonts);
     text::print_reliability_banner(&fonts, total, unmapped);
@@ -1335,6 +1336,7 @@ pub(crate) fn layout_json_value(
         all_fonts.extend(page.fonts);
     }
     let fonts = text::dedup_font_records(all_fonts);
+    paint::mark_repeats(doc, &mut without_text);
     paint::print_note(&without_text);
     text::print_reliability_banner(&fonts, total, unmapped);
     let reliability = text::reliability_json_value(&fonts, total, unmapped);

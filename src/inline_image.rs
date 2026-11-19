@@ -688,23 +688,27 @@ fn read_inline_image<'b>(
     tokens: &mut Tokens<'b>,
     resources: Option<&Dictionary>,
 ) -> Result<ReadInline<'b>, InlineError> {
-    let dict = read_inline_dict(tokens)?;
+    let (dict, _) = read_inline_dict(tokens)?;
     read_inline_data(doc, tokens, dict, resources)
 }
 
-/// With `tokens` just past `BI`: reads the dictionary, leaving `tokens` just past `ID`.
-fn read_inline_dict(tokens: &mut Tokens) -> Result<Dictionary, InlineError> {
+/// With `tokens` just past `BI`: reads the dictionary, leaving `tokens` just past `ID`, and
+/// says whether a key was written more than once (the last value is the one kept, which
+/// a reader keeping the first would not show).
+fn read_inline_dict(tokens: &mut Tokens) -> Result<(Dictionary, bool), InlineError> {
     let mut dict = Dictionary::new();
+    let mut repeated = false;
     loop {
         tokens.skip_space();
         match tokens.bytes.get(tokens.pos) {
             Some(b'/') => {
                 let key = tokens.read_name();
+                repeated |= dict.has(&key);
                 dict.set(key, tokens.read_value(0)?);
             }
             Some(_) if tokens.bytes[tokens.pos..].starts_with(b"ID") => {
                 tokens.pos += 2;
-                return Ok(dict);
+                return Ok((dict, repeated));
             }
             Some(_) => {
                 return Err(InlineError::Malformed(
@@ -809,7 +813,7 @@ fn flate_length(data: &[u8]) -> Option<usize> {
 
 /// The data's length when it can be worked out, which is only with no filter.  Using it means raw
 /// samples that happen to spell ` EI ` do not end the image early.
-fn exact_length(
+pub(crate) fn exact_length(
     doc: &Document,
     dict: &Dictionary,
     resources: Option<&Dictionary>,
@@ -928,6 +932,10 @@ pub(crate) struct DecodedContent {
     pub stopped_early: bool,
     /// Inline images with neither `/CS` nor `/IM`, which `operations` leaves out.
     pub dropped_images: usize,
+    /// Each inline image read to an end that was not a guess, from a dictionary that
+    /// repeats no key, dropped or not, with its data: lopdf gives no data for one whose
+    /// colour space it does not know (`/G`, say).
+    pub inline_images: Vec<(Dictionary, Vec<u8>)>,
 }
 
 /// What a listing of operators says about `DecodedContent::dropped_images`.
@@ -951,11 +959,22 @@ const END_MARKER: &str = "PdfDumpEndOfContent";
 /// - It stops at a comment not followed directly by an operator or operand, and at white space other
 ///   than space, tab, CR and LF.  So those are blanked out too.
 pub(crate) fn decode_content(bytes: &[u8]) -> Result<DecodedContent, lopdf::Error> {
-    let doc = Document::new();
+    decode_content_in(&Document::new(), bytes, None)
+}
+
+/// `decode_content`, reading each inline image with `doc` and the `resources` its content
+/// is drawn with, so that the length of one whose colour space names a resource is
+/// worked out rather than searched for.
+pub(crate) fn decode_content_in(
+    doc: &Document,
+    bytes: &[u8],
+    resources: Option<&Dictionary>,
+) -> Result<DecodedContent, lopdf::Error> {
     let mut tokens = Tokens { bytes, pos: 0 };
     let mut operators = 0usize;
     let mut blanked = Vec::new();
     let mut dropped_images = 0usize;
+    let mut inline_images = Vec::new();
     let mut end_unsure = false;
     loop {
         let before = tokens.pos;
@@ -979,7 +998,7 @@ pub(crate) fn decode_content(bytes: &[u8]) -> Result<DecodedContent, lopdf::Erro
         let start = tokens.pos - 2;
         // A dictionary the scanner cannot read may still be one lopdf reads, and panics on, and
         // where its image ends is unknown either way.
-        let Ok(dict) = read_inline_dict(&mut tokens) else {
+        let Ok((dict, repeated)) = read_inline_dict(&mut tokens) else {
             blanked.push(start..bytes.len());
             end_unsure = true;
             break;
@@ -990,10 +1009,15 @@ pub(crate) fn decode_content(bytes: &[u8]) -> Result<DecodedContent, lopdf::Erro
                 dict.get(b"IM").or_else(|_| dict.get(b"ImageMask")),
                 Ok(Object::Boolean(true))
             );
-        match read_inline_data(&doc, &mut tokens, dict, None) {
+        match read_inline_data(doc, &mut tokens, dict, resources) {
             Ok(read) => {
                 // Only a blanked image's guess can cost anything: lopdf reads the rest itself.
                 end_unsure |= read.ambiguous && panics_lopdf;
+                // An image whose end was guessed, or whose dictionary repeats a key, is left
+                // out: what it is cannot be told for certain.
+                if !read.ambiguous && !repeated {
+                    inline_images.push((read.dict, read.data.to_vec()));
+                }
                 if panics_lopdf {
                     blanked.push(start..tokens.pos);
                     dropped_images += 1;
@@ -1030,6 +1054,7 @@ pub(crate) fn decode_content(bytes: &[u8]) -> Result<DecodedContent, lopdf::Erro
         stopped_early: end_unsure || !reached_the_end || operations.len() < operators,
         operations,
         dropped_images,
+        inline_images,
     })
 }
 

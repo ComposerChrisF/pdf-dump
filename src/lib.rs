@@ -294,10 +294,17 @@ pub fn run() {
     // carry text, so it fails the claim too.
     if args.require_text {
         let pages = helpers::build_page_list(&doc, page_spec.as_ref()).unwrap_or_default();
-        let mut failures: Vec<String> = pages
+        let mut lacking: Vec<(u32, paint::PagePaint)> = pages
             .iter()
             .map(|(pn, id)| (*pn, paint::page_paint(&doc, *id)))
             .filter(|(_, p)| p.lacks_text())
+            .collect();
+        // A page that only repeats an image a page with text draws passes
+        // (plan-0015, implemented in v0.39.0).
+        paint::mark_repeats(&doc, &mut lacking);
+        let mut failures: Vec<String> = lacking
+            .iter()
+            .filter(|(_, p)| !p.repeated)
             .map(|(pn, p)| format!("page {pn} {}", p.describe()))
             .collect();
         if encrypted_undecrypted {

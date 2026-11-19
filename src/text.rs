@@ -1326,6 +1326,7 @@ pub(crate) fn print_text(
     for warn in &content_warnings {
         eprintln!("Warning: {}", warn);
     }
+    paint::mark_repeats(doc, &mut without_text);
     paint::print_note(&without_text);
 
     let fonts = dedup_font_records(all_fonts);
@@ -1367,6 +1368,7 @@ pub(crate) fn text_json_value(doc: &Document, page_filter: Option<&PageSpec>) ->
 
     let fonts = dedup_font_records(all_fonts);
     // Print the loud banner to stderr even in JSON mode; stdout stays clean.
+    paint::mark_repeats(doc, &mut without_text);
     paint::print_note(&without_text);
     print_reliability_banner(&fonts, total_codes, unmapped_codes);
     let reliability = reliability_json_value(&fonts, total_codes, unmapped_codes);

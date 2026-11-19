@@ -161,7 +161,18 @@ Use --strict to refuse the repair and exit 3 instead (a hard gate for CI).
 pdf-dump reads a PDF's structure and draws nothing, so exit 0 does not mean every word a
 viewer shows was read: text in images or drawn as paths needs rendering and OCR.  --text
 names each page that draws paths or images but shows no text (`pages_without_text` in
---json, a note on stderr); --require-text makes such a page exit 1.
+--json, a note on stderr); --require-text makes such a page exit 1, unless it draws only
+one image, once, that a page with text draws too (`repeated_images`, a logo on every
+page): the same data, the same dictionary (labels such as /Name and /Metadata aside) and
+everything it refers to, drawn with nothing but saving and restoring, transforms, forms,
+plain colours, marked content, compatibility sections, text state with no text shown,
+clips of one rectangle or convex four-sided path each, and graphics-state settings that
+cannot change an image (line, alpha, overprint and the like), in a self-contained colour
+space (an inline image may name one resource, and must be unfiltered, in a space whose
+components pdf-dump counts, with each key given once), on a page with readable resources
+that do not redefine the device spaces, and with no annotation but links and pop-ups
+that have no appearance.  It compares images, not what a viewer shows: the text page
+need only draw the image, so this is no defence against a PDF built to fool it.
 
 Exit codes:
   0   Success (or validation passed with no errors)
@@ -175,9 +186,11 @@ Exit codes:
       filter or colour space it cannot convert, data that will not decode, or
       an output named for another format than the image is written in, or a
       --text --output file that could not be written, or --require-text and a
-      page that draws paths or images but shows no text.  Nothing is written then.  With --object, an explicit number that is
-      missing exits 1, and so does a range holding no objects at all; gaps
-      within a range are fine.  Whatever was found is still printed
+      page that draws paths or images but shows no text (other than a page that
+      only repeats one image a page with text draws).  Nothing is written then.
+      With --object, an explicit number that is missing exits 1, and so does a
+      range holding no objects at all; gaps within a range are fine.  Whatever
+      was found is still printed
   2   Usage error: bad arguments — clap's own (unknown flag, missing required
       arg) plus semantic ones (--raw with --decode, --raw without --object,
       a malformed --page value, object number 0, an invalid --search
@@ -346,14 +359,17 @@ pub(crate) struct Args {
     #[arg(long, requires = "text", help_heading = "Modifiers")]
     pub layout: bool,
 
-    /// With --text: assert that every selected page carries text.  A page that
-    /// draws paths or images but shows no text (words outlined as paths, or
-    /// scanned), or whose content could not be read to its end, makes the run exit
-    /// 1, naming each such page and what it draws; so does a document that could
-    /// not be decrypted or has no pages.  Nothing is written then, to stdout or to
-    /// --output.  A blank page passes.  Without this flag such pages
-    /// are listed as `pages_without_text` in --json and noted on stderr, and the
-    /// exit code is unchanged
+    /// With --text: assert that every selected page carries text (or only repeats a
+    /// text page's image), or exit 1 naming those that do not; nothing is written then
+    ///
+    /// A page that draws paths or images but shows no text (words outlined as paths,
+    /// or scanned), or whose content could not be read to its end, makes the run exit
+    /// 1, naming each such page and what it draws; so does a document that could not
+    /// be decrypted or has no pages.  Nothing is written then, to stdout or to
+    /// --output.  A blank page passes, and so does a page that draws only one image,
+    /// once, that a page with text draws too (a logo on every page).  Without this
+    /// flag such pages are listed as `pages_without_text` in --json and noted on
+    /// stderr, and the exit code is unchanged
     #[arg(long, requires = "text", help_heading = "Modifiers")]
     pub require_text: bool,
 
