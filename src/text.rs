@@ -68,9 +68,10 @@ pub(crate) struct FontReliabilityRecord {
 
 /// How a font's show-string bytes are turned into Unicode.
 pub(crate) enum FontDecoder {
-    /// Decode each code through a parsed ToUnicode CMap. `width` carries the
-    /// codespace decision: `Fixed(w)` chunks the bytes at a constant width (the
-    /// common Identity case), while `Variable`/`Unknown` extracts codes one at a
+    /// Decode each code through a parsed ToUnicode CMap. `width` carries a CID
+    /// font's codespace decision (a simple font's is always `Fixed(1)`):
+    /// `Fixed(w)` chunks the bytes at a constant width (the common Identity
+    /// case), while `Variable`/`Unknown` extracts codes one at a
     /// time via `ToUnicodeCMap::next_code`, honoring per-range widths.
     ToUnicode {
         cmap: Rc<ToUnicodeCMap>,
@@ -893,12 +894,9 @@ pub(crate) fn build_font_decoder(
     dict: &lopdf::Dictionary,
     font_name: &str,
 ) -> (FontDecoder, FontReliabilityRecord) {
-    let subtype = dict
-        .get(b"Subtype")
-        .ok()
-        .and_then(|v| v.as_name().ok())
-        .map(|n| String::from_utf8_lossy(n).into_owned())
-        .unwrap_or_default();
+    // Resolved through a reference, as `metrics` reads it: `is_cid` picks the
+    // code width below.
+    let subtype = crate::metrics::name_of(doc, dict, b"Subtype").unwrap_or_default();
     let base_font = dict
         .get(b"BaseFont")
         .ok()
@@ -927,15 +925,21 @@ pub(crate) fn build_font_decoder(
         let (bytes, _warn) = crate::stream::decode_stream(doc, stream);
         let cmap = ToUnicodeCMap::parse(&bytes);
         if !cmap.is_empty() {
-            // Carry the codespace decision into the decoder. A `Variable`
-            // codespace is decoded per range (honoring mixed 1-byte/2-byte CJK
-            // widths) by `emit_show_string` via `next_code`; only `Unknown` (no
-            // codespace parsed at all) still collapses to the subtype heuristic
-            // (2 bytes for CID, else 1), since there are no ranges to split by.
-            let width = match cmap.byte_width() {
-                fixed @ CodeWidth::Fixed(_) => fixed,
-                var @ CodeWidth::Variable(..) => var,
-                CodeWidth::Unknown => CodeWidth::Fixed(if is_cid { 2 } else { 1 }),
+            // A simple font's codes are one byte each, whatever its ToUnicode
+            // codespace declares (PDF 32000-1 §9.6; only a Type0 font's
+            // /Encoding defines multi-byte codes, §9.7.6.2).  InDesign writes a
+            // <0000> <FFFF> codespace over one-byte keys (bug-0046).  A CID
+            // font carries the codespace decision into the decoder: a
+            // `Variable` codespace is decoded per range (mixed 1-byte/2-byte
+            // CJK) via `next_code`, and `Unknown` (no codespace parsed) falls
+            // back to 2 bytes.
+            let width = if is_cid {
+                match cmap.byte_width() {
+                    CodeWidth::Unknown => CodeWidth::Fixed(2),
+                    known => known,
+                }
+            } else {
+                CodeWidth::Fixed(1)
             };
             return (
                 FontDecoder::ToUnicode {
@@ -2577,6 +2581,61 @@ mod tests {
         assert_eq!(result.text, "AB");
         assert_eq!(result.total_codes, 2);
         assert_eq!(result.unmapped_codes, 0);
+    }
+
+    #[test]
+    fn type0_with_indirect_subtype_keeps_codespace_width() {
+        // A /Subtype given by reference is still Type0, so the 2-byte codespace
+        // applies; read as a simple font it would split one byte per code.
+        let cmap = b"begincodespacerange <0000> <FFFF> endcodespacerange \
+                     beginbfchar <0041> <0041> <0042> <0042> endbfchar";
+        let (mut doc, p_id) =
+            doc_with_font(type0_font(), Some(cmap), b"BT /F1 12 Tf <00410042> Tj ET");
+        let subtype_id = doc.add_object(Object::Name(b"Type0".to_vec()));
+        for obj in doc.objects.values_mut() {
+            if let Object::Dictionary(d) = obj
+                && d.has(b"ToUnicode")
+            {
+                d.set("Subtype", Object::Reference(subtype_id));
+            }
+        }
+        let result = extract_text_from_page_with_warnings(&doc, p_id);
+        assert_eq!(result.text, "AB");
+        assert_eq!(result.total_codes, 2);
+        assert_eq!(result.unmapped_codes, 0);
+    }
+
+    // --- Simple font, multi-byte ToUnicode codespace (bug-0046) ------------
+
+    /// A simple font whose ToUnicode declares `codespace` still decodes one
+    /// byte per code, whether its keys are written one byte (`<E9>`, the
+    /// InDesign form) or two (`<00E9>`).  The high first byte makes `<E948>`
+    /// a whole code under either a 2-byte or a variable codespace.
+    fn assert_simple_font_reads_one_byte_codes(codespace: &str) {
+        for keys in ["<E9> <00E9> <48> <0048>", "<00E9> <00E9> <0048> <0048>"] {
+            let cmap = format!(
+                "begincodespacerange {codespace} endcodespacerange beginbfchar {keys} endbfchar"
+            );
+            let (doc, p_id) = doc_with_font(
+                winansi_font(),
+                Some(cmap.as_bytes()),
+                b"BT /F1 12 Tf <E948> Tj ET",
+            );
+            let result = extract_text_from_page_with_warnings(&doc, p_id);
+            assert_eq!(result.text, "\u{E9}H", "codespace {codespace}, keys {keys}");
+            assert_eq!(result.total_codes, 2);
+            assert_eq!(result.unmapped_codes, 0);
+        }
+    }
+
+    #[test]
+    fn simple_font_two_byte_codespace_reads_one_byte_codes() {
+        assert_simple_font_reads_one_byte_codes("<0000> <FFFF>");
+    }
+
+    #[test]
+    fn simple_font_variable_codespace_reads_one_byte_codes() {
+        assert_simple_font_reads_one_byte_codes("<00> <80> <8140> <FEFE>");
     }
 
     // --- Form XObject `Do` recursion ---------------------------------------

@@ -5,6 +5,15 @@ All notable changes to `pdf-dump` are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0/).
 
+## [0.39.1] - 2026-11-25
+### Fixed
+- **A simple font whose `/ToUnicode` declares a two-byte or mixed codespace reads one byte per
+  code** (bug-0046).  Adobe InDesign writes `<0000> <FFFF>` over one-byte keys in every simple
+  TrueType font it embeds, so most InDesign PDFs read as U+FFFD under a degraded verdict.  A
+  simple font’s codes are one byte each (PDF 32000-1 §9.6); a CID font still takes its width
+  from the codespace.  A font’s `/Subtype` given by reference is now followed, so a Type0 font
+  written that way keeps its two-byte codes.
+
 ## [0.39.0] - 2026-11-18
 ### Changed
 - **`--require-text` passes a page that draws one image, once, that a page with text also draws**

@@ -146,7 +146,7 @@ fn number_deref(doc: &Document, obj: &Object) -> Option<f64> {
     }
 }
 
-fn name_of(doc: &Document, dict: &lopdf::Dictionary, key: &[u8]) -> Option<String> {
+pub(crate) fn name_of(doc: &Document, dict: &lopdf::Dictionary, key: &[u8]) -> Option<String> {
     let obj = dict.get(key).ok()?;
     let obj = match obj {
         Object::Reference(id) => doc.get_object(*id).ok()?,
