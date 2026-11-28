@@ -130,11 +130,15 @@ graduate (a contract violated is a bug; a contract that should grow is a plan):
 - Trivial: `src/page_info.rs:401` doc-comment says “exit-3 signal” but the path exits 1 (bug-0019
   area).  Usage-error precedence nit: a malformed `--page`/`--search` is detected only after a
   successful load, so `pdf-dump missing.pdf --page 0` exits 1, not 2.
+- `/Subtype` read directly (no reference followed) at two sites in `text.rs`: the CID-without-ToUnicode warning and the form-XObject check.  `build_font_decoder` follows the reference since v0.39.1, so a Type0 font with an indirect `/Subtype` and no ToUnicode is classified Unreliable but gets no CID warning.  Found by the bug-0046 cross-check.
+- A Type0 font with no `/Subtype` at all is read as a simple font (one byte per code, since v0.39.1), as `metrics.rs` already did.  The input breaks a Required entry (PDF 32000-1 Table 121), so leave it unless a real file needs it; the remedy would be to treat a font with `/DescendantFonts` as CID.
+- `CodeWidth::Unknown` can no longer reach `FontDecoder::ToUnicode` (`build_font_decoder` maps it to `Fixed` for every font), yet `for_each_code`’s `Variable | Unknown` arm and the variant’s doc still name it.  Dead-path tidy.
 
 ---
 
 ## Done
 
+- **bug-0046** A simple font whose ToUnicode declares a two-byte or mixed codespace reads one byte per code (InDesign PDFs read as U+FFFD); `/Subtype` is followed through a reference (v0.39.1).
 - **bug-0039** A content-stream syntax error no longer ends extraction silently; `inline_image::decode_content` wraps `Content::decode` at every site, and also blanks the inline image lopdf panics on (v0.31.2).
 - **bug-0013** Form-field `/Kids` cycle stack overflow: visited-set in `collect_field_recursive` (v0.24.1).
 - **bug-0003** Content streams joined without a separator: `read_content_streams` pushes a newline between segments (v0.24.1).
